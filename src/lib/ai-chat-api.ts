@@ -29,6 +29,7 @@ export type ChatSessionMessage = {
     doc_id?: string;
     kb_id?: string;
     kbId?: string;
+    name?: string;
   }[];
   knowledgeBaseIds?: string[];
   useKnowledge?: boolean;
@@ -38,6 +39,16 @@ export type ChatSessionMessage = {
   toolOutput?: unknown;
   toolError?: string | null;
   toolDurationMs?: number | null;
+  images?: {
+    mimeType: string;
+    dataUrl?: string;
+    fileKey?: string;
+  }[];
+  attachments?: {
+    fileName: string;
+    kind?: string;
+    label?: string;
+  }[];
 };
 
 function requireToken(): string {
@@ -132,7 +143,7 @@ export type ToolEventPayload = {
 };
 
 export type StreamHandlers = {
-  onRefs?: (chunks: unknown[], meta?: { agentId?: string; agentName?: string }) => void;
+  onRefs?: (chunks: unknown[], meta?: { agentId?: string; agentName?: string; useKnowledge?: boolean }) => void;
   onDelta?: (text: string) => void;
   onTool?: (payload: ToolEventPayload) => void;
   onDone?: (payload: {
@@ -160,6 +171,8 @@ export async function streamChat(
     agentId?: string | null;
     /** 指定模型配置 id；未传则用快速/深度默认绑定 */
     modelId?: string | null;
+    /** 本轮附图（jpeg/png/webp/gif，Base64，不含 data: 前缀） */
+    images?: { mimeType: string; data: string }[];
   },
   handlers: StreamHandlers,
   signal?: AbortSignal
@@ -169,6 +182,9 @@ export async function streamChat(
   const promptId = (input.promptId || '').trim() || undefined;
   const agentId = (input.agentId || '').trim() || undefined;
   const modelId = (input.modelId || '').trim() || undefined;
+  const images = (input.images || [])
+    .filter((img) => img?.data)
+    .map((img) => ({ mimeType: img.mimeType || 'image/jpeg', data: img.data }));
   const res = await fetch(`${getApiBaseUrl()}/api/v1/ai/chat`, {
     method: 'POST',
     headers: {
@@ -185,6 +201,7 @@ export async function streamChat(
       ...(promptId ? { promptId } : {}),
       ...(agentId ? { agentId } : {}),
       ...(modelId ? { modelId } : {}),
+      ...(images.length ? { images } : {}),
     }),
     signal,
   });
@@ -236,6 +253,7 @@ export async function streamChat(
             handlers.onRefs?.(payload.chunks || [], {
               agentId: payload.agentId,
               agentName: payload.agentName,
+              useKnowledge: payload.useKnowledge,
             });
           } else if (event === 'delta') handlers.onDelta?.(String(payload.text ?? ''));
           else if (event === 'tool') handlers.onTool?.(payload as ToolEventPayload);

@@ -17,6 +17,8 @@ const MIGRATED_VIEWS: Record<string, () => Promise<{ default: Component }>> = {
   '/prompt-manage': () => import('@/views/PromptManageView.vue'),
   '/mcp-manage': () => import('@/views/McpManageView.vue'),
   '/knowledge': () => import('@/views/KnowledgeListView.vue'),
+  '/tenders': () => import('@/views/TendersView.vue'),
+  '/tender-library': () => import('@/views/TenderLibraryView.vue'),
   '/users': () => import('@/views/UsersView.vue'),
   '/logs': () => import('@/views/AuditLogsView.vue'),
   '/settings': () => import('@/views/SettingsView.vue'),
@@ -104,8 +106,8 @@ router.beforeEach(async (to) => {
 })
 
 router.afterEach((to) => {
-  const title = (to.meta.title as string | undefined) || '微泰智能体'
-  document.title = `${title} · 微泰智能体`
+  const title = (to.meta.title as string | undefined) || '优祺智能'
+  document.title = `${title} · 优祺智能`
 
   useMobileMenuStore().close()
 

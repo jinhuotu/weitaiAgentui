@@ -1,14 +1,34 @@
 /**
- * 浏览器端智能读文件：文本直读、DOCX(mammoth)、三维元数据占位。
- * 从知识库详情页抽出，供上传入库复用。
+ * 知识库上传校验：原文件交给后端解析，前端只做类型/大小拦截。
  */
 
-const THREE_D_EXTS = ['fbx', 'obj', 'gltf', 'glb', 'stl']
+export const THREE_D_EXTS = ['fbx', 'obj', 'gltf', 'glb', 'stl']
 
-export type ParsedFile = {
-  content: string
-  /** 是否抽到可用于 RAG 的正文（非元数据占位） */
-  fullText: boolean
+export const KB_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
+export const KB_UPLOAD_EXTS = [
+  'pdf',
+  'docx',
+  'xlsx',
+  'pptx',
+  'txt',
+  'md',
+  'csv',
+  'png',
+  'jpg',
+  'jpeg',
+  'webp',
+  'gif',
+  'bmp',
+] as const
+
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff']
+const CAD_EXTS = ['dwg', 'dxf', 'step', 'stp', 'iges', 'igs']
+
+const ALLOWED_HINT = 'pdf / docx / xlsx / pptx / txt / md / csv / png / jpg / webp'
+
+export function fileExt(name: string): string {
+  return name.split('.').pop()?.toLowerCase() || ''
 }
 
 function fmtSize(n?: number) {
@@ -18,48 +38,24 @@ function fmtSize(n?: number) {
   return `${(n / 1024 / 1024).toFixed(2)} MB`
 }
 
-export { THREE_D_EXTS, fmtSize }
+export { fmtSize }
 
-export async function readFileSmart(file: File): Promise<ParsedFile> {
-  const t = file.name.split('.').pop()?.toLowerCase() || ''
-  const textLike = ['txt', 'md', 'csv', 'json', 'log', 'xml', 'yaml', 'yml']
-  if (textLike.includes(t)) {
-    return { content: await file.text(), fullText: true }
+/** 不通过时返回错误文案；通过返回 null。 */
+export function validateKbUploadFile(file: File): string | null {
+  if (file.size <= 0) return '上传文件为空'
+  if (file.size > KB_UPLOAD_MAX_BYTES) {
+    return `文件超过大小上限（${fmtSize(KB_UPLOAD_MAX_BYTES)}）`
   }
-
-  // Word .docx：浏览器端用 mammoth 抽正文，再交给后端分块向量化
-  if (t === 'docx') {
-    const mammoth = await import('mammoth')
-    const buffer = await file.arrayBuffer()
-    const result = await mammoth.extractRawText({ arrayBuffer: buffer })
-    const text = (result.value || '').replace(/\r\n/g, '\n').trim()
-    if (text.length < 4) {
-      throw new Error('DOCX 未解析出有效正文，请改用「文本粘贴」或检查文件是否损坏')
-    }
-    return { content: text, fullText: true }
+  const t = fileExt(file.name)
+  if ((KB_UPLOAD_EXTS as readonly string[]).includes(t)) return null
+  if (t === 'tif' || t === 'tiff') {
+    return `暂不支持 .${t}，请先转为 png / jpg。当前支持：${ALLOWED_HINT}`
   }
-
-  if (t === 'doc') {
-    throw new Error(
-      '旧版 .doc 暂不支持浏览器解析，请另存为 .docx 后上传，或使用「文本粘贴」',
-    )
+  if (t === 'doc') return '旧版 .doc 请另存为 .docx 后上传'
+  if (t === 'xls') return '旧版 .xls 请另存为 .xlsx 后上传'
+  if (t === 'ppt') return '旧版 .ppt 请另存为 .pptx 后上传'
+  if (THREE_D_EXTS.includes(t) || CAD_EXTS.includes(t) || IMAGE_EXTS.includes(t)) {
+    return `暂不支持 .${t}。当前支持：${ALLOWED_HINT}`
   }
-
-  // 三维图纸：仅入库元数据（预览用），不参与正文 RAG
-  if (THREE_D_EXTS.includes(t)) {
-    return {
-      content: [
-        `（三维图纸元数据入库，不参与正文检索。）`,
-        `文件名：${file.name}`,
-        `大小：${fmtSize(file.size)}`,
-        `格式：${t.toUpperCase()}`,
-      ].join('\n'),
-      fullText: false,
-    }
-  }
-
-  // PDF / Excel / 图片 / CAD 等：避免静默写入假正文，明确提示
-  throw new Error(
-    `${t.toUpperCase() || '该'} 格式暂无法在浏览器全文解析。请先转为 .docx / .txt / .md，或使用「文本粘贴」录入正文`,
-  )
+  return `不支持的文件类型${t ? ` .${t}` : ''}。当前支持：${ALLOWED_HINT}`
 }

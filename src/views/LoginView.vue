@@ -28,7 +28,7 @@ async function onSubmit() {
           ? '用户名或密码错误'
           : err.message
     } else if (err instanceof TypeError) {
-      error.value = '无法连接后端，请确认 weitaiAgent API 已启动（默认 :8100）'
+      error.value = '无法连接后端，请确认优祺智能 API 已启动（默认 :8100）'
     } else {
       error.value = '登录失败，请稍后重试'
     }
@@ -81,15 +81,11 @@ async function onSubmit() {
             >
               <Bot class="size-6" />
             </div>
-            <h1 class="text-3xl font-semibold tracking-wide">微泰智能体</h1>
+            <h1 class="text-3xl font-semibold tracking-wide">优祺智能</h1>
             <p class="mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground">
               智能体交互系统 · 登录后进入问答、知识库、MCP 工具与工作流。
             </p>
           </div>
-          <!-- <div class="space-y-2 text-xs text-muted-foreground">
-            <div>后端：FastAPI · JWT Access / Refresh</div>
-            <div>默认管理员：中机六院管理员</div>
-          </div> -->
         </section>
 
         <section class="p-6 sm:p-8 lg:p-10">
@@ -99,7 +95,7 @@ async function onSubmit() {
             >
               <Bot class="size-5" />
             </div>
-            <h1 class="text-xl font-semibold">微泰智能体</h1>
+            <h1 class="text-xl font-semibold">优祺智能</h1>
           </div>
 
           <h2 class="text-lg font-medium">账号登录</h2>
@@ -156,12 +152,6 @@ async function onSubmit() {
             </button>
           </form>
 
-          <!-- <p class="mt-5 text-[11px] leading-relaxed text-muted-foreground">
-            开发默认账号
-            <span class="text-foreground/80">admin</span> /
-            <span class="text-foreground/80"> Admin@123456</span>
-            ，显示名：中机六院管理员
-          </p> -->
         </section>
       </div>
     </div>

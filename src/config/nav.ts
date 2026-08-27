@@ -11,6 +11,8 @@ import {
   Boxes,
   Plug,
   BookOpenText,
+  FolderOpen,
+  FileText,
 } from 'lucide-vue-next'
 
 export type NavItem = {
@@ -101,6 +103,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: '/ai-chat', label: 'AI 智能问答', icon: BotMessageSquare },
       { href: '/knowledge', label: '知识库', icon: LibraryBig },
+      { href: '/tenders', label: '投标文件', icon: FileText },
+      { href: '/tender-library', label: '投标资料库', icon: FolderOpen },
       { href: '/scene-agents', label: '场景智能体', icon: Sparkles, adminOnly: true },
       { href: '/workflows', label: '工作流', icon: Workflow, adminOnly: true },
       { href: '/model-manage', label: '模型管理', icon: Boxes, adminOnly: true },

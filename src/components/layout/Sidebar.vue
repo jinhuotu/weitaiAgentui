@@ -8,7 +8,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useMobileMenuStore } from '@/stores/mobile-menu'
 import { useTabsStore } from '@/stores/tabs'
 
-const STORAGE_KEY = 'weitai:sidebar:expanded'
+const STORAGE_KEY = 'youqi:sidebar:expanded'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -137,9 +137,9 @@ function toggleMobile(title: string) {
         <Bot class="size-4" />
       </div>
       <div class="leading-tight">
-        <div class="text-[14px] font-semibold tracking-wide">微泰智能体</div>
+        <div class="text-[14px] font-semibold tracking-wide">优祺智能</div>
         <div class="font-mono text-[10px] tracking-[0.18em] text-muted-foreground">
-          AGENT · v0.1
+          YOUQI · v0.1
         </div>
       </div>
     </div>
@@ -316,9 +316,9 @@ function toggleMobile(title: string) {
         <Bot class="size-4" />
       </div>
       <div class="flex-1 leading-tight">
-        <div class="text-[14px] font-semibold tracking-wide">微泰智能体</div>
+        <div class="text-[14px] font-semibold tracking-wide">优祺智能</div>
         <div class="font-mono text-[10px] tracking-[0.18em] text-muted-foreground">
-          AGENT · v0.1
+          YOUQI · v0.1
         </div>
       </div>
       <button

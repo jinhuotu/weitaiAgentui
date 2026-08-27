@@ -24,6 +24,7 @@ import {
   Wrench,
   BookOpenText,
   Bot,
+  ImagePlus,
 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import {
@@ -50,11 +51,18 @@ import {
   type PromptOption,
 } from '@/lib/prompts-api'
 import ChatMarkdown from '@/components/ai/ChatMarkdown.vue'
+import ChatImageGallery from '@/components/ai/ChatImageGallery.vue'
+import LayoutFileDownloads from '@/components/ai/LayoutFileDownloads.vue'
 import {
   listModelOptions,
   modelTypeLabel,
   type ModelOptionItem,
 } from '@/lib/models-api'
+import {
+  listWorkflowOptions,
+  runWorkflowTrial,
+  type WorkflowOption,
+} from '@/lib/workflows-api'
 
 type Mode = ChatMode
 
@@ -64,6 +72,7 @@ interface RefChunk {
   doc_id?: string
   kb_id?: string
   kbId?: string
+  name?: string
 }
 
 interface ToolCallUi {
@@ -159,11 +168,133 @@ function shortToolName(name: string): string {
   return name.length > 36 ? `…${name.slice(-32)}` : name
 }
 
+function toolOutputText(m: ChatSessionMessage): string {
+  const out = m.toolOutput
+  if (out && typeof out === 'object' && !Array.isArray(out) && 'text' in out) {
+    const t = (out as { text?: unknown }).text
+    if (t != null) return String(t)
+  }
+  return m.content || ''
+}
+
+function historyToolToUi(m: ChatSessionMessage): ToolCallUi {
+  const content = toolOutputText(m)
+  const err = m.toolError || undefined
+  return {
+    id: m.id,
+    toolName: m.toolName || 'tool',
+    phase: 'result',
+    arguments:
+      m.toolInput && typeof m.toolInput === 'object' && !Array.isArray(m.toolInput)
+        ? (m.toolInput as Record<string, unknown>)
+        : undefined,
+    content,
+    error: err,
+    durationMs: m.toolDurationMs ?? undefined,
+    table: err ? null : tryParseToolTable(content),
+  }
+}
+
+function restoreSessionMessages(raw: ChatSessionMessage[]): Msg[] {
+  const out: Msg[] = []
+  let pendingTools: ToolCallUi[] = []
+
+  const toMsg = (m: ChatSessionMessage): Msg => {
+    const kbIds = (m.knowledgeBaseIds || []).filter(Boolean)
+    const names = kbList.value.filter((b) => kbIds.includes(b.id)).map((b) => b.name)
+    return {
+      id: m.id,
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+      images: (m.images || [])
+        .filter((img) => Boolean(img.dataUrl))
+        .map((img) => ({
+          mimeType: img.mimeType || 'image/jpeg',
+          dataUrl: img.dataUrl as string,
+        })),
+      attachments: (m.attachments || [])
+        .filter((a) => Boolean(a?.fileName))
+        .map((a) => ({
+          fileName: a.fileName,
+          kind: a.kind,
+          label: a.label,
+        })),
+      refs: (m.refs as RefChunk[]) || [],
+      refsReady: true,
+      mode: (m.mode as Mode) || undefined,
+      knowledgeBaseIds: kbIds,
+      knowledgeBaseNames: names,
+      useKnowledge:
+        Boolean(m.useKnowledge) || kbIds.length > 0 || (m.refs?.length || 0) > 0,
+    }
+  }
+
+  const attachPending = (msg: Msg) => {
+    if (pendingTools.length) {
+      msg.toolCalls = pendingTools
+      pendingTools = []
+    }
+    return msg
+  }
+
+  for (const m of raw) {
+    if (m.role === 'tool' || (m.toolName && m.role !== 'assistant' && m.role !== 'user')) {
+      pendingTools.push(historyToolToUi(m))
+      continue
+    }
+    if (m.role !== 'user' && m.role !== 'assistant') continue
+    const mapped = toMsg(m)
+    out.push(m.role === 'assistant' ? attachPending(mapped) : mapped)
+  }
+  if (pendingTools.length) {
+    const lastAsst = [...out].reverse().find((x) => x.role === 'assistant')
+    if (lastAsst) {
+      lastAsst.toolCalls = [...(lastAsst.toolCalls || []), ...pendingTools]
+    } else {
+      out.push({
+        id: genId(),
+        role: 'assistant',
+        content: '',
+        refs: [],
+        refsReady: true,
+        toolCalls: pendingTools,
+      })
+    }
+  }
+  return out
+}
+
+const MAX_CHAT_IMAGES = 4
+const IMAGE_ONLY_CAPTION = '请根据图片内容作答。'
+const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,image/jpg'
+const WF_NODE_LABEL: Record<string, string> = {
+  start: '开始',
+  end: '结束',
+  knowledge: '知识检索',
+  llm: 'LLM',
+  agent: '智能体',
+  mcp: 'MCP',
+  condition: '条件',
+  vision: '读图',
+  image_out: '出图',
+  layout_out: '布置出图',
+}
+
+type PendingImage = {
+  id: string
+  mimeType: string
+  data: string
+  preview: string
+}
+
 interface Msg {
   id: string
   role: 'user' | 'assistant'
   content: string
+  images?: { mimeType: string; dataUrl: string }[]
+  attachments?: { fileName: string; kind?: string; label?: string }[]
   refs?: RefChunk[]
+  refsReady?: boolean
   related?: string[]
   loading?: boolean
   mode?: Mode
@@ -208,6 +339,59 @@ function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
+function userDisplayText(content: string, hasImages: boolean) {
+  const text = (content || '').trim()
+  if (hasImages && (!text || text === IMAGE_ONLY_CAPTION)) return ''
+  return content
+}
+
+function loadImageElement(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      resolve(img)
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('图片无法读取'))
+    }
+    img.src = url
+  })
+}
+
+async function compressImageFile(file: File): Promise<PendingImage> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('仅支持 jpeg / png / webp / gif')
+  }
+  const img = await loadImageElement(file)
+  const maxEdge = 1280
+  const scale = Math.min(1, maxEdge / Math.max(img.width, img.height, 1))
+  const w = Math.max(1, Math.round(img.width * scale))
+  const h = Math.max(1, Math.round(img.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('无法压缩图片')
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, w, h)
+  ctx.drawImage(img, 0, 0, w, h)
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.82)
+  const data = dataUrl.split(',', 2)[1] || ''
+  if (!data) throw new Error('图片压缩失败')
+  return { id: genId(), mimeType: 'image/jpeg', data, preview: dataUrl }
+}
+
+function imagePayload(img: PendingImage): { mimeType: string; data: string } {
+  const fromField = (img.data || '').trim()
+  const fromPreview = img.preview.includes(',') ? img.preview.split(',', 2)[1] : ''
+  const data = fromField || fromPreview
+  if (!data) throw new Error('图片数据为空，请重新选择图片')
+  return { mimeType: img.mimeType || 'image/jpeg', data }
+}
+
 function fmtAgo(ts: number) {
   if (!ts) return ''
   const diff = Date.now() - ts
@@ -228,9 +412,13 @@ const selectedPromptId = ref<string | null>(null)
 const promptPickerOpen = ref(false)
 const llmOptions = ref<ModelOptionItem[]>([])
 const selectedModelId = ref('')
+const workflowOptions = ref<WorkflowOption[]>([])
+const selectedWorkflowId = ref('')
 const messages = ref<Msg[]>([])
 const input = ref('')
 const sending = ref(false)
+const pendingImages = ref<PendingImage[]>([])
+const imageInputRef = ref<HTMLInputElement | null>(null)
 const sessions = ref<ChatSessionItem[]>([])
 const activeSessionId = ref<string | null>(null)
 const sessionsLoading = ref(true)
@@ -266,6 +454,20 @@ const usePrompt = computed(() => Boolean(selectedPromptId.value))
 const agentBound = computed(() => Boolean(activeAgent.value))
 const selectedModel = computed(
   () => llmOptions.value.find((m) => m.id === selectedModelId.value) || null,
+)
+const selectedWorkflow = computed(
+  () => workflowOptions.value.find((w) => w.id === selectedWorkflowId.value) || null,
+)
+const workflowBound = computed(() => Boolean(selectedWorkflowId.value))
+const canSend = computed(
+  () => Boolean(input.value.trim() || pendingImages.value.length) && !sending.value,
+)
+const visionModelHint = computed(
+  () =>
+    !workflowBound.value &&
+    pendingImages.value.length > 0 &&
+    Boolean(selectedModel.value) &&
+    selectedModel.value?.modelType !== 'multimodal_vision',
 )
 
 function pickDefaultModel(preferMode: Mode = mode.value) {
@@ -343,6 +545,12 @@ function clearActiveAgent(opts?: { keepQuery?: boolean }) {
   ensureDefaultPrompt()
 }
 
+function onWorkflowPicked() {
+  if (selectedWorkflowId.value && activeAgent.value) {
+    clearActiveAgent()
+  }
+}
+
 async function applyAgentById(agentId: string) {
   const id = agentId.trim()
   if (!id) return
@@ -352,10 +560,12 @@ async function applyAgentById(agentId: string) {
   try {
     const agent = await getAgent(id)
     activeAgent.value = { id: agent.id, name: agent.name }
+    selectedWorkflowId.value = ''
     mode.value = agent.mode === 'deep' ? 'deep' : 'fast'
     selectedPromptId.value = agent.promptId || null
     selectedKbIds.value = [...(agent.knowledgeBaseIds || [])]
     messages.value = []
+    pendingImages.value = []
     const item = await createChatSession({ mode: mode.value })
     sessions.value = [item, ...sessions.value.filter((s) => s.id !== item.id)]
     activeSessionId.value = item.id
@@ -378,7 +588,7 @@ onMounted(() => {
   void (async () => {
     await loadSessions()
     try {
-      kbList.value = await listKnowledgeBases()
+      kbList.value = await listKnowledgeBases({ access: 'use' })
     } catch {
       // 未登录或接口失败时保持空列表
     }
@@ -402,6 +612,11 @@ onMounted(() => {
         type: 'err',
         msg: e instanceof Error ? e.message : '加载模型列表失败',
       }
+    }
+    try {
+      workflowOptions.value = await listWorkflowOptions()
+    } catch {
+      workflowOptions.value = []
     }
     const qAgent =
       typeof route.query.agentId === 'string' ? route.query.agentId.trim() : ''
@@ -445,24 +660,9 @@ async function openSession(sessionId: string) {
     const item = await getChatSession(sessionId)
     activeSessionId.value = item.id
     mode.value = (item.mode as Mode) === 'deep' ? 'deep' : 'fast'
-    const restoredMsgs = (item.messages || [])
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m: ChatSessionMessage) => {
-        const kbIds = (m.knowledgeBaseIds || []).filter(Boolean)
-        const names = kbList.value.filter((b) => kbIds.includes(b.id)).map((b) => b.name)
-        return {
-          id: m.id,
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-          refs: (m.refs as RefChunk[]) || [],
-          mode: (m.mode as Mode) || undefined,
-          knowledgeBaseIds: kbIds,
-          knowledgeBaseNames: names,
-          useKnowledge:
-            Boolean(m.useKnowledge) || kbIds.length > 0 || (m.refs?.length || 0) > 0,
-        }
-      })
+    const restoredMsgs = restoreSessionMessages(item.messages || [])
     messages.value = restoredMsgs
+    pendingImages.value = []
     const fromSession = (item.knowledgeBaseIds || []).filter(Boolean)
     const fromMsgs = kbIdsFromMessages(item.messages || [])
     selectedKbIds.value = fromSession.length > 0 ? fromSession : fromMsgs
@@ -482,6 +682,7 @@ async function handleCreateSession() {
     sessions.value = [item, ...sessions.value]
     activeSessionId.value = item.id
     messages.value = []
+    pendingImages.value = []
     ensureDefaultPrompt()
     toast.value = { type: 'ok', msg: '已新建会话' }
   } catch (e) {
@@ -547,6 +748,7 @@ async function confirmDelete() {
     if (activeSessionId.value === pendingDelete.value.id) {
       activeSessionId.value = null
       messages.value = []
+      pendingImages.value = []
     }
     pendingDelete.value = null
     toast.value = { type: 'ok', msg: '会话已删除' }
@@ -557,10 +759,55 @@ async function confirmDelete() {
   }
 }
 
+async function addImageFiles(files: File[] | FileList) {
+  const remain = MAX_CHAT_IMAGES - pendingImages.value.length
+  if (remain <= 0) {
+    toast.value = { type: 'err', msg: `最多上传 ${MAX_CHAT_IMAGES} 张图片` }
+    return
+  }
+  const picked = [...files].slice(0, remain)
+  if ([...files].length > remain) {
+    toast.value = { type: 'err', msg: `最多上传 ${MAX_CHAT_IMAGES} 张图片，已忽略多余文件` }
+  }
+  try {
+    const next: PendingImage[] = []
+    for (const file of picked) {
+      next.push(await compressImageFile(file))
+    }
+    pendingImages.value = [...pendingImages.value, ...next]
+  } catch (e) {
+    toast.value = { type: 'err', msg: e instanceof Error ? e.message : '图片处理失败' }
+  }
+}
+
+function onPickImages(e: Event) {
+  const el = e.target as HTMLInputElement
+  const files = el.files
+  if (files && files.length) void addImageFiles(files)
+  el.value = ''
+}
+
+function openImagePicker() {
+  imageInputRef.value?.click()
+}
+
+function removePendingImage(id: string) {
+  pendingImages.value = pendingImages.value.filter((p) => p.id !== id)
+}
+
+function onComposerPaste(e: ClipboardEvent) {
+  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'))
+  if (files.length === 0) return
+  e.preventDefault()
+  void addImageFiles(files)
+}
+
 async function sendQuestion(text: string) {
   const q = text.trim()
-  if (!q || sending.value) return
+  const snapshot = pendingImages.value.map((p) => ({ ...p }))
+  if ((!q && snapshot.length === 0) || sending.value) return
   input.value = ''
+  pendingImages.value = []
   sending.value = true
 
   let sessionId: string
@@ -568,6 +815,8 @@ async function sendQuestion(text: string) {
     sessionId = await ensureSession()
   } catch (e) {
     sending.value = false
+    input.value = q
+    pendingImages.value = snapshot
     toast.value = {
       type: 'err',
       msg: e instanceof Error ? e.message : '无法创建会话',
@@ -582,7 +831,12 @@ async function sendQuestion(text: string) {
     // ignore
   }
 
-  const userMsg: Msg = { id: genId(), role: 'user', content: q }
+  const userMsg: Msg = {
+    id: genId(),
+    role: 'user',
+    content: q,
+    images: snapshot.map((p) => ({ mimeType: p.mimeType, dataUrl: p.preview })),
+  }
   const assistantId = genId()
   const assistantMsg: Msg = {
     id: assistantId,
@@ -591,8 +845,8 @@ async function sendQuestion(text: string) {
     refs: [],
     loading: true,
     mode: mode.value,
-    thinking: mode.value === 'deep',
-    useKnowledge: useKnowledge.value,
+    thinking: !selectedWorkflowId.value && mode.value === 'deep',
+    useKnowledge: selectedWorkflowId.value ? false : useKnowledge.value,
     knowledgeBaseIds: [...selectedKbIds.value],
     knowledgeBaseNames: [...selectedKbNames.value],
     toolCalls: [],
@@ -610,94 +864,226 @@ async function sendQuestion(text: string) {
     )
   }
 
+  const applyTool = (payload: {
+    phase?: string
+    toolCallId?: string
+    toolName?: string
+    name?: string
+    arguments?: Record<string, unknown>
+    content?: string
+    error?: string | null
+    durationMs?: number
+  }) => {
+    const key = payload.toolCallId || payload.toolName || payload.name || genId()
+    const name = payload.toolName || payload.name || 'tool'
+    const idx = toolCalls.findIndex((t) => t.id === key)
+    if (payload.phase === 'call') {
+      const row: ToolCallUi = {
+        id: key,
+        toolName: name,
+        phase: 'call',
+        arguments: payload.arguments,
+      }
+      if (idx >= 0) toolCalls[idx] = row
+      else toolCalls.push(row)
+    } else {
+      const content = payload.content
+      const row: ToolCallUi = {
+        id: key,
+        toolName: name,
+        phase: 'result',
+        arguments: idx >= 0 ? toolCalls[idx].arguments : payload.arguments,
+        content,
+        error: payload.error,
+        durationMs: payload.durationMs,
+        table: payload.error ? null : tryParseToolTable(content),
+      }
+      if (idx >= 0) toolCalls[idx] = row
+      else toolCalls.push(row)
+    }
+    patchAssistant({
+      toolCalls: [...toolCalls],
+      thinking: false,
+      loading: true,
+    })
+  }
+
+  const applyDoneSession = (payload: { title?: string }) => {
+    sessions.value = sessions.value.map((s) =>
+      s.id === sessionId
+        ? {
+            ...s,
+            title: payload.title || s.title,
+            updatedAt: Date.now(),
+            lastMessageAt: Date.now(),
+            messageCount: (s.messageCount || 0) + 2,
+          }
+        : s,
+    )
+  }
+
   try {
-    await streamChat(
-      {
-        content: q,
-        mode: mode.value,
-        sessionId,
-        knowledgeBaseIds: selectedKbIds.value,
-        promptId: selectedPromptId.value,
-        agentId: activeAgent.value?.id || null,
-        modelId: selectedModelId.value || null,
-      },
-      {
-        onRefs: (chunks) => {
-          patchAssistant({ refs: chunks as RefChunk[] })
+    if (selectedWorkflowId.value) {
+      await runWorkflowTrial(
+        selectedWorkflowId.value,
+        {
+          input: {
+            query: q,
+            images: snapshot.map((p) => imagePayload(p)),
+            modelId: selectedModelId.value || undefined,
+          },
+          useDraft: false,
+          sessionId,
+          trigger: 'chat',
         },
-        onTool: (payload) => {
-          const key = payload.toolCallId || payload.toolName || payload.name || genId()
-          const name = payload.toolName || payload.name || 'tool'
-          const idx = toolCalls.findIndex((t) => t.id === key)
-          if (payload.phase === 'call') {
-            const row: ToolCallUi = {
-              id: key,
-              toolName: name,
-              phase: 'call',
-              arguments: payload.arguments,
-            }
+        {
+          onStepStart: (p) => {
+            const id = `wf-${String(p.nodeId || genId())}`
+            const name = WF_NODE_LABEL[String(p.nodeType || '')] || String(p.nodeType || '节点')
+            const idx = toolCalls.findIndex((t) => t.id === id)
+            const row: ToolCallUi = { id, toolName: name, phase: 'call' }
             if (idx >= 0) toolCalls[idx] = row
             else toolCalls.push(row)
-          } else {
-            const content = payload.content
+            patchAssistant({ toolCalls: [...toolCalls], thinking: false, loading: true })
+          },
+          onStepEnd: (p) => {
+            const id = `wf-${String(p.nodeId || '')}`
+            const idx = toolCalls.findIndex((t) => t.id === id)
+            const name = WF_NODE_LABEL[String(p.nodeType || '')] || String(p.nodeType || '节点')
+            const failed = String(p.status || '') === 'failed'
+            const detailObj = p.detail && typeof p.detail === 'object' ? p.detail : null
+            const err =
+              failed && detailObj
+                ? String((detailObj as { error?: string }).error || '节点失败')
+                : failed
+                  ? '节点失败'
+                  : null
+            const content =
+              !failed && detailObj ? JSON.stringify(detailObj).slice(0, 500) : undefined
             const row: ToolCallUi = {
-              id: key,
+              id: idx >= 0 ? toolCalls[idx].id : id || genId(),
               toolName: name,
               phase: 'result',
-              arguments: idx >= 0 ? toolCalls[idx].arguments : payload.arguments,
               content,
-              error: payload.error,
-              durationMs: payload.durationMs,
-              table: payload.error ? null : tryParseToolTable(content),
+              error: err,
             }
-            if (idx >= 0) toolCalls[idx] = row
+            if (idx >= 0) toolCalls[idx] = { ...toolCalls[idx], ...row }
             else toolCalls.push(row)
-          }
-          patchAssistant({
-            toolCalls: [...toolCalls],
-            thinking: false,
-            loading: true,
-          })
+            patchAssistant({ toolCalls: [...toolCalls], thinking: false, loading: true })
+          },
+          onTool: (p) => {
+            applyTool({
+              phase: String(p.phase || 'result') === 'call' ? 'call' : 'result',
+              toolCallId: p.toolCallId as string | undefined,
+              toolName: (p.toolName || p.name) as string | undefined,
+              name: p.name as string | undefined,
+              arguments: p.arguments as Record<string, unknown> | undefined,
+              content: p.content as string | undefined,
+              error: (p.error as string | null) ?? null,
+              durationMs: p.durationMs as number | undefined,
+            })
+          },
+          onDelta: (textDelta) => {
+            if (!textDelta) return
+            accumulated += textDelta
+            patchAssistant({ content: accumulated, thinking: false, loading: true })
+          },
+          onError: (msg) => {
+            accumulated += `\n\n⚠️ 调用失败：${msg}`
+            patchAssistant({ content: accumulated, thinking: false })
+          },
+          onDone: (payload) => {
+            const out = payload.output
+            if (!accumulated.trim()) {
+              if (typeof out === 'string') accumulated = out
+              else if (out != null) accumulated = JSON.stringify(out)
+            }
+            const imgs = Array.isArray(payload.outputImages)
+              ? (payload.outputImages as { mimeType?: string; dataUrl?: string }[])
+                  .filter((x) => Boolean(x?.dataUrl))
+                  .map((x) => ({
+                    mimeType: x.mimeType || 'image/jpeg',
+                    dataUrl: x.dataUrl as string,
+                  }))
+              : []
+            const atts = Array.isArray(payload.layoutFiles)
+              ? (payload.layoutFiles as { fileName?: string; kind?: string; label?: string }[])
+                  .filter((x) => Boolean(x?.fileName))
+                  .map((x) => ({
+                    fileName: x.fileName as string,
+                    kind: x.kind,
+                    label: x.label,
+                  }))
+              : []
+            patchAssistant({
+              content: accumulated,
+              images: imgs.length ? imgs : undefined,
+              attachments: atts.length ? atts : undefined,
+              thinking: false,
+              loading: true,
+            })
+            applyDoneSession({ title: payload.title as string | undefined })
+          },
         },
-        onDelta: (textDelta) => {
-          if (!textDelta) return
-          accumulated += textDelta
-          patchAssistant({ content: accumulated, thinking: false, loading: true })
+        controller.signal,
+      )
+    } else {
+      await streamChat(
+        {
+          content: q,
+          mode: mode.value,
+          sessionId,
+          knowledgeBaseIds: selectedKbIds.value,
+          promptId: selectedPromptId.value,
+          agentId: activeAgent.value?.id || null,
+          modelId: selectedModelId.value || null,
+          images: snapshot.map((p) => imagePayload(p)),
         },
-        onError: (msg) => {
-          accumulated += `\n\n⚠️ 调用失败：${msg}`
-          patchAssistant({ content: accumulated, thinking: false })
+        {
+          onRefs: (chunks, meta) => {
+            patchAssistant({
+              refs: chunks as RefChunk[],
+              refsReady: true,
+              ...(typeof meta?.useKnowledge === 'boolean'
+                ? { useKnowledge: meta.useKnowledge }
+                : {}),
+            })
+          },
+          onTool: (payload) => applyTool(payload),
+          onDelta: (textDelta) => {
+            if (!textDelta) return
+            accumulated += textDelta
+            patchAssistant({ content: accumulated, thinking: false, loading: true })
+          },
+          onError: (msg) => {
+            accumulated += `\n\n⚠️ 调用失败：${msg}`
+            patchAssistant({ content: accumulated, thinking: false })
+          },
+          onDone: (payload) => applyDoneSession(payload),
         },
-        onDone: (payload) => {
-          sessions.value = sessions.value.map((s) =>
-            s.id === sessionId
-              ? {
-                  ...s,
-                  title: payload.title || s.title,
-                  updatedAt: Date.now(),
-                  lastMessageAt: Date.now(),
-                  messageCount: (s.messageCount || 0) + 2,
-                }
-              : s,
-          )
-        },
-      },
-      controller.signal,
-    )
+        controller.signal,
+      )
+    }
 
     if (!accumulated.trim()) {
       try {
         const item = await getChatSession(sessionId)
         const lastAssistant = [...(item.messages || [])]
           .reverse()
-          .find((m) => m.role === 'assistant' && (m.content || '').trim())
-        if (lastAssistant?.content) {
-          accumulated = lastAssistant.content
+          .find((m) => m.role === 'assistant')
+        if (lastAssistant?.content || (lastAssistant?.images && lastAssistant.images.length)) {
+          if (lastAssistant.content) accumulated = lastAssistant.content
           patchAssistant({
-            content: accumulated,
+            content: accumulated || lastAssistant.content || '',
             thinking: false,
             loading: false,
             refs: (lastAssistant.refs as RefChunk[]) || undefined,
+            images: (lastAssistant.images || [])
+              .filter((img) => Boolean(img.dataUrl))
+              .map((img) => ({
+                mimeType: img.mimeType || 'image/jpeg',
+                dataUrl: img.dataUrl as string,
+              })),
           })
         }
       } catch {
@@ -707,8 +1093,11 @@ async function sendQuestion(text: string) {
 
     patchAssistant({ loading: false, thinking: false })
 
-    if (accumulated.trim().length > 0) {
-      fetchRelatedQuestions({ question: q, answer: accumulated })
+    if (accumulated.trim().length > 0 || (messages.value.find((m) => m.id === assistantId)?.images?.length)) {
+      fetchRelatedQuestions({
+        question: q || IMAGE_ONLY_CAPTION,
+        answer: accumulated,
+      })
         .then((questions) => {
           patchAssistant({ related: questions })
         })
@@ -760,6 +1149,7 @@ async function stop() {
 function resetCurrent() {
   if (sending.value) return
   messages.value = []
+  pendingImages.value = []
 }
 </script>
 
@@ -806,10 +1196,36 @@ function resetCurrent() {
         </div>
 
         <select
+          v-model="selectedWorkflowId"
+          class="h-[34px] max-w-[220px] rounded-md border border-hairline bg-bg-base/60 px-2 text-[12px] text-text-primary disabled:opacity-40"
+          :disabled="sending"
+          :title="
+            workflowOptions.length
+              ? '选择已发布工作流后，本轮走画布节点（读图 / 布置出图 / 工具循环）'
+              : '暂无已发布工作流。请到左侧「工作流」新建并点击发布，刷新本页后会出现在此列表。'
+          "
+          @change="onWorkflowPicked"
+        >
+          <option value="">不走工作流</option>
+          <option v-if="workflowOptions.length === 0" disabled value="__empty__">
+            暂无已发布工作流（请到「工作流」发布）
+          </option>
+          <option v-for="w in workflowOptions" :key="w.id" :value="w.id">
+            {{ w.name }}
+          </option>
+        </select>
+
+        <select
           v-model="selectedModelId"
           class="h-[34px] max-w-[220px] rounded-md border border-hairline bg-bg-base/60 px-2 text-[12px] text-text-primary disabled:opacity-40"
           :disabled="sending || llmOptions.length === 0"
-          :title="llmOptions.length ? '本轮使用的对话模型' : '请先在模型管理中启用对话模型'"
+          :title="
+            workflowBound
+              ? '工作流节点未指定模型时，使用此处选择的对话模型（不要选文生图）'
+              : llmOptions.length
+                ? '本轮使用的对话模型'
+                : '请先在模型管理中启用对话模型'
+          "
         >
           <option v-if="llmOptions.length === 0" value="">暂无可用模型</option>
           <option v-for="m in llmOptions" :key="m.id" :value="m.id">
@@ -977,6 +1393,28 @@ function resetCurrent() {
     </div>
 
     <div
+      v-if="selectedWorkflow"
+      class="shrink-0 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-patina/35 bg-patina/10 px-3 py-2"
+    >
+      <div class="flex items-center gap-2 min-w-0 text-[12px] text-patina">
+        <Sparkles class="size-3.5 shrink-0" />
+        <span class="truncate">
+          本轮走工作流：<strong class="font-medium">{{ selectedWorkflow.name }}</strong>
+          <span class="text-text-muted ml-1.5">按已发布画布执行（条件 / 读图 / 布置出图 / 智能体）</span>
+        </span>
+      </div>
+      <button
+        type="button"
+        class="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11px] border border-hairline text-text-secondary hover:text-text-primary hover:bg-bg-base/50"
+        :disabled="sending"
+        @click="selectedWorkflowId = ''"
+      >
+        <X class="size-3" />
+        退出工作流
+      </button>
+    </div>
+
+    <div
       v-if="agentLoading || activeAgent"
       class="shrink-0 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-molybdenum/35 bg-molybdenum/10 px-3 py-2"
     >
@@ -1127,7 +1565,7 @@ function resetCurrent() {
             >
               <BotMessageSquare class="size-7 text-white" :stroke-width="2.4" />
             </div>
-            <div class="text-[15px] font-semibold mb-1">微泰智能助手</div>
+            <div class="text-[15px] font-semibold mb-1">优祺智能助手</div>
             <div class="text-[12px] text-text-secondary max-w-md mb-5 leading-relaxed">
               <template v-if="usePrompt">
                 已选提示词「{{ selectedPromptName }}」。
@@ -1160,9 +1598,24 @@ function resetCurrent() {
             <!-- User -->
             <div v-if="m.role === 'user'" class="flex justify-end gap-2.5">
               <div
-                class="max-w-[85%] bg-molybdenum/10 border border-molybdenum/25 px-3.5 py-2.5 rounded-lg rounded-tr-sm text-[13px] leading-relaxed text-text-primary whitespace-pre-wrap"
+                class="max-w-[85%] bg-molybdenum/10 border border-molybdenum/25 px-3.5 py-2.5 rounded-lg rounded-tr-sm text-[13px] leading-relaxed text-text-primary"
               >
-                {{ m.content }}
+                <div
+                  v-if="m.images && m.images.length"
+                  :class="userDisplayText(m.content, true) ? 'mb-2' : ''"
+                >
+                  <ChatImageGallery
+                    :images="m.images"
+                    filename-prefix="对话附图"
+                    compact
+                  />
+                </div>
+                <div
+                  v-if="userDisplayText(m.content, Boolean(m.images?.length))"
+                  class="whitespace-pre-wrap"
+                >
+                  {{ m.content }}
+                </div>
               </div>
               <div
                 class="size-8 rounded-md bg-molybdenum/15 border border-molybdenum/30 flex items-center justify-center shrink-0"
@@ -1198,6 +1651,12 @@ function resetCurrent() {
                       class="text-[10px] text-text-muted font-mono"
                     >
                       · 已检索 {{ m.refs.length }} 条参考片段
+                    </span>
+                    <span
+                      v-else-if="m.useKnowledge && (m.refsReady || !m.loading) && !(m.refs && m.refs.length)"
+                      class="text-[10px] text-iron font-mono"
+                    >
+                      · 未命中
                     </span>
                     <span v-if="m.useKnowledge === false" class="text-[10px] text-text-muted">
                       · 未用知识库
@@ -1317,6 +1776,16 @@ function resetCurrent() {
                     </details>
                   </div>
 
+                  <div v-if="m.images && m.images.length" class="mb-2">
+                    <ChatImageGallery
+                      :images="m.images"
+                      filename-prefix="充电站平面布置图"
+                    />
+                  </div>
+                  <LayoutFileDownloads
+                    v-if="m.attachments && m.attachments.length"
+                    :files="m.attachments"
+                  />
                   <ChatMarkdown
                     v-if="m.content"
                     :content="m.content"
@@ -1325,7 +1794,7 @@ function resetCurrent() {
                 </div>
 
                 <details
-                  v-if="m.refs && m.refs.length > 0 && !m.loading"
+                  v-if="m.refs && m.refs.length > 0"
                   class="text-[11.5px]"
                 >
                   <summary
@@ -1340,9 +1809,11 @@ function resetCurrent() {
                       :key="i"
                       class="px-2.5 py-1.5 rounded bg-bg-base/40 border border-hairline"
                     >
-                      <div class="flex justify-between text-[10px] text-text-muted font-mono mb-0.5">
-                        <span>#{{ i + 1 }}</span>
-                        <span class="text-molybdenum">
+                      <div class="flex justify-between gap-2 text-[10px] text-text-muted font-mono mb-0.5">
+                        <span class="truncate min-w-0" :title="r.name || undefined">
+                          #{{ i + 1 }}{{ r.name ? ` · ${r.name}` : '' }}
+                        </span>
+                        <span class="text-molybdenum shrink-0">
                           相似度 {{ (r.score ?? 0).toFixed(3) }}
                         </span>
                       </div>
@@ -1354,6 +1825,13 @@ function resetCurrent() {
                     </div>
                   </div>
                 </details>
+                <div
+                  v-else-if="m.useKnowledge && (m.refsReady || !m.loading) && !(m.refs && m.refs.length)"
+                  class="text-[11.5px] text-iron flex items-center gap-1.5"
+                >
+                  <Quote class="size-3.5" />
+                  未命中
+                </div>
 
                 <div
                   v-if="m.related && m.related.length > 0"
@@ -1380,18 +1858,59 @@ function resetCurrent() {
         </div>
 
         <div class="border-t border-hairline px-4 py-3 bg-bg-elevated/40 shrink-0">
+          <input
+            ref="imageInputRef"
+            type="file"
+            class="hidden"
+            :accept="IMAGE_ACCEPT"
+            multiple
+            @change="onPickImages"
+          />
+          <div
+            v-if="pendingImages.length"
+            class="mb-2 flex flex-wrap gap-2"
+          >
+            <div
+              v-for="img in pendingImages"
+              :key="img.id"
+              class="relative size-[72px] rounded-md border border-hairline overflow-hidden bg-bg-base/60"
+            >
+              <img :src="img.preview" alt="" class="size-full object-cover" />
+              <button
+                type="button"
+                class="absolute top-0.5 right-0.5 size-5 rounded bg-black/55 text-white flex items-center justify-center hover:bg-black/75"
+                :disabled="sending"
+                title="移除图片"
+                @click="removePendingImage(img.id)"
+              >
+                <X class="size-3" />
+              </button>
+            </div>
+          </div>
           <div class="flex gap-2 items-end">
+            <button
+              type="button"
+              class="self-stretch px-2.5 rounded-md border border-hairline text-text-secondary hover:text-iron hover:border-iron/50 disabled:opacity-40"
+              :disabled="sending || pendingImages.length >= MAX_CHAT_IMAGES"
+              title="上传图片，模型将结合图片内容作答"
+              @click="openImagePicker"
+            >
+              <ImagePlus class="size-4" />
+            </button>
             <textarea
               v-model="input"
               rows="2"
               :placeholder="
-                mode === 'deep'
-                  ? '深度推理模式：适合复杂工艺诊断、对标分析、合规论证...'
-                  : '快速回答模式：参数查询、操作要点、术语解释...'
+                pendingImages.length
+                  ? '已附图：可补充问题，或不填直接发送让模型看图作答'
+                  : mode === 'deep'
+                    ? '深度推理模式：适合复杂工艺诊断、对标分析、合规论证...'
+                    : '快速回答模式：参数查询、操作要点、术语解释...'
               "
               class="flex-1 resize-none bg-bg-base/60 border border-hairline rounded-md px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:outline-none focus:border-molybdenum/70"
               :disabled="sending"
               @keydown.enter.exact.prevent="sendQuestion(input)"
+              @paste="onComposerPaste"
             />
             <button
               v-if="sending"
@@ -1404,7 +1923,7 @@ function resetCurrent() {
             <button
               v-else
               type="button"
-              :disabled="!input.trim()"
+              :disabled="!canSend"
               class="self-stretch flex items-center gap-1.5 px-5 rounded-md bg-iron text-white text-[13px] font-medium hover:brightness-110 disabled:opacity-50"
               @click="sendQuestion(input)"
             >
@@ -1414,7 +1933,10 @@ function resetCurrent() {
           </div>
           <div class="mt-2 flex justify-between text-[10.5px] text-text-muted">
             <span>
-              <CornerDownLeft class="inline size-3" /> Enter 发送 · Shift+Enter 换行
+              <CornerDownLeft class="inline size-3" /> Enter 发送 · Shift+Enter 换行 · 可粘贴图片
+              <template v-if="pendingImages.length">
+                · 已选 {{ pendingImages.length }}/{{ MAX_CHAT_IMAGES }} 张
+              </template>
             </span>
             <span>
               {{ activeSessionId ? '已关联会话' : '发送后自动新建会话' }} ·
@@ -1422,8 +1944,14 @@ function resetCurrent() {
                 {{ mode === 'deep' ? '深度推理' : '快速回答' }}
               </span>
               ·
-              <span :class="selectedModel ? 'text-text-primary' : 'text-text-muted'">
-                {{ selectedModel ? `模型：${selectedModel.name}` : '未选模型' }}
+              <span :class="selectedWorkflow ? 'text-patina' : selectedModel ? 'text-text-primary' : 'text-text-muted'">
+                {{
+                  selectedWorkflow
+                    ? `工作流：${selectedWorkflow.name}`
+                    : selectedModel
+                      ? `模型：${selectedModel.name}`
+                      : '未选模型'
+                }}
               </span>
               ·
               <span :class="usePrompt ? 'text-molybdenum' : 'text-text-muted'">
@@ -1438,6 +1966,9 @@ function resetCurrent() {
                 }}
               </span>
             </span>
+          </div>
+          <div v-if="visionModelHint" class="mt-1.5 text-[10.5px] text-iron">
+            当前模型未标记为「多模态视觉」。若网关不支持识图，请到模型管理改类型或换模型后再发送。
           </div>
         </div>
       </div>

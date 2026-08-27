@@ -38,7 +38,11 @@ type RequestOptions = {
 }
 
 function friendlyMessage(status: number, msg?: string): string {
+  const detail = (msg || '').trim()
   if (status === 401) {
+    if (detail && !/^unauthorized$/i.test(detail) && detail !== 'Not authenticated') {
+      return `登录已过期或未登录（${detail}）。请重新登录后再试`
+    }
     return '登录已过期或未登录，请重新登录后再试'
   }
   if (status === 403) {
@@ -60,6 +64,12 @@ function friendlyMessage(status: number, msg?: string): string {
   return '请求失败'
 }
 
+function envelopeMessage(payload: ApiEnvelope<unknown> & { detail?: unknown }): string | undefined {
+  if (payload.msg && String(payload.msg).trim()) return String(payload.msg).trim()
+  if (typeof payload.detail === 'string' && payload.detail.trim()) return payload.detail.trim()
+  return undefined
+}
+
 export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
@@ -68,11 +78,15 @@ export async function apiRequest<T>(
   const headers: Record<string, string> = {
     Accept: 'application/json',
   }
-  if (body !== undefined) {
+  const isForm = typeof FormData !== 'undefined' && body instanceof FormData
+  // FormData 由浏览器带 multipart boundary；不要手写 JSON Content-Type
+  if (body !== undefined && !isForm) {
     headers['Content-Type'] = 'application/json'
   }
   if (token) {
     headers.Authorization = `Bearer ${token}`
+    // 部分代理会丢掉 Authorization；后端同时认这个头
+    headers['X-Access-Token'] = token
   }
 
   let res: Response
@@ -80,7 +94,7 @@ export async function apiRequest<T>(
     res = await fetch(`${getApiBaseUrl()}${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
       signal,
     })
   } catch (e) {
@@ -122,12 +136,12 @@ export async function apiRequest<T>(
       })
     }
     clearTokens()
-    throw new ApiError(friendlyMessage(401, payload.msg), payload.code ?? 40100, 401)
+    throw new ApiError(friendlyMessage(401, envelopeMessage(payload)), payload.code ?? 40100, 401)
   }
 
   if (!res.ok || payload.code !== 0) {
     throw new ApiError(
-      friendlyMessage(res.status, payload.msg),
+      friendlyMessage(res.status, envelopeMessage(payload)),
       payload.code ?? -1,
       res.status,
     )
@@ -142,7 +156,10 @@ export async function apiDownload(
 ): Promise<void> {
   const { token, fallbackName = 'download.bin' } = options
   const headers: Record<string, string> = { Accept: '*/*' }
-  if (token) headers.Authorization = `Bearer ${token}`
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+    headers['X-Access-Token'] = token
+  }
 
   let res: Response
   try {
@@ -204,7 +221,10 @@ export async function apiFetchBlob(
 ): Promise<Blob> {
   const { token } = options
   const headers: Record<string, string> = { Accept: '*/*' }
-  if (token) headers.Authorization = `Bearer ${token}`
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+    headers['X-Access-Token'] = token
+  }
 
   let res: Response
   try {

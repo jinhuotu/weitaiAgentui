@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, markRaw, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { VueFlow, type Connection } from '@vue-flow/core'
 
@@ -19,6 +19,7 @@ type CanvasEdge = {
   target: string
   sourceHandle?: string
   targetHandle?: string
+  label?: string
 }
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
@@ -42,6 +43,9 @@ import { listAgents, type AgentItem } from '@/lib/agents-api'
 import { listKnowledgeBases, type KnowledgeBaseItem } from '@/lib/knowledge-api'
 import { listPrompts, type PromptItem } from '@/lib/prompts-api'
 import { listMcpServers, type McpServerItem } from '@/lib/mcp-api'
+import { listModelOptions, type ModelOptionItem } from '@/lib/models-api'
+import WfConditionNode from '@/components/workflows/WfConditionNode.vue'
+import ChatImageGallery from '@/components/ai/ChatImageGallery.vue'
 import {
   getWorkflow,
   publishWorkflow,
@@ -52,6 +56,9 @@ import {
   type WorkflowItem,
   type WorkflowNodeType,
 } from '@/lib/workflows-api'
+import { LAYOUT_LLM_SYSTEM_PROMPT } from '@/lib/layout-plan'
+
+const nodeTypes = { condition: markRaw(WfConditionNode) }
 
 const NODE_META: Record<
   WorkflowNodeType,
@@ -61,11 +68,24 @@ const NODE_META: Record<
   end: { label: '结束', tone: 'bg-muted/40 border-border' },
   knowledge: { label: '知识检索', tone: 'bg-coolant/15 border-coolant/40' },
   llm: { label: 'LLM', tone: 'bg-molybdenum/15 border-molybdenum/40' },
-  agent: { label: '场景智能体', tone: 'bg-iron/15 border-iron/40' },
-  mcp: { label: 'MCP 工具', tone: 'bg-sulfur/15 border-sulfur/40' },
+  vision: { label: '读图', tone: 'bg-patina/15 border-patina/40' },
+  agent: { label: '智能体（工具循环）', tone: 'bg-iron/15 border-iron/40' },
+  mcp: { label: 'MCP 单次调用', tone: 'bg-sulfur/15 border-sulfur/40' },
+  image_out: { label: '出图', tone: 'bg-iron/10 border-iron/35' },
+  layout_out: { label: '布置出图', tone: 'bg-patina/15 border-patina/40' },
+  condition: { label: '条件', tone: 'bg-sulfur/20 border-sulfur/45' },
 }
 
-const PALETTE: WorkflowNodeType[] = ['knowledge', 'llm', 'agent', 'mcp']
+const PALETTE: WorkflowNodeType[] = [
+  'knowledge',
+  'llm',
+  'vision',
+  'agent',
+  'mcp',
+  'image_out',
+  'layout_out',
+  'condition',
+]
 
 const auth = useAuthStore()
 const route = useRoute()
@@ -99,6 +119,9 @@ const prompts = ref<PromptItem[]>([])
 const kbs = ref<KnowledgeBaseItem[]>([])
 const agents = ref<AgentItem[]>([])
 const mcpServers = ref<McpServerItem[]>([])
+const llmModels = ref<ModelOptionItem[]>([])
+const visionModels = ref<ModelOptionItem[]>([])
+const runImages = ref<{ mimeType?: string; dataUrl: string }[]>([])
 
 const selected = computed(() => {
   const id = selectedId.value
@@ -127,18 +150,76 @@ const toolOptions = computed(() => {
   return out
 })
 
+const toolsByServer = computed(() =>
+  mcpServers.value
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      tools: (s.tools || []).filter((t) => t.enabled),
+    }))
+    .filter((s) => s.tools.length > 0),
+)
+
+function selectedMcpToolIds(): string[] {
+  const raw = (selected.value?.data as { mcpToolIds?: string[] } | undefined)?.mcpToolIds
+  return Array.isArray(raw) ? raw.filter(Boolean) : []
+}
+
+function toggleAgentTool(id: string) {
+  const cur = selectedMcpToolIds()
+  const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]
+  updateSelectedData('mcpToolIds', next)
+}
+
+function toggleServerTools(serverId: string, on: boolean) {
+  const s = toolsByServer.value.find((x) => x.id === serverId)
+  if (!s) return
+  const ids = s.tools.map((t) => t.id)
+  const cur = new Set(selectedMcpToolIds())
+  if (on) ids.forEach((id) => cur.add(id))
+  else ids.forEach((id) => cur.delete(id))
+  updateSelectedData('mcpToolIds', [...cur])
+}
+
+function edgeBranchLabel(handle?: string | null): string | undefined {
+  const h = (handle || '').toLowerCase()
+  if (h === 'yes' || h === 'true') return '是'
+  if (h === 'no' || h === 'false') return '否'
+  return undefined
+}
+
 function onConnect(c: Connection) {
   if (!c.source || !c.target) return
+  const srcNode = nodes.value.find((n) => n.id === c.source)
+  const srcType = String((srcNode?.data as { nodeType?: string } | undefined)?.nodeType || '')
+  const handle = c.sourceHandle || undefined
+  if (srcType === 'condition' && handle) {
+    edges.value = edges.value.filter(
+      (e) => !(e.source === c.source && (e.sourceHandle || '') === handle),
+    )
+  } else if (srcType !== 'condition') {
+    edges.value = edges.value.filter((e) => e.source !== c.source)
+  }
+  if (
+    edges.value.some(
+      (e) =>
+        e.source === c.source &&
+        e.target === c.target &&
+        (e.sourceHandle || '') === (handle || ''),
+    )
+  ) {
+    return
+  }
   const id = `e_${c.source}_${c.target}_${Date.now()}`
-  if (edges.value.some((e) => e.source === c.source && e.target === c.target)) return
   edges.value = [
     ...edges.value,
     {
       id,
       source: c.source,
       target: c.target,
-      sourceHandle: c.sourceHandle || undefined,
+      sourceHandle: handle,
       targetHandle: c.targetHandle || undefined,
+      label: edgeBranchLabel(handle),
     },
   ]
 }
@@ -146,7 +227,7 @@ function onConnect(c: Connection) {
 function toFlowNodes(graph: WorkflowGraph): CanvasNode[] {
   return (graph.nodes || []).map((n) => ({
     id: n.id,
-    type: 'default',
+    type: n.type === 'condition' ? 'condition' : 'default',
     position: n.position || { x: 100, y: 100 },
     label: NODE_META[n.type as WorkflowNodeType]?.label || n.type,
     data: {
@@ -164,6 +245,7 @@ function toFlowEdges(graph: WorkflowGraph): CanvasEdge[] {
     target: e.target,
     sourceHandle: e.sourceHandle || undefined,
     targetHandle: e.targetHandle || undefined,
+    label: edgeBranchLabel(e.sourceHandle),
   }))
 }
 
@@ -193,12 +275,13 @@ async function loadAll() {
   loading.value = true
   error.value = ''
   try {
-    const [wf, p, kb, ag, mcp] = await Promise.all([
+    const [wf, p, kb, ag, mcp, models] = await Promise.all([
       getWorkflow(workflowId.value),
       listPrompts().catch(() => [] as PromptItem[]),
-      listKnowledgeBases().catch(() => [] as KnowledgeBaseItem[]),
+      listKnowledgeBases({ access: 'use' }).catch(() => [] as KnowledgeBaseItem[]),
       listAgents().catch(() => [] as AgentItem[]),
       listMcpServers().catch(() => [] as McpServerItem[]),
+      listModelOptions({ kind: 'llm' }).catch(() => [] as ModelOptionItem[]),
     ])
     item.value = wf
     nameEdit.value = wf.name
@@ -206,6 +289,8 @@ async function loadAll() {
     kbs.value = kb
     agents.value = ag.filter((a) => a.enabled)
     mcpServers.value = mcp
+    llmModels.value = models
+    visionModels.value = models.filter((m) => m.modelType === 'multimodal_vision')
     const graph = wf.draftVersion?.graph || { nodes: [], edges: [] }
     nodes.value = toFlowNodes(graph)
     edges.value = toFlowEdges(graph)
@@ -288,14 +373,28 @@ function onArgsChange(raw: string) {
 function addNode(type: WorkflowNodeType) {
   const id = `${type}_${Date.now().toString(36)}`
   const position = { x: 180 + (nodes.value.length % 3) * 40, y: 100 + nodes.value.length * 48 }
+  const extra: Record<string, unknown> =
+    type === 'llm'
+      ? { attachImages: true }
+      : type === 'vision'
+        ? { prompt: '请提取图中的尺寸、参数与要点，用简洁中文列出。' }
+        : type === 'image_out'
+          ? { mode: 'generate', prompt: '根据以下说明生成配图：\n{{output}}' }
+          : type === 'layout_out'
+            ? { jsonSource: '{{output}}', render: true, copyToOutput: true }
+            : type === 'knowledge'
+              ? { topK: 3 }
+          : type === 'condition'
+            ? { when: 'hasImages' }
+            : {}
   nodes.value = [
     ...nodes.value,
     {
       id,
-      type: 'default',
+      type: type === 'condition' ? 'condition' : 'default',
       position,
       label: NODE_META[type].label,
-      data: { nodeType: type },
+      data: { nodeType: type, ...extra },
       class: NODE_META[type].tone,
     },
   ]
@@ -313,6 +412,51 @@ function updateSelectedData(key: string, value: unknown) {
         }
       : x,
   )
+}
+
+function patchSelectedData(patch: Record<string, unknown>) {
+  const n = selected.value
+  if (!n) return
+  nodes.value = nodes.value.map((x) =>
+    x.id === n.id
+      ? {
+          ...x,
+          data: { ...x.data, ...patch },
+        }
+      : x,
+  )
+}
+
+const llmPromptText = computed(() => {
+  const d = selected.value?.data as
+    | { nodeType?: string; systemPrompt?: string; promptId?: string }
+    | undefined
+  if (!d || d.nodeType !== 'llm') return ''
+  const inline = (d.systemPrompt || '').toString()
+  if (inline.trim()) return inline
+  const pid = (d.promptId || '').toString()
+  if (!pid) return ''
+  return prompts.value.find((p) => p.id === pid)?.content || ''
+})
+
+function onLlmPromptInput(raw: string) {
+  patchSelectedData({ systemPrompt: raw, promptId: null })
+}
+
+function fillPromptFromTemplate(id: string) {
+  if (!id) return
+  if (id === '__layout_json__') {
+    patchSelectedData({
+      systemPrompt: LAYOUT_LLM_SYSTEM_PROMPT,
+      promptId: null,
+    })
+    return
+  }
+  const p = prompts.value.find((x) => x.id === id)
+  patchSelectedData({
+    systemPrompt: p?.content || '',
+    promptId: null,
+  })
 }
 
 function toggleKb(id: string) {
@@ -403,6 +547,7 @@ async function onTrial() {
   error.value = ''
   runLog.value = []
   runOutput.value = ''
+  runImages.value = []
   try {
     await saveWorkflowGraph(workflowId.value, exportGraph())
     let input: unknown = trialInput.value
@@ -421,6 +566,15 @@ async function onTrial() {
         onStepStart: (p) => {
           runLog.value.push(`▶ ${p.nodeType || ''} (${p.nodeId || ''})`)
         },
+        onTool: (p) => {
+          const name = String(p.toolName || p.name || 'tool')
+          if (p.phase === 'call') runLog.value.push(`  ⚙ ${name}`)
+          else runLog.value.push(`  ⚙ ${name} ${p.error ? '失败' : '完成'}`)
+        },
+        onDelta: (text) => {
+          if (!text) return
+          runOutput.value += text
+        },
         onStepEnd: (p) => {
           runLog.value.push(`✓ ${p.nodeType || ''} 完成`)
           if (p.detail) {
@@ -433,10 +587,20 @@ async function onTrial() {
         },
         onDone: (p) => {
           const out = p.output as { text?: string } | string | undefined
-          if (typeof out === 'string') runOutput.value = out
+          if (typeof out === 'string' && out) runOutput.value = out
           else if (out && typeof out === 'object')
             runOutput.value = String(out.text || JSON.stringify(out))
-          else runOutput.value = JSON.stringify(p.output ?? '')
+          const imgs = p.outputImages
+          if (Array.isArray(imgs)) {
+            runImages.value = imgs.filter(
+              (x): x is { mimeType?: string; dataUrl: string } =>
+                Boolean(
+                  x &&
+                    typeof x === 'object' &&
+                    typeof (x as { dataUrl?: string }).dataUrl === 'string',
+                ),
+            )
+          }
           runLog.value.push('■ 运行完成')
         },
         onError: (msg) => {
@@ -589,7 +753,7 @@ onUnmounted(() => {
           <Plus class="size-3 inline mr-1" />{{ NODE_META[t].label }}
         </button>
         <p class="text-[10px] text-muted-foreground px-1 pt-2 leading-relaxed">
-          从开始连到结束。选中中间节点后可删除（或按 Delete）；连线同理。开始/结束不可删。
+          从开始连到结束。条件节点从「是 / 否」两个锚点分别连出。选中中间节点后可删除（或按 Delete）。
         </p>
       </aside>
 
@@ -598,6 +762,7 @@ onUnmounted(() => {
         <VueFlow
           v-model:nodes="nodes"
           v-model:edges="edges"
+          :node-types="nodeTypes"
           fit-view-on-init
           :default-viewport="{ zoom: 1 }"
           :delete-key-code="null"
@@ -678,14 +843,14 @@ onUnmounted(() => {
                   {{ kb.name }}
                 </label>
               </div>
-              <label class="block text-[11px] text-muted-foreground">Top K</label>
+              <label class="block text-[11px] text-muted-foreground">召回案例数（整篇，建议 2～3）</label>
               <input
                 type="number"
                 class="w-full h-7 px-2 rounded-md border border-border bg-background"
-                :value="(selected.data as any).topK || 5"
+                :value="(selected.data as any).topK || 3"
                 min="1"
-                max="20"
-                @change="updateSelectedData('topK', Number(($event.target as HTMLInputElement).value) || 5)"
+                max="8"
+                @change="updateSelectedData('topK', Number(($event.target as HTMLInputElement).value) || 3)"
               />
             </template>
 
@@ -699,36 +864,271 @@ onUnmounted(() => {
                 <option value="fast">fast</option>
                 <option value="deep">deep</option>
               </select>
-              <label class="block text-[11px] text-muted-foreground">提示词</label>
+              <label class="block text-[11px] text-muted-foreground">模型（空=按模式默认）</label>
               <select
                 class="w-full h-7 px-2 rounded-md border border-border bg-background"
-                :value="(selected.data as any).promptId || ''"
-                @change="updateSelectedData('promptId', ($event.target as HTMLSelectElement).value || null)"
+                :value="(selected.data as any).modelId || ''"
+                @change="updateSelectedData('modelId', ($event.target as HTMLSelectElement).value || null)"
               >
-                <option value="">（无）</option>
+                <option value="">（默认）</option>
+                <option v-for="m in llmModels" :key="m.id" :value="m.id">
+                  {{ m.name }} · {{ m.modelName }}
+                </option>
+              </select>
+              <label class="flex items-center gap-1.5 text-[11px]">
+                <input
+                  type="checkbox"
+                  :checked="(selected.data as any).attachImages !== false"
+                  @change="updateSelectedData('attachImages', ($event.target as HTMLInputElement).checked)"
+                />
+                附带输入图片（image_url）
+              </label>
+              <label class="flex items-center gap-1.5 text-[11px]">
+                <input
+                  type="checkbox"
+                  :checked="Boolean((selected.data as any).lockPrompt)"
+                  @change="updateSelectedData('lockPrompt', ($event.target as HTMLInputElement).checked)"
+                />
+                锁定本节点提示词（禁止被布置模板覆盖）
+              </label>
+              <label class="block text-[11px] text-muted-foreground">写入变量（可选，如 constraints）</label>
+              <input
+                class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                :value="(selected.data as any).saveAs || ''"
+                placeholder="空=只写 output"
+                @change="updateSelectedData('saveAs', ($event.target as HTMLInputElement).value.trim() || null)"
+              />
+              <label class="block text-[11px] text-muted-foreground">用户消息模板（可选）</label>
+              <textarea
+                class="w-full min-h-[64px] px-2 py-1 rounded-md border border-border bg-background text-[12px] leading-relaxed"
+                :value="(selected.data as any).userPrompt || ''"
+                placeholder="{{query}} {{vision}} {{constraints}} {{context}}"
+                @input="updateSelectedData('userPrompt', ($event.target as HTMLTextAreaElement).value)"
+              />
+              <label class="block text-[11px] text-muted-foreground">提示词</label>
+              <textarea
+                class="w-full min-h-[120px] px-2 py-1.5 rounded-md border border-border bg-background text-[12px] leading-relaxed"
+                :value="llmPromptText"
+                placeholder="直接在此编写本节点的系统提示词，保存草稿后随图一起发布。"
+                @input="onLlmPromptInput(($event.target as HTMLTextAreaElement).value)"
+              />
+              <label class="block text-[11px] text-muted-foreground">
+                从模板填入（可选，会覆盖上面的文本）
+              </label>
+              <select
+                class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                value=""
+                @change="
+                  fillPromptFromTemplate(($event.target as HTMLSelectElement).value);
+                  ($event.target as HTMLSelectElement).value = ''
+                "
+              >
+                <option value="">选择模板填入…</option>
+                <option value="__layout_json__">充电站平面布置 JSON</option>
                 <option v-for="p in prompts" :key="p.id" :value="p.id">{{ p.name }}</option>
               </select>
-              <label class="block text-[11px] text-muted-foreground">附加系统提示</label>
-              <textarea
-                class="w-full min-h-[64px] px-2 py-1 rounded-md border border-border bg-background"
-                :value="(selected.data as any).systemPrompt || ''"
-                @change="updateSelectedData('systemPrompt', ($event.target as HTMLTextAreaElement).value)"
-              />
             </template>
 
             <template v-else-if="(selected.data as any).nodeType === 'agent'">
-              <label class="block text-[11px] text-muted-foreground">场景智能体</label>
+              <p class="text-[10px] text-muted-foreground leading-relaxed">
+                由模型按需多次调用工具（画 CAD、查库走这里）。不要把多步绘图拆成多个「MCP 单次调用」。
+              </p>
+              <label class="block text-[11px] text-muted-foreground">场景智能体（可选）</label>
               <select
                 class="w-full h-7 px-2 rounded-md border border-border bg-background"
                 :value="(selected.data as any).agentId || ''"
-                @change="updateSelectedData('agentId', ($event.target as HTMLSelectElement).value)"
+                @change="updateSelectedData('agentId', ($event.target as HTMLSelectElement).value || null)"
               >
-                <option value="">请选择</option>
+                <option value="">不选，仅用下方勾选的工具</option>
                 <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.name }}</option>
               </select>
+              <label class="block text-[11px] text-muted-foreground">本节点可调用的 MCP 工具</label>
+              <div class="max-h-40 overflow-auto space-y-2 border border-border rounded-md p-1.5">
+                <div v-if="toolsByServer.length === 0" class="text-[10px] text-muted-foreground px-1">
+                  暂无已启用工具，请先到 MCP 管理同步。
+                </div>
+                <div v-for="s in toolsByServer" :key="s.id" class="space-y-1">
+                  <label class="flex items-center gap-1.5 text-[11px] font-medium">
+                    <input
+                      type="checkbox"
+                      :checked="s.tools.every((t) => selectedMcpToolIds().includes(t.id))"
+                      @change="toggleServerTools(s.id, ($event.target as HTMLInputElement).checked)"
+                    />
+                    {{ s.name }}
+                  </label>
+                  <label
+                    v-for="t in s.tools"
+                    :key="t.id"
+                    class="flex items-center gap-1.5 text-[11px] pl-4"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="selectedMcpToolIds().includes(t.id)"
+                      @change="toggleAgentTool(t.id)"
+                    />
+                    {{ t.name }}
+                  </label>
+                </div>
+              </div>
+              <p class="text-[10px] text-muted-foreground">
+                画 CAD 请勾选 CAD-MCP 下绘图/保存等工具；模型会自己决定调用顺序和次数。勾选后优先用本列表。
+              </p>
+              <label class="block text-[11px] text-muted-foreground">覆盖模型（可选）</label>
+              <select
+                class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                :value="(selected.data as any).modelId || ''"
+                @change="updateSelectedData('modelId', ($event.target as HTMLSelectElement).value || null)"
+              >
+                <option value="">（智能体或默认）</option>
+                <option v-for="m in llmModels" :key="m.id" :value="m.id">
+                  {{ m.name }} · {{ m.modelName }}
+                </option>
+              </select>
+              <label class="flex items-center gap-1.5 text-[11px]">
+                <input
+                  type="checkbox"
+                  :checked="(selected.data as any).attachImages !== false"
+                  @change="updateSelectedData('attachImages', ($event.target as HTMLInputElement).checked)"
+                />
+                附带输入图片
+              </label>
+              <label class="block text-[11px] text-muted-foreground">附加系统提示（可选）</label>
+              <textarea
+                class="w-full min-h-[72px] px-2 py-1 rounded-md border border-border bg-background text-[12px]"
+                :value="(selected.data as any).systemPrompt || ''"
+                placeholder="例如：根据读图结果调用 CAD 工具画图，成功后再 save_drawing。"
+                @input="updateSelectedData('systemPrompt', ($event.target as HTMLTextAreaElement).value)"
+              />
+            </template>
+
+            <template v-else-if="(selected.data as any).nodeType === 'condition'">
+              <label class="block text-[11px] text-muted-foreground">条件</label>
+              <select
+                class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                :value="(selected.data as any).when || 'hasImages'"
+                @change="updateSelectedData('when', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="hasImages">有输入图片</option>
+                <option value="needImage">文本像是需要出图</option>
+                <option value="outputContains">输出包含关键字</option>
+                <option value="toolFailed">上一工具失败</option>
+              </select>
+              <template v-if="(selected.data as any).when === 'outputContains'">
+                <label class="block text-[11px] text-muted-foreground">关键字</label>
+                <input
+                  class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                  :value="(selected.data as any).contains || ''"
+                  @change="updateSelectedData('contains', ($event.target as HTMLInputElement).value)"
+                />
+              </template>
+              <p class="text-[10px] text-muted-foreground">
+                从节点底部「是」连成立分支，「否」连失败/否则分支。
+              </p>
+            </template>
+
+            <template v-else-if="(selected.data as any).nodeType === 'vision'">
+              <label class="block text-[11px] text-muted-foreground">视觉模型</label>
+              <select
+                class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                :value="(selected.data as any).modelId || ''"
+                @change="updateSelectedData('modelId', ($event.target as HTMLSelectElement).value || null)"
+              >
+                <option value="">（默认对话模型）</option>
+                <option v-for="m in (visionModels.length ? visionModels : llmModels)" :key="m.id" :value="m.id">
+                  {{ m.name }} · {{ m.modelName }}
+                </option>
+              </select>
+              <label class="block text-[11px] text-muted-foreground">读图提示</label>
+              <textarea
+                class="w-full min-h-[72px] px-2 py-1 rounded-md border border-border bg-background"
+                :value="(selected.data as any).prompt || ''"
+                @change="updateSelectedData('prompt', ($event.target as HTMLTextAreaElement).value)"
+              />
+              <label class="flex items-center gap-1.5 text-[11px]">
+                <input
+                  type="checkbox"
+                  :checked="Boolean((selected.data as any).copyToOutput)"
+                  @change="updateSelectedData('copyToOutput', ($event.target as HTMLInputElement).checked)"
+                />
+                同时写入 output
+              </label>
+            </template>
+
+            <template v-else-if="(selected.data as any).nodeType === 'image_out'">
+              <label class="block text-[11px] text-muted-foreground">方式</label>
+              <select
+                class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                :value="(selected.data as any).mode || 'generate'"
+                @change="updateSelectedData('mode', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="generate">文生图（images/generations）</option>
+                <option value="from_file">读取本地图片路径</option>
+              </select>
+              <template v-if="(selected.data as any).mode === 'from_file'">
+                <label class="block text-[11px] text-muted-foreground">
+                  路径（可用 {'{{'}lastSavedPath{'}}'}）
+                </label>
+                <input
+                  class="w-full h-7 px-2 rounded-md border border-border bg-background font-mono text-[10px]"
+                  :value="(selected.data as any).filePath || '{{lastSavedPath}}'"
+                  @change="updateSelectedData('filePath', ($event.target as HTMLInputElement).value)"
+                />
+              </template>
+              <template v-else>
+                <label class="block text-[11px] text-muted-foreground">出图模型</label>
+                <select
+                  class="w-full h-7 px-2 rounded-md border border-border bg-background"
+                  :value="(selected.data as any).modelId || ''"
+                  @change="updateSelectedData('modelId', ($event.target as HTMLSelectElement).value || null)"
+                >
+                  <option value="">（默认对话模型）</option>
+                  <option v-for="m in llmModels" :key="m.id" :value="m.id">
+                    {{ m.name }} · {{ m.modelName }}
+                  </option>
+                </select>
+                <label class="block text-[11px] text-muted-foreground">提示词</label>
+                <textarea
+                  class="w-full min-h-[64px] px-2 py-1 rounded-md border border-border bg-background"
+                  :value="(selected.data as any).prompt || ''"
+                  @change="updateSelectedData('prompt', ($event.target as HTMLTextAreaElement).value)"
+                />
+              </template>
+            </template>
+
+            <template v-else-if="(selected.data as any).nodeType === 'layout_out'">
+              <p class="text-[10px] text-muted-foreground leading-relaxed">
+                读取上游 LLM 的平面布置 JSON，校验后画成 PNG，并同时写出 DXF（可在 CAD 中打开）。CAD-MCP 若 save_drawing 了 DXF，后续「读取本地图片」节点也会自动转成 PNG。
+              </p>
+              <label class="block text-[11px] text-muted-foreground">
+                JSON 来源（可用 {'{{'}output{'}}'} / {'{{'}layout{'}}'}）
+              </label>
+              <input
+                class="w-full h-7 px-2 rounded-md border border-border bg-background font-mono text-[10px]"
+                :value="(selected.data as any).jsonSource || '{{output}}'"
+                @change="updateSelectedData('jsonSource', ($event.target as HTMLInputElement).value)"
+              />
+              <label class="flex items-center gap-1.5 text-[11px]">
+                <input
+                  type="checkbox"
+                  :checked="(selected.data as any).render !== false"
+                  @change="updateSelectedData('render', ($event.target as HTMLInputElement).checked)"
+                />
+                渲染平面图 PNG
+              </label>
+              <label class="flex items-center gap-1.5 text-[11px]">
+                <input
+                  type="checkbox"
+                  :checked="(selected.data as any).copyToOutput !== false"
+                  @change="updateSelectedData('copyToOutput', ($event.target as HTMLInputElement).checked)"
+                />
+                用中文摘要覆盖 output（JSON 仍在 layout）
+              </label>
             </template>
 
             <template v-else-if="(selected.data as any).nodeType === 'mcp'">
+              <p class="text-[10px] text-muted-foreground leading-relaxed">
+                只执行一次指定工具（参数需你写死或用模板）。画完整 CAD 图请改用「智能体（工具循环）」，并勾选一组 CAD 工具。
+              </p>
               <label class="block text-[11px] text-muted-foreground">工具</label>
               <select
                 class="w-full h-7 px-2 rounded-md border border-border bg-background"
@@ -739,7 +1139,7 @@ onUnmounted(() => {
                 <option v-for="t in toolOptions" :key="t.id" :value="t.id">{{ t.label }}</option>
               </select>
               <label class="block text-[11px] text-muted-foreground">
-                参数 JSON（可用 {'{{'}input{'}}'} / {'{{'}query{'}}'}）
+                参数 JSON（可用 {'{{'}input{'}}'} / {'{{'}query{'}}'} / {'{{'}output{'}}'} / {'{{'}vision{'}}'} / {'{{'}layout{'}}'}）
               </label>
               <textarea
                 class="w-full min-h-[72px] px-2 py-1 rounded-md border border-border bg-background font-mono text-[10px]"
@@ -778,6 +1178,13 @@ onUnmounted(() => {
           <pre class="flex-1 overflow-auto text-[10px] bg-background/60 rounded border border-border p-2 whitespace-pre-wrap">{{ runLog.join('\n') || '—' }}</pre>
           <div class="text-[10px] text-muted-foreground mt-2 mb-1">输出</div>
           <pre class="max-h-28 overflow-auto text-[10px] bg-background/60 rounded border border-border p-2 whitespace-pre-wrap">{{ runOutput || '—' }}</pre>
+          <div v-if="runImages.length" class="mt-2">
+            <ChatImageGallery
+              :images="runImages"
+              filename-prefix="充电站平面布置图"
+              compact
+            />
+          </div>
         </div>
       </aside>
     </div>
@@ -796,5 +1203,8 @@ onUnmounted(() => {
   padding: 6px 10px;
   min-width: 96px;
   text-align: center;
+}
+:deep(.vue-flow__node-condition) {
+  padding: 0;
 }
 </style>

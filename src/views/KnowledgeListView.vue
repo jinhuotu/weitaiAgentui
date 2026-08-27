@@ -11,31 +11,23 @@ import {
   Pencil,
   Plus,
   ScrollText,
+  Shield,
   Trash2,
   TriangleAlert,
 } from 'lucide-vue-next'
 import {
   createKnowledgeBase,
   deleteKnowledgeBase,
-  listKnowledgeBases,
+  listKnowledgeBaseCatalog,
   updateKnowledgeBase,
   type KnowledgeBaseItem,
 } from '@/lib/knowledge-api'
 import { libraryCardAccentByName } from '@/lib/library-card-theme'
 import { ApiError } from '@/lib/api'
+import { fmtAgo } from '@/lib/time'
+import KbAclDialog from '@/components/knowledge/KbAclDialog.vue'
 
 const KB_ICONS = [BookOpen, Library, Brain, ScrollText, Layers]
-
-function fmtAgo(ts: number) {
-  const diff = Date.now() - ts
-  const m = Math.floor(diff / 60_000)
-  if (m < 1) return '刚刚'
-  if (m < 60) return `${m} 分钟前`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时前`
-  const d = Math.floor(h / 24)
-  return `${d} 天前`
-}
 
 function cardIcon(index: number) {
   return KB_ICONS[index % KB_ICONS.length]!
@@ -47,6 +39,8 @@ function accentOf(base: KnowledgeBaseItem, index: number) {
 
 const router = useRouter()
 const items = ref<KnowledgeBaseItem[]>([])
+const canCreate = ref(false)
+const aclTarget = ref<KnowledgeBaseItem | null>(null)
 const loading = ref(true)
 const saving = ref(false)
 const modalMode = ref<'create' | 'edit' | null>(null)
@@ -71,7 +65,9 @@ function redirectLoginIfNeeded(err: unknown) {
 async function load() {
   loading.value = true
   try {
-    items.value = await listKnowledgeBases()
+    const data = await listKnowledgeBaseCatalog()
+    items.value = data.items
+    canCreate.value = data.canCreate
   } catch (e) {
     if (redirectLoginIfNeeded(e)) return
     toast.value = {
@@ -100,6 +96,7 @@ onUnmounted(() => {
 })
 
 function openCreate() {
+  if (!canCreate.value) return
   editing.value = null
   name.value = ''
   description.value = ''
@@ -108,6 +105,7 @@ function openCreate() {
 }
 
 function openEdit(base: KnowledgeBaseItem, e: Event) {
+  if (!base.canManage) return
   e.preventDefault()
   e.stopPropagation()
   editing.value = base
@@ -182,13 +180,21 @@ async function submitModal() {
 }
 
 function askDelete(base: KnowledgeBaseItem, e: Event) {
+  if (!base.canManage) return
   e.preventDefault()
   e.stopPropagation()
   pendingDelete.value = base
 }
 
+function openAcl(base: KnowledgeBaseItem, e: Event) {
+  if (!base.canManage) return
+  e.preventDefault()
+  e.stopPropagation()
+  aclTarget.value = base
+}
+
 async function confirmDelete() {
-  if (!pendingDelete.value) return
+  if (!pendingDelete.value?.canManage) return
   const base = pendingDelete.value
   deletingId.value = base.id
   try {
@@ -222,7 +228,7 @@ async function confirmDelete() {
         </div>
         <h1 class="text-xl font-semibold">知识库</h1>
         <p class="mt-1 text-[12px] text-text-secondary">
-          自定义创建多个知识库，以卡片查看历史库；进入库内再导入资料与检索。
+          自定义创建多个知识库；进入库内上传 PDF / Word / Excel / 文本，或粘贴、抓取 URL。
         </p>
       </div>
     </header>
@@ -281,13 +287,22 @@ async function confirmDelete() {
                 {{ base.name }}
               </div>
               <div class="text-[11px] text-text-muted mt-0.5">
-                更新于 {{ fmtAgo(base.updatedAt || base.createdAt) }}
+                更新于 {{ fmtAgo(base.updatedAt || base.createdAt, base.createdAtUtc) }}
               </div>
             </div>
           </div>
           <div
+            v-if="base.canManage"
             class="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
           >
+            <button
+              type="button"
+              title="分配权限"
+              class="size-8 rounded-md text-text-muted hover:text-molybdenum hover:bg-molybdenum/10 inline-flex items-center justify-center"
+              @click="openAcl(base, $event)"
+            >
+              <Shield class="size-3.5" />
+            </button>
             <button
               type="button"
               title="编辑知识库"
@@ -319,6 +334,24 @@ async function confirmDelete() {
         </p>
         <div class="mt-3 pl-1.5 flex flex-wrap items-center gap-2">
           <span
+            v-if="base.canManage"
+            class="inline-flex items-center px-2 py-0.5 rounded-md border border-patina/30 bg-patina/10 text-patina text-[10px] font-mono"
+          >
+            可维护
+          </span>
+          <span
+            v-else-if="base.canUse"
+            class="inline-flex items-center px-2 py-0.5 rounded-md border border-molybdenum/30 bg-molybdenum/10 text-molybdenum text-[10px] font-mono"
+          >
+            可使用
+          </span>
+          <span
+            v-else-if="base.canView"
+            class="inline-flex items-center px-2 py-0.5 rounded-md border border-hairline text-text-muted text-[10px] font-mono"
+          >
+            仅查看
+          </span>
+          <span
             :class="[
               'inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-mono',
               accentOf(base, idx).pill,
@@ -340,6 +373,7 @@ async function confirmDelete() {
       </RouterLink>
 
       <button
+        v-if="canCreate"
         type="button"
         class="relative overflow-hidden border-2 border-dashed border-hairline rounded-xl min-h-[160px] p-4 flex flex-col items-center justify-center gap-2 text-text-secondary hover:border-molybdenum/45 hover:text-molybdenum hover:bg-molybdenum/[0.04] transition-all duration-200 hover:-translate-y-0.5"
         @click="openCreate"
@@ -355,8 +389,20 @@ async function confirmDelete() {
     </div>
 
     <div v-if="!loading && items.length === 0" class="text-[12px] text-text-muted">
-      还没有知识库。点击「增加知识库」开始创建，例如：缺陷库、运维库、能耗库等。
+      {{
+        canCreate
+          ? '还没有知识库。点击「增加知识库」开始创建，例如：缺陷库、运维库、能耗库等。'
+          : '暂无可访问的知识库。请联系管理员分配权限。'
+      }}
     </div>
+
+    <KbAclDialog
+      :open="Boolean(aclTarget)"
+      :base-id="aclTarget?.id || ''"
+      :base-name="aclTarget?.name"
+      @close="aclTarget = null"
+      @saved="void load()"
+    />
 
     <!-- Create / Edit modal -->
     <div

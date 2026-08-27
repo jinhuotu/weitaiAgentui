@@ -37,12 +37,26 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // 允许 cpolar 等隧道域名访问（子域名会变，用前导点匹配所有子域）
+    allowedHosts: ['.cpolar.top', '.cpolar.cn'],
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8100',
         changeOrigin: true,
         timeout: 0,
         proxyTimeout: 0,
+        configure(proxy) {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            const auth = req.headers.authorization
+            if (typeof auth === 'string' && auth && !proxyReq.getHeader('authorization')) {
+              proxyReq.setHeader('Authorization', auth)
+            }
+            const extra = req.headers['x-access-token']
+            if (typeof extra === 'string' && extra && !proxyReq.getHeader('x-access-token')) {
+              proxyReq.setHeader('X-Access-Token', extra)
+            }
+          })
+        },
       },
     },
   },

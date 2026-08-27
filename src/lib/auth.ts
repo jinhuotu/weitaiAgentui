@@ -1,7 +1,7 @@
 import { apiRequest } from './api'
 
-const ACCESS_KEY = 'weitai_access_token'
-const REFRESH_KEY = 'weitai_refresh_token'
+const ACCESS_KEY = 'youqi_access_token'
+const REFRESH_KEY = 'youqi_refresh_token'
 
 export type AuthUser = {
   id: number

@@ -20,6 +20,7 @@ import {
   listModelConfigs,
   modelTypeLabel,
   coerceModelType,
+  normalizeApiBase,
   updateModelConfig,
   EMBEDDING_MODEL_TYPE_OPTIONS,
   LLM_MODEL_TYPE_OPTIONS,
@@ -190,6 +191,12 @@ async function submit() {
     formError.value = '请填写名称、API Base、模型标识'
     return
   }
+  const apiBase = normalizeApiBase(form.value.apiBase)
+  if (!apiBase) {
+    formError.value = 'API Base 无效，请填写以 https:// 开头的地址，且不要重复协议'
+    return
+  }
+  form.value.apiBase = apiBase
   if (!editing.value && !form.value.apiKey.trim()) {
     formError.value = '新建时必须填写 API Key'
     return
@@ -202,7 +209,7 @@ async function submit() {
       name: f.name.trim(),
       kind: f.kind,
       modelType: f.kind === 'embedding' ? 'text_embedding' : f.modelType,
-      apiBase: f.apiBase.trim(),
+      apiBase,
       modelName: f.modelName.trim(),
       timeoutSeconds: Number(f.timeoutSeconds) || 120,
       remark: f.remark.trim() || undefined,
@@ -499,6 +506,11 @@ function onDeleteOpen(v: boolean) {
             class="kb-input"
             placeholder="https://api.openai.com/v1"
           />
+          <div class="mt-1 text-[10.5px] text-text-muted">
+            填 OpenAI 兼容根地址，不要重复 https://，也不要贴到 /chat/completions
+            或 DashScope generation 完整路径。阿里云 MaaS 示例：
+            https://xxx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+          </div>
         </label>
         <label class="block">
           <div class="text-[11px] text-text-secondary mb-1">

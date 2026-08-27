@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, type FunctionalComponent } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   Upload,
   Link as LinkIcon,
   FileText,
   FileImage,
   FileSpreadsheet,
+  Presentation,
   Box,
   Boxes,
   File as FileIcon,
@@ -20,23 +21,34 @@ import {
   ArrowLeft,
   Trash2,
   TriangleAlert,
+  Download,
+  RotateCcw,
+  Link2,
+  Paperclip,
+  Shield,
 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import {
+  checkKnowledgeDocumentDuplicate,
   createTextDocument,
   createUrlDocument,
   deleteKnowledgeDocument,
+  attachKnowledgeDocument,
+  downloadKnowledgeDocument,
   getKnowledgeBase,
   getKnowledgeDocumentPreview,
   listKnowledgeDocuments,
+  reparseKnowledgeDocument,
   searchKnowledge,
   uploadKnowledgeDocument,
   type KbDocItem,
   type KnowledgeBaseItem,
 } from '@/lib/knowledge-api'
-import { THREE_D_EXTS, fmtSize, readFileSmart } from '@/lib/read-file-smart'
+import { THREE_D_EXTS, fileExt, fmtSize, validateKbUploadFile } from '@/lib/read-file-smart'
+import { fmtAgo } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth'
 import FbxViewer from '@/components/three-preview/FbxViewer.vue'
+import KbAclDialog from '@/components/knowledge/KbAclDialog.vue'
 
 type KbItem = KbDocItem
 type Tab = 'file' | 'url' | 'text'
@@ -48,48 +60,63 @@ const FILE_TYPE_GROUPS: {
   exts: string[]
   color: string
   icon: IconComp
+  soon?: boolean
 }[] = [
   { label: 'PDF', exts: ['.pdf'], color: 'text-iron', icon: FileText },
   { label: 'Word', exts: ['.docx'], color: 'text-molybdenum', icon: FileText },
   {
+    label: 'PPT',
+    exts: ['.pptx'],
+    color: 'text-iron',
+    icon: Presentation,
+  },
+  {
     label: 'Excel',
-    exts: ['.xls', '.xlsx', '.csv'],
+    exts: ['.xlsx', '.csv'],
     color: 'text-patina',
     icon: FileSpreadsheet,
   },
   {
+    label: '文本',
+    exts: ['.txt', '.md'],
+    color: 'text-text-secondary',
+    icon: FileText,
+  },
+  {
     label: '图片',
-    exts: ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'],
+    exts: ['.jpg', '.png', '.webp'],
     color: 'text-sulfur',
     icon: FileImage,
   },
   {
     label: 'CAD',
-    exts: ['.dwg', '.dxf', '.step', '.stp', '.iges', '.igs'],
+    exts: ['.dwg', '.dxf', '.step'],
     color: 'text-coolant',
     icon: Box,
+    soon: true,
   },
   {
     label: '三维图纸',
-    exts: ['.fbx', '.obj', '.gltf', '.glb', '.stl'],
+    exts: ['.fbx', '.obj', '.glb'],
     color: 'text-iron',
     icon: Boxes,
-  },
-  {
-    label: '文本',
-    exts: ['.txt', '.md', '.json'],
-    color: 'text-text-secondary',
-    icon: FileText,
+    soon: true,
   },
 ]
 
-const ACCEPT_LIST = FILE_TYPE_GROUPS.flatMap((g) => g.exts).join(',')
+const ACCEPT_LIST = FILE_TYPE_GROUPS.filter((g) => !g.soon)
+  .flatMap((g) => g.exts)
+  .join(',')
+const DRAWING_EXTS = ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']
+const DRAWING_ACCEPT = DRAWING_EXTS.map((e) => `.${e}`).join(',')
+const DRAWING_MAX_COUNT = 2
 
 function iconForType(type?: string, kind?: string): IconComp {
   const t = (type || '').toLowerCase()
   if (kind === '3d' || THREE_D_EXTS.includes(t)) return Boxes
   if (['pdf'].includes(t)) return FileText
   if (['doc', 'docx'].includes(t)) return FileText
+  if (['ppt', 'pptx'].includes(t)) return Presentation
   if (['xls', 'xlsx', 'csv'].includes(t)) return FileSpreadsheet
   if (['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'].includes(t)) return FileImage
   if (['dwg', 'dxf', 'step', 'stp', 'iges', 'igs'].includes(t)) return Box
@@ -101,33 +128,45 @@ function colorForType(type?: string, kind?: string) {
   if (kind === '3d' || THREE_D_EXTS.includes(t)) return 'text-iron'
   if (['pdf'].includes(t)) return 'text-iron'
   if (['doc', 'docx'].includes(t)) return 'text-molybdenum'
+  if (['ppt', 'pptx'].includes(t)) return 'text-iron'
   if (['xls', 'xlsx', 'csv'].includes(t)) return 'text-patina'
   if (['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'].includes(t)) return 'text-sulfur'
   if (['dwg', 'dxf', 'step', 'stp', 'iges', 'igs'].includes(t)) return 'text-coolant'
   return 'text-text-secondary'
 }
 
-function fmtAgo(ts: number) {
-  const diff = Date.now() - ts
-  const m = Math.floor(diff / 60_000)
-  if (m < 1) return '刚刚'
-  if (m < 60) return `${m} 分钟前`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时前`
-  const d = Math.floor(h / 24)
-  return `${d} 天前`
-}
-
-function fmtIngestToast(docName: string, item: KbDocItem, opts?: { metaOnly?: boolean }) {
+function fmtIngestToast(docName: string, item: KbDocItem) {
+  if (item.kind === 'drawing') {
+    const linked = item.parentId ? '' : '；未挂靠案例，检索时不会附图'
+    return `${docName} 已保存为图纸附件（不 OCR、不进向量）${linked}`
+  }
+  if (item.duplicate) {
+    return `${docName} 已在库中（${item.name}），未重复入库`
+  }
+  if (item.status === 'parsing') {
+    return `${docName} 已提交，后台解析中（文字页本地抽取，扫描页/图片走 OCR）`
+  }
   const chunks = item.chunks ?? 0
   const chars = item.charCount ?? 0
-  if (opts?.metaOnly) {
-    return `${docName} 已入库三维图纸元数据（${chunks} 切块）`
+  const ocr = item.ocrPages ? ` · OCR ${item.ocrPages} 次` : ''
+  const cap = item.ocrCapped ? ' · 已达 OCR 页数上限' : ''
+  const formula = item.formulaFallback ? ' · 含公式原文' : ''
+  return `${docName} 已入库：${chars.toLocaleString()} 字符 · 切成 ${chunks} 块${ocr}${cap}${formula}`
+}
+
+function fmtPageOcr(it: KbItem) {
+  const parts: string[] = []
+  if (it.pageCount) {
+    parts.push(it.fileType === 'xlsx' ? `${it.pageCount} 表` : `${it.pageCount} 页`)
   }
-  return `${docName} 已入库：${chars.toLocaleString()} 字符 · 切成 ${chunks} 块`
+  if (it.ocrPages) parts.push(`OCR ${it.ocrPages}`)
+  if (it.ocrCapped) parts.push('已达页数上限')
+  if (it.formulaFallback) parts.push('含公式原文')
+  return parts.join(' · ')
 }
 
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 
 const baseId = computed(() => String(route.params.baseId || ''))
@@ -136,19 +175,36 @@ const uploaderName = computed(
 )
 
 const base = ref<KnowledgeBaseItem | null>(null)
-const tab = ref<Tab>('file')
+const tab = ref<Tab>('text')
 const items = ref<KbItem[]>([])
 const loading = ref(true)
 const keyword = ref('')
 const dragOver = ref(false)
 const uploading = ref<string[]>([])
+const uploadJobs = ref<
+  { key: string; name: string; percent: number; phase: 'upload' | 'parsing'; docId?: string }[]
+>([])
 const toast = ref<{ type: 'ok' | 'err'; msg: string } | null>(null)
 const fileRef = ref<HTMLInputElement | null>(null)
+const textAttachRef = ref<HTMLInputElement | null>(null)
+const textAttachFiles = ref<File[]>([])
+const attachingId = ref<string | null>(null)
+const attachDraft = ref<Record<string, string>>({})
+
+function isDrawingLike(it: KbItem) {
+  if (it.kind === 'drawing') return true
+  const tags = it.tags || []
+  return tags.some((t) => ['图纸附件', '图纸', '布置图', 'drawing'].includes(String(t)))
+}
+
+const caseDocs = computed(() =>
+  items.value.filter((it) => !isDrawingLike(it) && it.status === 'ready'),
+)
 
 const urlForm = ref({ url: '', title: '', tags: '' })
 const textForm = ref({ title: '', content: '', tags: '' })
 const probe = ref('')
-const probeRes = ref<{ content: string; score: number }[] | null>(null)
+const probeRes = ref<{ content: string; score: number; name?: string }[] | null>(null)
 const probeLoading = ref(false)
 const previewItem = ref<KbItem | null>(null)
 const textPreview = ref<{
@@ -159,8 +215,28 @@ const textPreview = ref<{
 } | null>(null)
 const previewLoadingId = ref<string | null>(null)
 const deletingId = ref<string | null>(null)
+const downloadingId = ref<string | null>(null)
+const retryingId = ref<string | null>(null)
 const pendingDeleteDoc = ref<KbItem | null>(null)
+const pendingDuplicate = ref<{
+  kind: 'file' | 'url' | 'text'
+  label: string
+  file?: File
+  duplicates: KbDocItem[]
+} | null>(null)
+const aclOpen = ref(false)
 let toastTimer: ReturnType<typeof setTimeout> | null = null
+let parsePollTimer: ReturnType<typeof setInterval> | null = null
+
+const canManage = computed(() => Boolean(base.value?.canManage))
+const canUse = computed(() => Boolean(base.value?.canUse))
+const canViewOnly = computed(() => Boolean(base.value) && !canUse.value && !canManage.value)
+
+const parsingCount = computed(
+  () =>
+    items.value.filter((it) => it.status === 'parsing').length +
+    uploadJobs.value.filter((j) => j.phase === 'parsing').length,
+)
 
 const filtered = computed(() => {
   if (!keyword.value.trim()) return items.value
@@ -171,6 +247,56 @@ const filtered = computed(() => {
       it.summary?.toLowerCase().includes(k) ||
       it.tags?.some((t) => t.toLowerCase().includes(k)),
   )
+})
+
+type DisplayRow = {
+  item: KbItem
+  depth: 0 | 1
+  parentName?: string
+  childCount: number
+  unlinkedDrawing: boolean
+}
+
+const displayRows = computed((): DisplayRow[] => {
+  const list = filtered.value
+  const all = items.value
+  const idSet = new Set(all.map((d) => d.id))
+  const nameById = new Map(all.map((d) => [d.id, d.name]))
+  const childrenOf = new Map<string, KbItem[]>()
+  const childIds = new Set<string>()
+  for (const d of all) {
+    if (!d.parentId || !idSet.has(d.parentId)) continue
+    const arr = childrenOf.get(d.parentId) || []
+    arr.push(d)
+    childrenOf.set(d.parentId, arr)
+    childIds.add(d.id)
+  }
+  const rows: DisplayRow[] = []
+  const shown = new Set<string>()
+  const emit = (item: KbItem, depth: 0 | 1, parentName?: string) => {
+    rows.push({
+      item,
+      depth,
+      parentName,
+      childCount: (childrenOf.get(item.id) || []).length,
+      unlinkedDrawing: isDrawingLike(item) && !item.parentId,
+    })
+  }
+  for (const it of list) {
+    if (childIds.has(it.id)) continue
+    emit(it, 0)
+    shown.add(it.id)
+    for (const ch of childrenOf.get(it.id) || []) {
+      emit(ch, 1, it.name)
+      shown.add(ch.id)
+    }
+  }
+  for (const it of list) {
+    if (shown.has(it.id)) continue
+    emit(it, it.parentId ? 1 : 0, it.parentId ? nameById.get(it.parentId) : undefined)
+    shown.add(it.id)
+  }
+  return rows
 })
 
 const totalChunks = computed(() => items.value.reduce((s, it) => s + (it.chunks || 0), 0))
@@ -194,6 +320,11 @@ async function fetchList() {
     base.value = baseInfo
     items.value = docs
   } catch (e) {
+    if (e instanceof ApiError && (e.status === 404 || e.status === 403)) {
+      toast.value = { type: 'err', msg: '没有该知识库的访问权限' }
+      await router.replace('/knowledge')
+      return
+    }
     toast.value = {
       type: 'err',
       msg: e instanceof ApiError || e instanceof Error ? e.message : '加载失败',
@@ -216,50 +347,146 @@ watch(baseId, () => {
   void fetchList()
 })
 
+watch(parsingCount, (n) => {
+  if (n > 0 && !parsePollTimer) {
+    parsePollTimer = setInterval(() => {
+      void fetchList()
+    }, 2500)
+  }
+  if (n === 0 && parsePollTimer) {
+    clearInterval(parsePollTimer)
+    parsePollTimer = null
+  }
+})
+
+watch(
+  items,
+  (docs) => {
+    const remain: typeof uploadJobs.value = []
+    for (const job of uploadJobs.value) {
+      if (job.phase !== 'parsing' || !job.docId) {
+        remain.push(job)
+        continue
+      }
+      const it = docs.find((d) => d.id === job.docId)
+      if (!it || it.status === 'parsing') {
+        remain.push(job)
+        continue
+      }
+      toast.value = { type: it.status === 'failed' ? 'err' : 'ok', msg: fmtIngestToast(job.name, it) }
+    }
+    uploadJobs.value = remain
+  },
+  { deep: false },
+)
+
 onMounted(() => {
   void fetchList()
 })
 
 onUnmounted(() => {
   if (toastTimer) clearTimeout(toastTimer)
+  if (parsePollTimer) clearInterval(parsePollTimer)
 })
 
-async function handleFiles(files: FileList | File[]) {
-  const arr = Array.from(files)
-  if (arr.length === 0 || !baseId.value) return
-  uploading.value = [...uploading.value, ...arr.map((f) => f.name)]
-  for (const file of arr) {
-    try {
-      const ext = file.name.split('.').pop()?.toLowerCase() || ''
-      const parsed = await readFileSmart(file)
-      const result = await uploadKnowledgeDocument({
+async function uploadSingleFile(file: File, force = false) {
+  if (!baseId.value) return
+  const jobKey = `${Date.now()}-${file.name}-${Math.random().toString(36).slice(2, 6)}`
+  uploadJobs.value = [
+    ...uploadJobs.value,
+    { key: jobKey, name: file.name, percent: 0, phase: 'upload' },
+  ]
+  const patchJob = (patch: Partial<(typeof uploadJobs.value)[number]>) => {
+    uploadJobs.value = uploadJobs.value.map((j) =>
+      j.key === jobKey ? { ...j, ...patch } : j,
+    )
+  }
+  try {
+    const invalid = validateKbUploadFile(file)
+    if (invalid) throw new Error(invalid)
+    const result = await uploadKnowledgeDocument(
+      {
         baseId: baseId.value,
+        file,
         name: file.name,
-        fileType: ext,
-        size: file.size,
-        content: parsed.content,
-        uploader: uploaderName.value,
-        tags: THREE_D_EXTS.includes(ext) ? ['手动上传', '三维图纸'] : ['手动上传'],
-      })
-      items.value = result.items
+        tags: ['手动上传'],
+        asAttachment: false,
+        force,
+      },
+      (p) => patchJob({ percent: p.percent, phase: 'upload' }),
+    )
+    items.value = result.items
+    const replaced = (result.replaced?.length || 0) > 0
+    if (result.item?.duplicate) {
+      uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
+      toast.value = { type: 'ok', msg: fmtIngestToast(file.name, result.item) }
+    } else if (result.item?.status === 'parsing') {
+      patchJob({ percent: 100, phase: 'parsing', docId: result.item.id })
       toast.value = {
         type: 'ok',
-        msg: fmtIngestToast(file.name, result.item, {
-          metaOnly: THREE_D_EXTS.includes(ext) || !parsed.fullText,
-        }),
+        msg: fmtIngestToast(file.name, result.item) + (replaced ? '（已覆盖旧版）' : ''),
       }
-    } catch (e) {
-      const raw = e instanceof Error ? e.message : '未知错误'
-      const hint = /embedding/i.test(raw)
-        ? '（正文可能已解析，失败在向量化；长文档请确认 Embedding 模型可用）'
-        : ''
+    } else {
+      uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
       toast.value = {
-        type: 'err',
-        msg: `${file.name} 处理失败：${raw}${hint}`,
+        type: 'ok',
+        msg: fmtIngestToast(file.name, result.item) + (replaced ? '（已覆盖旧版）' : ''),
       }
-    } finally {
-      uploading.value = uploading.value.filter((n) => n !== file.name)
     }
+  } catch (e) {
+    uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
+    const raw = e instanceof Error ? e.message : '未知错误'
+    const hint = /embedding/i.test(raw)
+      ? '（正文可能已解析，失败在向量化；请确认 Embedding 模型可用）'
+      : ''
+    toast.value = {
+      type: 'err',
+      msg: `${file.name} 处理失败：${raw}${hint}`,
+    }
+  }
+}
+
+async function handleFiles(files: FileList | File[], opts?: { force?: boolean }) {
+  const arr = Array.from(files)
+  if (arr.length === 0 || !baseId.value) return
+  for (const file of arr) {
+    if (!opts?.force) {
+      try {
+        const dup = await checkKnowledgeDocumentDuplicate({
+          baseId: baseId.value,
+          name: file.name,
+        })
+        if (dup.exists) {
+          pendingDuplicate.value = {
+            kind: 'file',
+            label: file.name,
+            file,
+            duplicates: dup.duplicates,
+          }
+          return
+        }
+      } catch (e) {
+        toast.value = {
+          type: 'err',
+          msg: e instanceof Error ? e.message : '重复检查失败',
+        }
+        return
+      }
+    }
+    await uploadSingleFile(file, Boolean(opts?.force))
+  }
+}
+
+async function confirmDuplicateUpload() {
+  const pending = pendingDuplicate.value
+  if (!pending) return
+  pendingDuplicate.value = null
+  if (pending.kind === 'file' && pending.file) {
+    await handleFiles([pending.file], { force: true })
+  } else if (pending.kind === 'url') {
+    await submitUrl(true)
+  } else if (pending.kind === 'text') {
+    await submitText(true)
   }
 }
 
@@ -275,27 +502,56 @@ function onDrop(e: DragEvent) {
   if (e.dataTransfer?.files) void handleFiles(e.dataTransfer.files)
 }
 
-async function submitUrl() {
+async function submitUrl(force = false) {
   if (!urlForm.value.url.trim()) {
     toast.value = { type: 'err', msg: '请填写资料 URL' }
     return
   }
   if (!baseId.value) return
+  const title = urlForm.value.title.trim() || urlForm.value.url.trim()
   const urlKey = urlForm.value.url
+  if (!force) {
+    try {
+      const dup = await checkKnowledgeDocumentDuplicate({
+        baseId: baseId.value,
+        name: title,
+        url: urlKey.trim(),
+      })
+      if (dup.exists) {
+        pendingDuplicate.value = {
+          kind: 'url',
+          label: title,
+          duplicates: dup.duplicates,
+        }
+        return
+      }
+    } catch (e) {
+      toast.value = {
+        type: 'err',
+        msg: e instanceof Error ? e.message : '重复检查失败',
+      }
+      return
+    }
+  }
   uploading.value = [...uploading.value, urlKey]
   try {
     const result = await createUrlDocument({
       baseId: baseId.value,
       url: urlForm.value.url.trim(),
-      title: urlForm.value.title.trim() || urlForm.value.url.trim(),
+      title,
       uploader: uploaderName.value,
       tags: urlForm.value.tags
         ? urlForm.value.tags.split(/[,，\s]+/).filter(Boolean)
         : ['URL'],
+      force,
     })
     items.value = result.items
     urlForm.value = { url: '', title: '', tags: '' }
-    toast.value = { type: 'ok', msg: fmtIngestToast(result.item.name, result.item) }
+    const replaced = (result.replaced?.length || 0) > 0
+    toast.value = {
+      type: 'ok',
+      msg: fmtIngestToast(result.item.name, result.item) + (replaced ? '（已覆盖旧版）' : ''),
+    }
   } catch (e) {
     toast.value = {
       type: 'err',
@@ -306,13 +562,71 @@ async function submitUrl() {
   }
 }
 
-async function submitText() {
+function addTextAttachFiles(files: FileList | File[]) {
+  const next = [...textAttachFiles.value]
+  for (const file of Array.from(files)) {
+    const invalid = validateKbUploadFile(file)
+    if (invalid) {
+      toast.value = { type: 'err', msg: `${file.name}：${invalid}` }
+      continue
+    }
+    if (!DRAWING_EXTS.includes(fileExt(file.name))) {
+      toast.value = { type: 'err', msg: `${file.name} 不是平面图（请用 PDF / 图片）` }
+      continue
+    }
+    if (next.some((f) => f.name === file.name && f.size === file.size)) continue
+    if (next.length >= DRAWING_MAX_COUNT) {
+      toast.value = {
+        type: 'err',
+        msg: `每个案例最多 ${DRAWING_MAX_COUNT} 张图纸附件`,
+      }
+      break
+    }
+    next.push(file)
+  }
+  textAttachFiles.value = next
+}
+
+function onTextAttachChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  if (input.files) addTextAttachFiles(input.files)
+  input.value = ''
+}
+
+function removeTextAttach(index: number) {
+  textAttachFiles.value = textAttachFiles.value.filter((_, i) => i !== index)
+}
+
+async function submitText(force = false) {
   if (!textForm.value.title.trim() || textForm.value.content.trim().length < 4) {
     toast.value = { type: 'err', msg: '请填写资料名称和正文（正文 ≥ 4 字）' }
     return
   }
   if (!baseId.value) return
   const titleKey = textForm.value.title
+  if (!force) {
+    try {
+      const dup = await checkKnowledgeDocumentDuplicate({
+        baseId: baseId.value,
+        name: textForm.value.title.trim(),
+      })
+      if (dup.exists) {
+        pendingDuplicate.value = {
+          kind: 'text',
+          label: textForm.value.title.trim(),
+          duplicates: dup.duplicates,
+        }
+        return
+      }
+    } catch (e) {
+      toast.value = {
+        type: 'err',
+        msg: e instanceof Error ? e.message : '重复检查失败',
+      }
+      return
+    }
+  }
+  const attachments = [...textAttachFiles.value]
   uploading.value = [...uploading.value, titleKey]
   try {
     const result = await createTextDocument({
@@ -323,10 +637,58 @@ async function submitText() {
       tags: textForm.value.tags
         ? textForm.value.tags.split(/[,，\s]+/).filter(Boolean)
         : ['手录'],
+      force,
     })
     items.value = result.items
+    let attached = 0
+    const attachErrors: string[] = []
+    for (const file of attachments) {
+      const jobKey = `${Date.now()}-${file.name}-${Math.random().toString(36).slice(2, 6)}`
+      uploadJobs.value = [
+        ...uploadJobs.value,
+        { key: jobKey, name: file.name, percent: 0, phase: 'upload' },
+      ]
+      try {
+        const up = await uploadKnowledgeDocument(
+          {
+            baseId: baseId.value,
+            file,
+            name: file.name,
+            tags: ['图纸附件'],
+            parentId: result.item.id,
+            asAttachment: true,
+          },
+          (p) => {
+            uploadJobs.value = uploadJobs.value.map((j) =>
+              j.key === jobKey ? { ...j, percent: p.percent, phase: 'upload' } : j,
+            )
+          },
+        )
+        items.value = up.items
+        attached += 1
+        uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
+      } catch (e) {
+        uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
+        attachErrors.push(
+          `${file.name}：${e instanceof Error ? e.message : '上传失败'}`,
+        )
+      }
+    }
     textForm.value = { title: '', content: '', tags: '' }
-    toast.value = { type: 'ok', msg: fmtIngestToast(result.item.name, result.item) }
+    textAttachFiles.value = []
+    if (attachErrors.length) {
+      toast.value = {
+        type: 'err',
+        msg: `${result.item.name} 已入库，但图纸未全部挂上：${attachErrors.join('；')}`,
+      }
+    } else if (attached > 0) {
+      toast.value = {
+        type: 'ok',
+        msg: `${fmtIngestToast(result.item.name, result.item)}，并已挂上 ${attached} 张图纸附件`,
+      }
+    } else {
+      toast.value = { type: 'ok', msg: fmtIngestToast(result.item.name, result.item) }
+    }
   } catch (e) {
     toast.value = {
       type: 'err',
@@ -359,8 +721,41 @@ async function runProbe() {
   }
 }
 
+function setAttachDraft(docId: string, parentId: string) {
+  attachDraft.value = { ...attachDraft.value, [docId]: parentId }
+}
+
 function askDeleteDoc(doc: KbItem) {
+  if (!canManage.value) return
   pendingDeleteDoc.value = doc
+}
+
+async function attachDrawing(doc: KbItem, parentId: string) {
+  if (!parentId || !baseId.value) return
+  attachingId.value = doc.id
+  try {
+    const result = await attachKnowledgeDocument({
+      baseId: baseId.value,
+      docId: doc.id,
+      parentId,
+      asAttachment: true,
+    })
+    items.value = result.items
+    delete attachDraft.value[doc.id]
+    const parentName =
+      result.item.parentName || caseDocs.value.find((c) => c.id === parentId)?.name || '案例卡'
+    toast.value = {
+      type: 'ok',
+      msg: `已挂到「${parentName}」，并改为图纸附件（已移出向量）`,
+    }
+  } catch (e) {
+    toast.value = {
+      type: 'err',
+      msg: e instanceof ApiError || e instanceof Error ? e.message : '挂靠失败',
+    }
+  } finally {
+    attachingId.value = null
+  }
 }
 
 async function confirmDeleteDoc() {
@@ -378,6 +773,41 @@ async function confirmDeleteDoc() {
     }
   } finally {
     deletingId.value = null
+  }
+}
+
+async function retryDoc(doc: KbItem) {
+  if (!baseId.value || doc.status === 'parsing') return
+  retryingId.value = doc.id
+  try {
+    const data = await reparseKnowledgeDocument(baseId.value, doc.id)
+    if (data.items?.length) items.value = data.items
+    else if (data.item) {
+      items.value = items.value.map((it) => (it.id === data.item.id ? data.item : it))
+    }
+    toast.value = { type: 'ok', msg: `${doc.name} 已重新提交解析` }
+  } catch (e) {
+    toast.value = {
+      type: 'err',
+      msg: e instanceof Error ? e.message : '重试失败',
+    }
+  } finally {
+    retryingId.value = null
+  }
+}
+
+async function downloadDoc(doc: KbItem) {
+  if (!baseId.value) return
+  downloadingId.value = doc.id
+  try {
+    await downloadKnowledgeDocument(baseId.value, doc.id, doc.name)
+  } catch (e) {
+    toast.value = {
+      type: 'err',
+      msg: e instanceof Error ? e.message : '下载失败',
+    }
+  } finally {
+    downloadingId.value = null
   }
 }
 
@@ -422,28 +852,46 @@ async function openDocPreview(doc: KbItem) {
         <p class="mt-1 text-[12px] text-text-secondary">
           {{
             base?.description ||
-            '支持 PDF / Word / Excel / 图片 / CAD / 文本 / URL 多源资料导入，向量化后作为 AI 智能问答的依据。'
+            '上传 PDF / Word / Excel / 图片 / 文本。可复制文字本地解析，扫描页与图片走 OCR 后向量化。'
           }}
         </p>
       </div>
-      <div class="flex gap-3 text-[11px] font-mono text-text-secondary">
-        <span>
-          资料总数
-          <span class="text-text-primary text-base font-semibold">{{ items.length }}</span>
-        </span>
-        <span>
-          总切块
-          <span class="text-molybdenum text-base font-semibold">{{ totalChunks }}</span>
-        </span>
-        <span>
-          总字符
-          <span class="text-patina text-base font-semibold">{{ totalCharsK }}k</span>
-        </span>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="flex gap-3 text-[11px] font-mono text-text-secondary">
+          <span>
+            资料总数
+            <span class="text-text-primary text-base font-semibold">{{ items.length }}</span>
+          </span>
+          <span>
+            总切块
+            <span class="text-molybdenum text-base font-semibold">{{ totalChunks }}</span>
+          </span>
+          <span>
+            总字符
+            <span class="text-patina text-base font-semibold">{{ totalCharsK }}k</span>
+          </span>
+        </div>
+        <button
+          v-if="canManage"
+          type="button"
+          class="h-8 px-3 text-[12px] rounded-md border border-hairline inline-flex items-center gap-1.5 text-text-secondary hover:text-molybdenum hover:bg-molybdenum/10"
+          @click="aclOpen = true"
+        >
+          <Shield class="size-3.5" />
+          权限
+        </button>
       </div>
     </header>
 
+    <div
+      v-if="canViewOnly"
+      class="rounded-lg border border-hairline bg-bg-base/40 px-4 py-3 text-[12px] text-text-secondary"
+    >
+      您仅有查看权限，无法导入或删除资料；如需检索请在 AI 对话中勾选本库。
+    </div>
+
     <!-- 导入资料 -->
-    <section class="rounded-lg panel-surface overflow-hidden flex flex-col">
+    <section v-if="canManage" class="rounded-lg panel-surface overflow-hidden flex flex-col">
       <header class="flex items-center justify-between px-4 lg:px-5 py-3 border-b border-border">
         <h3 class="text-sm font-medium tracking-wide truncate flex items-center gap-2">
           <span class="inline-block w-1 h-3 bg-iron rounded-sm" />
@@ -492,9 +940,7 @@ async function openDocPreview(doc: KbItem) {
                 </button>
               </div>
               <div class="text-[11px] text-text-secondary max-w-xl">
-                正文入库：.docx / .txt / .md / .csv / .json 等；三维图纸仅存元数据。 PDF / 旧版
-                .doc / Excel / 图片请先转文本或用「文本粘贴」。单文件最大 30 MB。
-                入库后列表「切块」列为后端实际向量分块数。
+                手册、规范请在此上传，会抽字并向量化。充电站平面图请到「文本粘贴」，与案例卡一并入库（不 OCR）。单文件最大 20 MB。
               </div>
               <input
                 ref="fileRef"
@@ -507,15 +953,24 @@ async function openDocPreview(doc: KbItem) {
             </div>
           </div>
 
-          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
             <div
               v-for="g in FILE_TYPE_GROUPS"
               :key="g.label"
               class="border border-hairline rounded-md px-3 py-2 flex items-center gap-2"
+              :class="g.soon ? 'opacity-55' : ''"
             >
               <component :is="g.icon" class="size-4" :class="g.color" />
               <div class="text-[11px]">
-                <div class="text-text-primary">{{ g.label }}</div>
+                <div class="text-text-primary flex items-center gap-1">
+                  {{ g.label }}
+                  <span
+                    v-if="g.soon"
+                    class="text-[9px] font-mono text-text-muted border border-hairline rounded px-1"
+                  >
+                    即将
+                  </span>
+                </div>
                 <div class="text-text-muted font-mono">
                   {{ g.exts.slice(0, 2).join(' · ') }}
                 </div>
@@ -592,9 +1047,55 @@ async function openDocPreview(doc: KbItem) {
             <textarea
               v-model="textForm.content"
               class="kb-input min-h-[140px] font-sans"
-              placeholder="粘贴或录入资料正文，长度 ≥ 4 字..."
+              placeholder="充电站布置案例请按模板粘贴「1.方案摘要 … 5.生成时如何复用」整篇；会按完整案例入库，不会拆成碎片。"
             />
           </label>
+          <div class="block">
+            <div class="text-[11px] text-text-secondary mb-1">图纸附件（选填，PDF / 图片，最多 2 张）</div>
+            <div
+              class="border border-dashed border-hairline rounded-md px-3 py-3 flex flex-col gap-2"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <div class="text-[12px] text-text-secondary">
+                  与案例卡一并入库，不 OCR、不进向量；检索命中该案例时再附图。
+                </div>
+                <button
+                  type="button"
+                  class="kb-btn-primary h-8 px-2.5 text-[11px]"
+                  @click="textAttachRef?.click()"
+                >
+                  <Paperclip class="size-3.5" />
+                  选择图纸
+                </button>
+              </div>
+              <input
+                ref="textAttachRef"
+                type="file"
+                multiple
+                :accept="DRAWING_ACCEPT"
+                class="hidden"
+                @change="onTextAttachChange"
+              />
+              <div v-if="textAttachFiles.length" class="flex flex-wrap gap-1.5">
+                <span
+                  v-for="(f, i) in textAttachFiles"
+                  :key="`${f.name}-${f.size}-${i}`"
+                  class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] bg-molybdenum/10 text-molybdenum border border-molybdenum/20"
+                >
+                  <span class="max-w-[14rem] truncate" :title="f.name">{{ f.name }}</span>
+                  <span class="text-text-muted font-mono">{{ fmtSize(f.size) }}</span>
+                  <button
+                    type="button"
+                    class="p-0.5 hover:text-iron"
+                    title="移除"
+                    @click="removeTextAttach(i)"
+                  >
+                    <X class="size-3" />
+                  </button>
+                </span>
+              </div>
+            </div>
+          </div>
           <div class="flex justify-end">
             <button
               type="button"
@@ -613,18 +1114,42 @@ async function openDocPreview(doc: KbItem) {
         </div>
 
         <div
-          v-if="uploading.length > 0"
-          class="mt-3 px-3 py-2 rounded-md bg-bg-base/40 border border-hairline text-[11px] text-text-secondary flex items-center gap-2"
+          v-if="uploadJobs.length > 0 || uploading.length > 0"
+          class="mt-3 space-y-2"
         >
-          <Loader2 class="size-3 animate-spin text-iron" />
-          正在处理 {{ uploading.length }} 项：{{ uploading.slice(0, 3).join(' · ')
-          }}{{ uploading.length > 3 ? ` 等 ${uploading.length} 项` : '' }}
+          <div
+            v-for="job in uploadJobs"
+            :key="job.key"
+            class="px-3 py-2 rounded-md bg-bg-base/40 border border-hairline"
+          >
+            <div class="flex items-center justify-between gap-2 text-[11px] text-text-secondary">
+              <span class="truncate">{{ job.name }}</span>
+              <span class="font-mono shrink-0">
+                {{ job.phase === 'upload' ? `${job.percent}%` : '解析中' }}
+              </span>
+            </div>
+            <div class="mt-1.5 h-1 rounded-full bg-hairline overflow-hidden">
+              <div
+                class="h-full bg-iron transition-[width] duration-200"
+                :class="job.phase === 'parsing' ? 'w-full opacity-60' : ''"
+                :style="job.phase === 'upload' ? { width: `${job.percent}%` } : undefined"
+              />
+            </div>
+          </div>
+          <div
+            v-if="uploading.length > 0"
+            class="px-3 py-2 rounded-md bg-bg-base/40 border border-hairline text-[11px] text-text-secondary flex items-center gap-2"
+          >
+            <Loader2 class="size-3 animate-spin text-iron" />
+            正在处理 {{ uploading.length }} 项：{{ uploading.slice(0, 3).join(' · ')
+            }}{{ uploading.length > 3 ? ` 等 ${uploading.length} 项` : '' }}
+          </div>
         </div>
       </div>
     </section>
 
     <!-- 语义检索测试 -->
-    <section class="rounded-lg panel-surface overflow-hidden flex flex-col">
+    <section v-if="canUse" class="rounded-lg panel-surface overflow-hidden flex flex-col">
       <header class="flex items-center justify-between px-4 lg:px-5 py-3 border-b border-border">
         <div class="min-w-0">
           <h3 class="text-sm font-medium tracking-wide truncate flex items-center gap-2">
@@ -656,8 +1181,8 @@ async function openDocPreview(doc: KbItem) {
           </button>
         </div>
         <div v-if="probeRes" class="mt-3 space-y-2">
-          <div v-if="probeRes.length === 0" class="text-[12px] text-text-secondary">
-            未召回任何片段。
+          <div v-if="probeRes.length === 0" class="text-[12px] text-iron">
+            未命中
           </div>
           <div
             v-for="(c, i) in probeRes"
@@ -665,9 +1190,11 @@ async function openDocPreview(doc: KbItem) {
             :key="i"
             class="border border-hairline rounded-md px-3 py-2 bg-bg-base/40"
           >
-            <div class="flex justify-between text-[10px] text-text-muted font-mono mb-1">
-              <span>#{{ i + 1 }}</span>
-              <span class="text-molybdenum">相似度 {{ (c.score ?? 0).toFixed(4) }}</span>
+            <div class="flex justify-between gap-2 text-[10px] text-text-muted font-mono mb-1">
+              <span class="truncate min-w-0" :title="c.name || undefined">
+                #{{ i + 1 }}{{ c.name ? ` · ${c.name}` : '' }}
+              </span>
+              <span class="text-molybdenum shrink-0">相似度 {{ (c.score ?? 0).toFixed(4) }}</span>
             </div>
             <div
               class="text-[12px] leading-relaxed text-text-primary whitespace-pre-wrap line-clamp-5"
@@ -706,18 +1233,18 @@ async function openDocPreview(doc: KbItem) {
           暂无资料。请通过上方上传文件、抓取 URL 或粘贴文本进行入库。
         </div>
         <div v-else class="overflow-x-auto -mx-4 px-4">
-          <table class="w-full min-w-[1080px] table-fixed text-[12px]">
+          <table class="w-full min-w-[1280px] table-fixed text-[12px]">
             <colgroup>
-              <col class="w-[34%]" />
+              <col class="w-[28%]" />
               <col class="w-[7%]" />
-              <col class="w-[8%]" />
+              <col class="w-[7%]" />
               <col class="w-[7%]" />
               <col class="w-[6%]" />
-              <col class="w-[12%]" />
-              <col class="w-[8%]" />
+              <col class="w-[10%]" />
+              <col class="w-[7%]" />
               <col class="w-[8%]" />
               <col class="w-[5%]" />
-              <col class="w-[9%]" />
+              <col class="w-[15%]" />
             </colgroup>
             <thead>
               <tr class="text-text-muted border-b border-hairline">
@@ -744,12 +1271,13 @@ async function openDocPreview(doc: KbItem) {
             </thead>
             <tbody>
               <tr
-                v-for="it in filtered"
+                v-for="{ item: it, depth, parentName, childCount, unlinkedDrawing } in displayRows"
                 :key="it.id"
                 class="border-b border-hairline/70 hover:bg-bg-base/40"
+                :class="unlinkedDrawing ? 'bg-sulfur/5' : depth ? 'bg-bg-base/30' : ''"
               >
                 <td class="px-3 py-2.5 align-middle">
-                  <div class="flex items-start gap-2 min-w-0">
+                  <div class="flex items-start gap-2 min-w-0" :class="depth ? 'pl-5' : ''">
                     <component
                       :is="iconForType(it.fileType || it.source, it.kind)"
                       class="size-4 shrink-0 mt-0.5"
@@ -769,7 +1297,66 @@ async function openDocPreview(doc: KbItem) {
                         </span>
                       </div>
                       <div
-                        v-if="it.summary"
+                        v-if="childCount"
+                        class="text-[10.5px] text-patina mt-0.5 flex items-center gap-1"
+                      >
+                        <Paperclip class="size-3 shrink-0" />
+                        已挂附图纸 {{ childCount }} 张
+                      </div>
+                      <div
+                        v-else-if="parentName"
+                        class="text-[10.5px] text-molybdenum mt-0.5 flex items-center gap-1"
+                      >
+                        <Link2 class="size-3 shrink-0" />
+                        挂在：{{ parentName }}
+                      </div>
+                      <div
+                        v-else-if="unlinkedDrawing"
+                        class="text-[10.5px] text-sulfur mt-0.5"
+                      >
+                        未挂靠案例 · 当前{{ it.kind === 'drawing' ? '只存盘' : `已按正文切成 ${it.chunks || 0} 块` }}，检索时不会当附图
+                      </div>
+                      <div
+                        v-if="canManage && unlinkedDrawing && caseDocs.length"
+                        class="mt-1 flex items-center gap-1 min-w-0"
+                      >
+                        <select
+                          class="kb-input text-[11px] max-w-[14rem]"
+                          :value="attachDraft[it.id] || ''"
+                          :disabled="attachingId === it.id"
+                          @change="
+                            setAttachDraft(it.id, ($event.target as HTMLSelectElement).value)
+                          "
+                        >
+                          <option value="">选择案例卡…</option>
+                          <option v-for="c in caseDocs" :key="c.id" :value="c.id">{{ c.name }}</option>
+                        </select>
+                        <button
+                          type="button"
+                          class="kb-btn-primary h-7 px-2 text-[11px] shrink-0"
+                          :disabled="!attachDraft[it.id] || attachingId === it.id"
+                          @click="attachDrawing(it, attachDraft[it.id])"
+                        >
+                          <Loader2 v-if="attachingId === it.id" class="size-3 animate-spin" />
+                          确认挂靠
+                        </button>
+                      </div>
+                      <div
+                        v-if="fmtPageOcr(it)"
+                        class="text-[10px] font-mono mt-0.5"
+                        :class="it.ocrCapped || it.formulaFallback ? 'text-sulfur' : 'text-text-muted'"
+                      >
+                        {{ fmtPageOcr(it) }}
+                      </div>
+                      <div
+                        v-if="it.status === 'failed'"
+                        class="text-[10.5px] text-iron mt-0.5 whitespace-normal break-words leading-snug line-clamp-3"
+                        :title="it.errorMsg || '入库失败'"
+                      >
+                        {{ it.errorMsg || '入库失败' }}
+                      </div>
+                      <div
+                        v-else-if="it.summary"
                         class="text-[10.5px] text-text-muted truncate mt-0.5"
                         :title="it.summary"
                       >
@@ -783,9 +1370,11 @@ async function openDocPreview(doc: KbItem) {
                     class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-bg-base/60 text-text-secondary border border-hairline"
                   >
                     {{
-                      it.source === 'file'
-                        ? (it.fileType || 'FILE').toUpperCase()
-                        : it.source.toUpperCase()
+                      it.kind === 'drawing'
+                        ? '图纸附件'
+                        : it.source === 'file'
+                          ? (it.fileType || 'FILE').toUpperCase()
+                          : it.source.toUpperCase()
                     }}
                   </span>
                 </td>
@@ -797,13 +1386,19 @@ async function openDocPreview(doc: KbItem) {
                 <td
                   class="px-2 py-2.5 text-right font-mono text-text-secondary whitespace-nowrap align-middle"
                 >
-                  {{ it.charCount ? it.charCount.toLocaleString() : '—' }}
+                  {{ it.kind === 'drawing' ? '—' : it.charCount ? it.charCount.toLocaleString() : '—' }}
                 </td>
                 <td
                   class="px-2 py-2.5 text-right font-mono text-molybdenum whitespace-nowrap align-middle"
-                  :title="it.chunks != null ? `已切成 ${it.chunks} 块向量片段` : undefined"
+                  :title="
+                    it.kind === 'drawing'
+                      ? '图纸附件不进向量'
+                      : it.chunks != null
+                        ? `已切成 ${it.chunks} 块向量片段`
+                        : undefined
+                  "
                 >
-                  {{ it.chunks != null ? `${it.chunks} 块` : '—' }}
+                  {{ it.kind === 'drawing' ? '附件' : it.chunks != null ? `${it.chunks} 块` : '—' }}
                 </td>
                 <td class="px-2 py-2.5 align-middle">
                   <div class="flex flex-wrap gap-1">
@@ -826,21 +1421,36 @@ async function openDocPreview(doc: KbItem) {
                 <td
                   class="px-2 py-2.5 text-right text-text-muted font-mono text-[11px] whitespace-nowrap align-middle"
                 >
-                  {{ fmtAgo(it.createdAt) }}
+                  {{ fmtAgo(it.createdAt, it.createdAtUtc) }}
                 </td>
                 <td class="px-2 py-2.5 text-center align-middle whitespace-nowrap">
                   <Ok v-if="it.status === 'ready'" class="inline size-4 text-patina" />
-                  <XCircle
+                  <span
                     v-else-if="it.status === 'failed'"
-                    class="inline size-4 text-iron"
-                  />
+                    class="inline-flex items-center justify-center"
+                    :title="it.errorMsg || '入库失败'"
+                  >
+                    <XCircle class="inline size-4 text-iron" />
+                  </span>
                   <Loader2 v-else class="inline size-4 animate-spin text-sulfur" />
                 </td>
                 <td class="px-2 py-2.5 text-center align-middle whitespace-nowrap">
                   <button
+                    v-if="canManage && it.status === 'failed'"
+                    type="button"
+                    :disabled="retryingId === it.id"
+                    class="inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-iron hover:bg-iron/10 transition-colors whitespace-nowrap"
+                    title="删除旧向量后重新解析"
+                    @click="retryDoc(it)"
+                  >
+                    <Loader2 v-if="retryingId === it.id" class="size-3 animate-spin" />
+                    <RotateCcw v-else class="size-3" />
+                    重试
+                  </button>
+                  <button
                     type="button"
                     :disabled="previewLoadingId === it.id"
-                    class="inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-text-secondary hover:text-molybdenum hover:bg-molybdenum/10 transition-colors whitespace-nowrap"
+                    class="ml-0.5 inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-text-secondary hover:text-molybdenum hover:bg-molybdenum/10 transition-colors whitespace-nowrap"
                     title="预览入库文本内容"
                     @click="openDocPreview(it)"
                   >
@@ -852,6 +1462,18 @@ async function openDocPreview(doc: KbItem) {
                     预览
                   </button>
                   <button
+                    type="button"
+                    :disabled="downloadingId === it.id"
+                    class="ml-0.5 inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-text-secondary hover:text-molybdenum hover:bg-molybdenum/10 transition-colors whitespace-nowrap"
+                    title="下载原文件（无原件时导出预览正文）"
+                    @click="downloadDoc(it)"
+                  >
+                    <Loader2 v-if="downloadingId === it.id" class="size-3 animate-spin" />
+                    <Download v-else class="size-3" />
+                    下载
+                  </button>
+                  <button
+                    v-if="canManage"
                     type="button"
                     :disabled="deletingId === it.id"
                     class="ml-0.5 inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-text-secondary hover:text-iron hover:bg-iron/10 transition-colors whitespace-nowrap"
@@ -869,6 +1491,14 @@ async function openDocPreview(doc: KbItem) {
       </div>
     </section>
 
+    <KbAclDialog
+      :open="aclOpen"
+      :base-id="baseId"
+      :base-name="base?.name"
+      @close="aclOpen = false"
+      @saved="void fetchList()"
+    />
+
     <!-- Toast -->
     <div
       v-if="toast"
@@ -880,6 +1510,55 @@ async function openDocPreview(doc: KbItem) {
       "
     >
       {{ toast.msg }}
+    </div>
+
+    <!-- Duplicate upload confirm -->
+    <div
+      v-if="pendingDuplicate"
+      class="fixed inset-0 z-[60] bg-bg-base/80 backdrop-blur-sm flex items-center justify-center p-4"
+      @click.self="pendingDuplicate = null"
+    >
+      <div class="w-full max-w-md rounded-lg border border-hairline bg-bg-elevated shadow-2xl overflow-hidden">
+        <div class="px-5 pt-5 pb-3">
+          <div class="flex items-start gap-3">
+            <span
+              class="mt-0.5 size-9 shrink-0 rounded-md bg-sulfur/15 text-sulfur inline-flex items-center justify-center border border-sulfur/25"
+            >
+              <TriangleAlert class="size-4" />
+            </span>
+            <div class="min-w-0 space-y-1.5 text-left">
+              <div class="text-[14px] font-medium text-text-primary">检测到重复资料</div>
+              <div class="text-[12px] text-text-secondary leading-relaxed">
+                「<span class="text-text-primary font-medium">{{ pendingDuplicate.label }}</span>」
+                与当前知识库中已有资料同名。继续上传将<span class="text-text-primary font-medium">删除旧版</span>并替换为新内容（含向量片段与原文件）。
+              </div>
+              <div
+                v-if="pendingDuplicate.duplicates[0]"
+                class="mt-2 rounded-md border border-hairline bg-bg-base/40 px-3 py-2 text-[11px] text-text-muted"
+              >
+                已有记录：{{ pendingDuplicate.duplicates[0].uploader || '未知上传者' }} ·
+                {{ fmtAgo(pendingDuplicate.duplicates[0].createdAt, pendingDuplicate.duplicates[0].createdAtUtc) }}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="px-5 py-3 border-t border-hairline bg-bg-base/30 flex justify-end gap-2">
+          <button
+            type="button"
+            class="h-8 px-3 text-[12px] rounded-md border border-hairline bg-transparent text-text-secondary hover:bg-hairline/40"
+            @click="pendingDuplicate = null"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="h-8 px-3 text-[12px] rounded-md bg-molybdenum text-white hover:brightness-110"
+            @click="confirmDuplicateUpload()"
+          >
+            覆盖上传
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Delete confirm -->
@@ -901,7 +1580,7 @@ async function openDocPreview(doc: KbItem) {
               <div class="text-[12px] text-text-secondary leading-relaxed">
                 确认删除「
                 <span class="text-text-primary font-medium">{{ pendingDeleteDoc.name }}</span>
-                」？相关向量片段将一并移除。
+                」？相关向量片段与原文件将一并移除。
               </div>
             </div>
           </div>
@@ -1029,14 +1708,29 @@ async function openDocPreview(doc: KbItem) {
               </div>
             </div>
           </div>
-          <button
-            type="button"
-            class="size-8 rounded hover:bg-hairline/60 inline-flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors shrink-0"
-            aria-label="关闭"
-            @click="textPreview = null"
-          >
-            <X class="size-4" />
-          </button>
+          <div class="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              :disabled="downloadingId === textPreview.item.id"
+              class="h-8 px-2.5 rounded text-[11px] text-text-secondary hover:text-molybdenum hover:bg-molybdenum/10 inline-flex items-center gap-1"
+              @click="downloadDoc(textPreview.item)"
+            >
+              <Loader2
+                v-if="downloadingId === textPreview.item.id"
+                class="size-3.5 animate-spin"
+              />
+              <Download v-else class="size-3.5" />
+              下载
+            </button>
+            <button
+              type="button"
+              class="size-8 rounded hover:bg-hairline/60 inline-flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors"
+              aria-label="关闭"
+              @click="textPreview = null"
+            >
+              <X class="size-4" />
+            </button>
+          </div>
         </div>
         <div class="px-5 py-4 overflow-y-auto flex-1 min-h-0">
           <template v-if="textPreview.content">

@@ -30,6 +30,40 @@ export function coerceModelType(
   return kind === 'embedding' ? 'text_embedding' : 'text_chat'
 }
 
+const NATIVE_AIGC_SUFFIXES = [
+  '/api/v1/services/aigc/multimodal-generation/generation',
+  '/api/v1/services/aigc/multimodal-generation',
+  '/api/v1/services/aigc/text-generation/generation',
+  '/api/v1/services/aigc/text-generation',
+]
+const OPENAI_SUFFIXES = ['/chat/completions', '/completions', '/embeddings', '/images/generations']
+
+export function normalizeApiBase(raw: string): string {
+  let text = (raw || '').trim().replace(/\s+/g, '').replace(/^['"]|['"]$/g, '')
+  if (!text) return ''
+  const schemeMatch = text.match(/^(https?:\/\/)+/i)
+  let scheme = 'https'
+  if (schemeMatch) {
+    const block = schemeMatch[0].toLowerCase()
+    scheme = block.startsWith('http://') && !block.includes('https://') ? 'http' : 'https'
+    text = text.slice(schemeMatch[0].length)
+  }
+  text = text.replace(/^(https?:\/\/)+/i, '').replace(/^\/+/, '').replace(/\/+$/, '')
+  const lower = `/${text.toLowerCase()}`
+  for (const suffix of [...OPENAI_SUFFIXES, ...NATIVE_AIGC_SUFFIXES]) {
+    if (lower.endsWith(suffix)) {
+      text = text.slice(0, text.length - suffix.length).replace(/\/+$/, '')
+      break
+    }
+  }
+  const host = text.split('/')[0] || ''
+  const path = text.slice(host.length)
+  if (host.toLowerCase().endsWith('.maas.aliyuncs.com') && !path) {
+    return `${scheme}://${host}/compatible-mode/v1`
+  }
+  return text ? `${scheme}://${text}` : ''
+}
+
 export function modelTypeLabel(modelType?: string | null, kind?: ModelKind): string {
   const all = [...LLM_MODEL_TYPE_OPTIONS, ...EMBEDDING_MODEL_TYPE_OPTIONS]
   const found = all.find((x) => x.value === modelType)

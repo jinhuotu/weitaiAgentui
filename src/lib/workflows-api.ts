@@ -14,6 +14,10 @@ export type WorkflowNodeType =
   | 'llm'
   | 'agent'
   | 'mcp'
+  | 'condition'
+  | 'vision'
+  | 'image_out'
+  | 'layout_out'
 
 
 export type WorkflowGraphNode = {
@@ -76,6 +80,21 @@ export type WorkflowRunItem = {
   steps?: WorkflowRunStep[]
   startedAt?: number
   finishedAt?: number
+}
+
+export type WorkflowOption = {
+  id: string
+  name: string
+  remark?: string | null
+  domain?: string
+  publishedVersion?: number
+}
+
+export async function listWorkflowOptions(): Promise<WorkflowOption[]> {
+  const data = await apiRequest<{ items: WorkflowOption[] }>('/api/v1/workflows/options', {
+    token: requireToken(),
+  })
+  return data.items || []
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
@@ -144,13 +163,15 @@ export async function publishWorkflow(id: string, changelog?: string): Promise<W
 export type RunHandlers = {
   onStepStart?: (p: Record<string, unknown>) => void
   onStepEnd?: (p: Record<string, unknown>) => void
+  onDelta?: (text: string) => void
+  onTool?: (p: Record<string, unknown>) => void
   onDone?: (p: Record<string, unknown>) => void
   onError?: (msg: string) => void
 }
 
 export async function runWorkflowTrial(
   id: string,
-  input: { input: unknown; useDraft?: boolean },
+  input: { input: unknown; useDraft?: boolean; sessionId?: string; trigger?: string },
   handlers: RunHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -164,7 +185,9 @@ export async function runWorkflowTrial(
     },
     body: JSON.stringify({
       input: input.input,
-      useDraft: input.useDraft !== false,
+      useDraft: input.sessionId ? false : input.useDraft !== false,
+      sessionId: input.sessionId || undefined,
+      trigger: input.trigger || (input.sessionId ? 'chat' : 'trial'),
     }),
     signal,
   })
@@ -207,6 +230,8 @@ export async function runWorkflowTrial(
           const payload = JSON.parse(data) as Record<string, unknown>
           if (event === 'step_start') handlers.onStepStart?.(payload)
           else if (event === 'step_end') handlers.onStepEnd?.(payload)
+          else if (event === 'delta') handlers.onDelta?.(String(payload.text || ''))
+          else if (event === 'tool') handlers.onTool?.(payload)
           else if (event === 'done') handlers.onDone?.(payload)
           else if (event === 'error') handlers.onError?.(String(payload.msg || 'error'))
         } catch {

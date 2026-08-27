@@ -35,7 +35,7 @@ onMounted(async () => {
   try {
     const data = await fetchHealth()
     healthOk.value = data.status === 'up'
-    healthMsg.value = data.service || 'weitai-api'
+    healthMsg.value = data.service || 'youqi-api'
   } catch (err) {
     healthOk.value = false
     healthMsg.value = err instanceof ApiError ? err.message : '无法连接后端'
@@ -49,7 +49,7 @@ onMounted(async () => {
     description="主题、账号信息与后端连通性。平台暂无独立设置接口，此处仅展示当前运行状态。"
   >
     <template #badges>
-      <Tag tone="molybdenum">weitaiAgent v0.1.0</Tag>
+      <Tag tone="molybdenum">优祺智能 v0.1.0</Tag>
     </template>
   </PageHeader>
 
