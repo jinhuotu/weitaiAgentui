@@ -8,8 +8,6 @@ import {
   FileImage,
   FileSpreadsheet,
   Presentation,
-  Box,
-  Boxes,
   File as FileIcon,
   Loader2,
   Search,
@@ -29,6 +27,7 @@ import {
 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import {
+  cancelKnowledgeIngestTask,
   checkKnowledgeDocumentDuplicate,
   createTextDocument,
   createUrlDocument,
@@ -38,16 +37,18 @@ import {
   getKnowledgeBase,
   getKnowledgeDocumentPreview,
   listKnowledgeDocuments,
+  listKnowledgeIngestTasks,
   reparseKnowledgeDocument,
+  reviewKnowledgeDocument,
   searchKnowledge,
   uploadKnowledgeDocument,
   type KbDocItem,
+  type KbIngestTask,
   type KnowledgeBaseItem,
 } from '@/lib/knowledge-api'
-import { THREE_D_EXTS, fileExt, fmtSize, validateKbUploadFile } from '@/lib/read-file-smart'
+import { fileExt, fmtSize, KB_UPLOAD_MAX_BYTES, validateKbUploadFile } from '@/lib/read-file-smart'
 import { fmtAgo } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth'
-import FbxViewer from '@/components/three-preview/FbxViewer.vue'
 import KbAclDialog from '@/components/knowledge/KbAclDialog.vue'
 
 type KbItem = KbDocItem
@@ -60,7 +61,6 @@ const FILE_TYPE_GROUPS: {
   exts: string[]
   color: string
   icon: IconComp
-  soon?: boolean
 }[] = [
   { label: 'PDF', exts: ['.pdf'], color: 'text-iron', icon: FileText },
   { label: 'Word', exts: ['.docx'], color: 'text-molybdenum', icon: FileText },
@@ -72,13 +72,13 @@ const FILE_TYPE_GROUPS: {
   },
   {
     label: 'Excel',
-    exts: ['.xlsx', '.csv'],
+    exts: ['.xlsx', '.xls', '.csv'],
     color: 'text-patina',
     icon: FileSpreadsheet,
   },
   {
     label: '文本',
-    exts: ['.txt', '.md'],
+    exts: ['.txt', '.md', '.json', '.xml', '.yaml', '.yml'],
     color: 'text-text-secondary',
     icon: FileText,
   },
@@ -88,50 +88,33 @@ const FILE_TYPE_GROUPS: {
     color: 'text-sulfur',
     icon: FileImage,
   },
-  {
-    label: 'CAD',
-    exts: ['.dwg', '.dxf', '.step'],
-    color: 'text-coolant',
-    icon: Box,
-    soon: true,
-  },
-  {
-    label: '三维图纸',
-    exts: ['.fbx', '.obj', '.glb'],
-    color: 'text-iron',
-    icon: Boxes,
-    soon: true,
-  },
 ]
 
-const ACCEPT_LIST = FILE_TYPE_GROUPS.filter((g) => !g.soon)
-  .flatMap((g) => g.exts)
-  .join(',')
+const ACCEPT_LIST = FILE_TYPE_GROUPS.flatMap((g) => g.exts).join(',')
 const DRAWING_EXTS = ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']
 const DRAWING_ACCEPT = DRAWING_EXTS.map((e) => `.${e}`).join(',')
 const DRAWING_MAX_COUNT = 2
 
-function iconForType(type?: string, kind?: string): IconComp {
+function iconForType(type?: string): IconComp {
   const t = (type || '').toLowerCase()
-  if (kind === '3d' || THREE_D_EXTS.includes(t)) return Boxes
   if (['pdf'].includes(t)) return FileText
   if (['doc', 'docx'].includes(t)) return FileText
   if (['ppt', 'pptx'].includes(t)) return Presentation
-  if (['xls', 'xlsx', 'csv'].includes(t)) return FileSpreadsheet
+  if (['xls', 'xlsx', 'csv', 'json', 'xml', 'yaml', 'yml'].includes(t)) {
+    return ['xls', 'xlsx', 'csv'].includes(t) ? FileSpreadsheet : FileText
+  }
   if (['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'].includes(t)) return FileImage
-  if (['dwg', 'dxf', 'step', 'stp', 'iges', 'igs'].includes(t)) return Box
   return FileIcon
 }
 
-function colorForType(type?: string, kind?: string) {
+function colorForType(type?: string) {
   const t = (type || '').toLowerCase()
-  if (kind === '3d' || THREE_D_EXTS.includes(t)) return 'text-iron'
   if (['pdf'].includes(t)) return 'text-iron'
   if (['doc', 'docx'].includes(t)) return 'text-molybdenum'
   if (['ppt', 'pptx'].includes(t)) return 'text-iron'
   if (['xls', 'xlsx', 'csv'].includes(t)) return 'text-patina'
+  if (['json', 'xml', 'yaml', 'yml', 'txt', 'md'].includes(t)) return 'text-text-secondary'
   if (['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'].includes(t)) return 'text-sulfur'
-  if (['dwg', 'dxf', 'step', 'stp', 'iges', 'igs'].includes(t)) return 'text-coolant'
   return 'text-text-secondary'
 }
 
@@ -144,14 +127,39 @@ function fmtIngestToast(docName: string, item: KbDocItem) {
     return `${docName} 已在库中（${item.name}），未重复入库`
   }
   if (item.status === 'parsing') {
-    return `${docName} 已提交，后台解析中（文字页本地抽取，扫描页/图片走 OCR）`
+    return `${docName} 已提交，排队解析中（文字页本地抽取，扫描页/图片走 OCR）`
   }
   const chunks = item.chunks ?? 0
   const chars = item.charCount ?? 0
   const ocr = item.ocrPages ? ` · OCR ${item.ocrPages} 次` : ''
   const cap = item.ocrCapped ? ' · 已达 OCR 页数上限' : ''
   const formula = item.formulaFallback ? ' · 含公式原文' : ''
+  if (item.reviewStatus === 'pending') {
+    return `${docName} 已解析：${chars.toLocaleString()} 字符 · ${chunks} 块，待审核后才会进入检索${ocr}${cap}${formula}`
+  }
+  if (item.reviewStatus === 'rejected') {
+    return `${docName} 已驳回，未进入检索`
+  }
   return `${docName} 已入库：${chars.toLocaleString()} 字符 · 切成 ${chunks} 块${ocr}${cap}${formula}`
+}
+
+function reviewLabel(it: KbItem) {
+  if (it.status === 'parsing') return '解析中'
+  if (it.status === 'failed') return '失败'
+  if (it.kind === 'drawing') return '附件'
+  const rs = it.reviewStatus || 'pending'
+  if (rs === 'approved') return '已上线'
+  if (rs === 'rejected') return '已驳回'
+  return '待审核'
+}
+
+function ingestTaskLabel(t: KbIngestTask) {
+  if (t.status === 'queued') return '排队中'
+  if (t.status === 'running') return '解析中'
+  if (t.status === 'succeeded') return '已完成'
+  if (t.status === 'failed') return '失败'
+  if (t.status === 'cancelled') return '已取消'
+  return t.status
 }
 
 function fmtPageOcr(it: KbItem) {
@@ -179,6 +187,13 @@ const tab = ref<Tab>('text')
 const items = ref<KbItem[]>([])
 const loading = ref(true)
 const keyword = ref('')
+const reviewFilter = ref<'all' | 'pending' | 'approved' | 'rejected'>('all')
+const ingestTasks = ref<KbIngestTask[]>([])
+const ingestDismissAfter = ref<Record<string, number>>({})
+const cancellingTaskId = ref<string | null>(null)
+const reviewingId = ref<string | null>(null)
+const reviewDialog = ref<{ item: KbItem; action: 'approve' | 'reject' } | null>(null)
+const reviewComment = ref('')
 const dragOver = ref(false)
 const uploading = ref<string[]>([])
 const uploadJobs = ref<
@@ -206,7 +221,6 @@ const textForm = ref({ title: '', content: '', tags: '' })
 const probe = ref('')
 const probeRes = ref<{ content: string; score: number; name?: string }[] | null>(null)
 const probeLoading = ref(false)
-const previewItem = ref<KbItem | null>(null)
 const textPreview = ref<{
   item: KbItem
   content: string
@@ -236,6 +250,19 @@ const parsingCount = computed(
   () =>
     items.value.filter((it) => it.status === 'parsing').length +
     uploadJobs.value.filter((j) => j.phase === 'parsing').length,
+)
+
+const visibleIngestTasks = computed(() => {
+  const now = Date.now()
+  return ingestTasks.value.filter((t) => {
+    if (t.status === 'queued' || t.status === 'running') return true
+    const until = ingestDismissAfter.value[t.id]
+    return Boolean(until && until > now)
+  })
+})
+
+const shouldPoll = computed(
+  () => parsingCount.value > 0 || visibleIngestTasks.value.length > 0,
 )
 
 const filtered = computed(() => {
@@ -310,13 +337,40 @@ const tabs: { k: Tab; label: string; icon: IconComp }[] = [
   { k: 'text', label: '文本粘贴', icon: FileText },
 ]
 
+async function fetchIngestTasks() {
+  if (!baseId.value) return
+  try {
+    const list = await listKnowledgeIngestTasks(baseId.value)
+    const now = Date.now()
+    const next = { ...ingestDismissAfter.value }
+    const seen = new Set(list.map((t) => t.id))
+    for (const t of list) {
+      const done = t.status === 'succeeded' || t.status === 'failed'
+      if (done) {
+        if (next[t.id] == null) next[t.id] = now + 30_000
+      } else {
+        delete next[t.id]
+      }
+    }
+    for (const id of Object.keys(next)) {
+      if (!seen.has(id) && (next[id] || 0) < now) delete next[id]
+    }
+    ingestDismissAfter.value = next
+    ingestTasks.value = list
+  } catch {
+    /* 无权或接口不可用时不打断资料列表 */
+  }
+}
+
 async function fetchList() {
   if (!baseId.value) return
   try {
+    const reviewStatus = reviewFilter.value === 'all' ? undefined : reviewFilter.value
     const [baseInfo, docs] = await Promise.all([
       getKnowledgeBase(baseId.value),
-      listKnowledgeDocuments(baseId.value),
+      listKnowledgeDocuments(baseId.value, reviewStatus ? { reviewStatus } : undefined),
     ])
+    await fetchIngestTasks()
     base.value = baseInfo
     items.value = docs
   } catch (e) {
@@ -347,13 +401,17 @@ watch(baseId, () => {
   void fetchList()
 })
 
-watch(parsingCount, (n) => {
-  if (n > 0 && !parsePollTimer) {
+watch(reviewFilter, () => {
+  void fetchList()
+})
+
+watch(shouldPoll, (n) => {
+  if (n && !parsePollTimer) {
     parsePollTimer = setInterval(() => {
       void fetchList()
     }, 2500)
   }
-  if (n === 0 && parsePollTimer) {
+  if (!n && parsePollTimer) {
     clearInterval(parsePollTimer)
     parsePollTimer = null
   }
@@ -416,23 +474,13 @@ async function uploadSingleFile(file: File, force = false) {
       (p) => patchJob({ percent: p.percent, phase: 'upload' }),
     )
     items.value = result.items
+    uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
     const replaced = (result.replaced?.length || 0) > 0
-    if (result.item?.duplicate) {
-      uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
-      toast.value = { type: 'ok', msg: fmtIngestToast(file.name, result.item) }
-    } else if (result.item?.status === 'parsing') {
-      patchJob({ percent: 100, phase: 'parsing', docId: result.item.id })
-      toast.value = {
-        type: 'ok',
-        msg: fmtIngestToast(file.name, result.item) + (replaced ? '（已覆盖旧版）' : ''),
-      }
-    } else {
-      uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
-      toast.value = {
-        type: 'ok',
-        msg: fmtIngestToast(file.name, result.item) + (replaced ? '（已覆盖旧版）' : ''),
-      }
+    toast.value = {
+      type: result.item?.status === 'failed' ? 'err' : 'ok',
+      msg: fmtIngestToast(file.name, result.item) + (replaced ? '（已覆盖旧版）' : ''),
     }
+    void fetchIngestTasks()
   } catch (e) {
     uploadJobs.value = uploadJobs.value.filter((j) => j.key !== jobKey)
     const raw = e instanceof Error ? e.message : '未知错误'
@@ -699,6 +747,59 @@ async function submitText(force = false) {
   }
 }
 
+async function cancelIngestTask(task: KbIngestTask) {
+  if (!baseId.value || task.status !== 'queued') return
+  cancellingTaskId.value = task.id
+  try {
+    await cancelKnowledgeIngestTask(baseId.value, task.id)
+    toast.value = { type: 'ok', msg: `已取消「${task.docName || '入库任务'}」` }
+    await fetchList()
+  } catch (e) {
+    toast.value = {
+      type: 'err',
+      msg: e instanceof Error ? e.message : '取消失败',
+    }
+  } finally {
+    cancellingTaskId.value = null
+  }
+}
+
+function openReview(item: KbItem, action: 'approve' | 'reject') {
+  reviewDialog.value = { item, action }
+  reviewComment.value = ''
+}
+
+async function submitReview() {
+  const dlg = reviewDialog.value
+  if (!dlg || !baseId.value) return
+  reviewingId.value = dlg.item.id
+  try {
+    await reviewKnowledgeDocument({
+      baseId: baseId.value,
+      docId: dlg.item.id,
+      action: dlg.action,
+      comment: reviewComment.value.trim() || undefined,
+    })
+    await fetchList()
+    toast.value = {
+      type: 'ok',
+      msg:
+        dlg.action === 'approve'
+          ? `「${dlg.item.name}」已通过，可被检索`
+          : `「${dlg.item.name}」已驳回，已移出检索`,
+    }
+    reviewDialog.value = null
+    reviewComment.value = ''
+  } catch (e) {
+    toast.value = {
+      type: 'err',
+      msg: e instanceof Error ? e.message : '审核失败',
+    }
+  } finally {
+    reviewingId.value = null
+  }
+}
+
 async function runProbe() {
   if (!probe.value.trim() || !baseId.value) return
   probeLoading.value = true
@@ -812,10 +913,6 @@ async function downloadDoc(doc: KbItem) {
 }
 
 async function openDocPreview(doc: KbItem) {
-  if (doc.kind === '3d' && doc.previewUrl) {
-    previewItem.value = doc
-    return
-  }
   if (!baseId.value) return
   previewLoadingId.value = doc.id
   try {
@@ -940,7 +1037,7 @@ async function openDocPreview(doc: KbItem) {
                 </button>
               </div>
               <div class="text-[11px] text-text-secondary max-w-xl">
-                手册、规范请在此上传，会抽字并向量化。充电站平面图请到「文本粘贴」，与案例卡一并入库（不 OCR）。单文件最大 20 MB。
+                手册、规范请在此上传，解析后需维护人审核才会进入检索。充电站平面图请到「文本粘贴」，与案例卡一并入库（不 OCR）。单文件最大 {{ fmtSize(KB_UPLOAD_MAX_BYTES) }}。
               </div>
               <input
                 ref="fileRef"
@@ -958,19 +1055,10 @@ async function openDocPreview(doc: KbItem) {
               v-for="g in FILE_TYPE_GROUPS"
               :key="g.label"
               class="border border-hairline rounded-md px-3 py-2 flex items-center gap-2"
-              :class="g.soon ? 'opacity-55' : ''"
             >
               <component :is="g.icon" class="size-4" :class="g.color" />
               <div class="text-[11px]">
-                <div class="text-text-primary flex items-center gap-1">
-                  {{ g.label }}
-                  <span
-                    v-if="g.soon"
-                    class="text-[9px] font-mono text-text-muted border border-hairline rounded px-1"
-                  >
-                    即将
-                  </span>
-                </div>
+                <div class="text-text-primary">{{ g.label }}</div>
                 <div class="text-text-muted font-mono">
                   {{ g.exts.slice(0, 2).join(' · ') }}
                 </div>
@@ -1114,7 +1202,7 @@ async function openDocPreview(doc: KbItem) {
         </div>
 
         <div
-          v-if="uploadJobs.length > 0 || uploading.length > 0"
+          v-if="uploadJobs.length > 0 || uploading.length > 0 || visibleIngestTasks.length > 0"
           class="mt-3 space-y-2"
         >
           <div
@@ -1134,6 +1222,36 @@ async function openDocPreview(doc: KbItem) {
                 :class="job.phase === 'parsing' ? 'w-full opacity-60' : ''"
                 :style="job.phase === 'upload' ? { width: `${job.percent}%` } : undefined"
               />
+            </div>
+          </div>
+          <div
+            v-for="task in visibleIngestTasks"
+            :key="task.id"
+            class="px-3 py-2 rounded-md bg-bg-base/40 border border-hairline"
+          >
+            <div class="flex items-center justify-between gap-2 text-[11px] text-text-secondary">
+              <span class="truncate">{{ task.docName || '入库任务' }}</span>
+              <span class="flex items-center gap-2 shrink-0">
+                <span class="font-mono">{{ ingestTaskLabel(task) }}</span>
+                <button
+                  v-if="canManage && task.status === 'queued'"
+                  type="button"
+                  class="text-iron hover:underline"
+                  :disabled="cancellingTaskId === task.id"
+                  @click="cancelIngestTask(task)"
+                >
+                  {{ cancellingTaskId === task.id ? '取消中…' : '取消' }}
+                </button>
+              </span>
+            </div>
+            <div class="mt-1.5 h-1 rounded-full bg-hairline overflow-hidden">
+              <div
+                class="h-full bg-iron transition-[width] duration-200"
+                :style="{ width: `${Math.max(task.progress || 0, task.status === 'queued' ? 8 : 0)}%` }"
+              />
+            </div>
+            <div v-if="task.errorMsg" class="mt-1 text-[10px] text-iron truncate" :title="task.errorMsg">
+              {{ task.errorMsg }}
             </div>
           </div>
           <div
@@ -1208,16 +1326,39 @@ async function openDocPreview(doc: KbItem) {
 
     <!-- 资料列表 -->
     <section class="rounded-lg panel-surface overflow-hidden flex flex-col">
-      <header class="flex items-center justify-between px-4 lg:px-5 py-3 border-b border-border">
+      <header class="flex flex-wrap items-center justify-between gap-2 px-4 lg:px-5 py-3 border-b border-border">
         <h3 class="text-sm font-medium tracking-wide truncate flex items-center gap-2">
           <span class="inline-block w-1 h-3 bg-iron rounded-sm" />
           已导入资料（{{ filtered.length }}/{{ items.length }}）
         </h3>
-        <input
-          v-model="keyword"
-          placeholder="按名称/标签/摘要过滤..."
-          class="kb-input h-8 w-56 text-[12px]"
-        />
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="flex items-center gap-0.5 rounded-md border border-hairline p-0.5">
+            <button
+              v-for="opt in [
+                { id: 'all', label: '全部' },
+                { id: 'pending', label: '待审核' },
+                { id: 'approved', label: '已上线' },
+                { id: 'rejected', label: '已驳回' },
+              ] as { id: typeof reviewFilter; label: string }[]"
+              :key="opt.id"
+              type="button"
+              class="h-7 px-2 rounded text-[11px]"
+              :class="
+                reviewFilter === opt.id
+                  ? 'bg-molybdenum/15 text-molybdenum'
+                  : 'text-text-muted hover:text-text-primary'
+              "
+              @click="reviewFilter = opt.id"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+          <input
+            v-model="keyword"
+            placeholder="按名称/标签/摘要过滤..."
+            class="kb-input h-8 w-56 text-[12px]"
+          />
+        </div>
       </header>
       <div class="p-4 lg:p-5">
         <div
@@ -1258,7 +1399,7 @@ async function openDocPreview(doc: KbItem) {
                 </th>
                 <th
                   class="text-right px-2 py-2 font-medium font-mono whitespace-nowrap"
-                  title="后端向量化分块数量（kb_chunk_size≈1000）"
+                  title="后端向量化分块数量（约 600 字一块，重叠 150）"
                 >
                   切块
                 </th>
@@ -1279,9 +1420,9 @@ async function openDocPreview(doc: KbItem) {
                 <td class="px-3 py-2.5 align-middle">
                   <div class="flex items-start gap-2 min-w-0" :class="depth ? 'pl-5' : ''">
                     <component
-                      :is="iconForType(it.fileType || it.source, it.kind)"
+                      :is="iconForType(it.fileType || it.source)"
                       class="size-4 shrink-0 mt-0.5"
-                      :class="colorForType(it.fileType, it.kind)"
+                      :class="colorForType(it.fileType)"
                     />
                     <div class="min-w-0 flex-1">
                       <div
@@ -1289,12 +1430,6 @@ async function openDocPreview(doc: KbItem) {
                         :title="it.name"
                       >
                         <span class="truncate">{{ it.name }}</span>
-                        <span
-                          v-if="it.kind === '3d'"
-                          class="shrink-0 px-1 py-0.5 rounded text-[9px] bg-iron/15 text-iron border border-iron/30 font-mono"
-                        >
-                          3D
-                        </span>
                       </div>
                       <div
                         v-if="childCount"
@@ -1354,6 +1489,13 @@ async function openDocPreview(doc: KbItem) {
                         :title="it.errorMsg || '入库失败'"
                       >
                         {{ it.errorMsg || '入库失败' }}
+                      </div>
+                      <div
+                        v-else-if="it.reviewStatus === 'rejected' && it.reviewComment"
+                        class="text-[10.5px] text-iron mt-0.5 truncate"
+                        :title="it.reviewComment"
+                      >
+                        驳回：{{ it.reviewComment }}
                       </div>
                       <div
                         v-else-if="it.summary"
@@ -1424,17 +1566,47 @@ async function openDocPreview(doc: KbItem) {
                   {{ fmtAgo(it.createdAt, it.createdAtUtc) }}
                 </td>
                 <td class="px-2 py-2.5 text-center align-middle whitespace-nowrap">
-                  <Ok v-if="it.status === 'ready'" class="inline size-4 text-patina" />
                   <span
-                    v-else-if="it.status === 'failed'"
-                    class="inline-flex items-center justify-center"
-                    :title="it.errorMsg || '入库失败'"
+                    class="inline-flex items-center gap-1 text-[10.5px]"
+                    :class="
+                      it.status === 'failed'
+                        ? 'text-iron'
+                        : it.status === 'parsing'
+                          ? 'text-sulfur'
+                          : it.reviewStatus === 'approved'
+                            ? 'text-patina'
+                            : it.reviewStatus === 'rejected'
+                              ? 'text-iron'
+                              : 'text-sulfur'
+                    "
+                    :title="it.errorMsg || it.reviewComment || undefined"
                   >
-                    <XCircle class="inline size-4 text-iron" />
+                    <Loader2 v-if="it.status === 'parsing'" class="size-3.5 animate-spin" />
+                    <XCircle v-else-if="it.status === 'failed'" class="size-3.5" />
+                    <Ok v-else-if="it.reviewStatus === 'approved' || it.kind === 'drawing'" class="size-3.5" />
+                    <XCircle v-else-if="it.reviewStatus === 'rejected'" class="size-3.5" />
+                    {{ reviewLabel(it) }}
                   </span>
-                  <Loader2 v-else class="inline size-4 animate-spin text-sulfur" />
                 </td>
                 <td class="px-2 py-2.5 text-center align-middle whitespace-nowrap">
+                  <button
+                    v-if="canManage && it.status === 'ready' && it.kind !== 'drawing' && it.reviewStatus !== 'approved'"
+                    type="button"
+                    class="inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-patina hover:bg-patina/10 transition-colors whitespace-nowrap"
+                    title="通过后写入向量并可被检索"
+                    @click="openReview(it, 'approve')"
+                  >
+                    通过
+                  </button>
+                  <button
+                    v-if="canManage && it.status === 'ready' && it.kind !== 'drawing' && it.reviewStatus !== 'rejected'"
+                    type="button"
+                    class="ml-0.5 inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-iron hover:bg-iron/10 transition-colors whitespace-nowrap"
+                    title="驳回并删除向量"
+                    @click="openReview(it, 'reject')"
+                  >
+                    驳回
+                  </button>
                   <button
                     v-if="canManage && it.status === 'failed'"
                     type="button"
@@ -1510,6 +1682,53 @@ async function openDocPreview(doc: KbItem) {
       "
     >
       {{ toast.msg }}
+    </div>
+
+    <!-- Review confirm -->
+    <div
+      v-if="reviewDialog"
+      class="fixed inset-0 z-[60] bg-bg-base/80 backdrop-blur-sm flex items-center justify-center p-4"
+      @click.self="reviewDialog = null"
+    >
+      <div class="w-full max-w-md rounded-lg border border-hairline bg-bg-elevated shadow-2xl overflow-hidden">
+        <div class="px-5 pt-5 pb-3 space-y-2">
+          <div class="text-[14px] font-medium text-text-primary">
+            {{ reviewDialog.action === 'approve' ? '通过资料' : '驳回资料' }}
+          </div>
+          <p class="text-[12px] text-text-secondary leading-relaxed">
+            「{{ reviewDialog.item.name }}」
+            {{
+              reviewDialog.action === 'approve'
+                ? '通过后将写入向量库，可被对话与试检索命中。'
+                : '驳回后会删除该资料向量，检索不再命中。'
+            }}
+          </p>
+          <label class="block">
+            <div class="text-[11px] text-text-secondary mb-1">审核意见（可选）</div>
+            <textarea
+              v-model="reviewComment"
+              rows="3"
+              class="kb-input w-full text-[12px]"
+              placeholder="填写给上传者看的说明"
+            />
+          </label>
+        </div>
+        <div class="px-5 py-3 border-t border-hairline flex justify-end gap-2">
+          <button type="button" class="h-8 px-3 text-[12px] rounded-md border border-hairline" @click="reviewDialog = null">
+            取消
+          </button>
+          <button
+            type="button"
+            class="kb-btn-primary h-8 px-3 text-[12px]"
+            :class="reviewDialog.action === 'reject' ? 'bg-iron/80 hover:bg-iron' : ''"
+            :disabled="reviewingId === reviewDialog.item.id"
+            @click="submitReview()"
+          >
+            <Loader2 v-if="reviewingId === reviewDialog.item.id" class="size-3.5 animate-spin" />
+            {{ reviewDialog.action === 'approve' ? '确认通过' : '确认驳回' }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Duplicate upload confirm -->
@@ -1609,66 +1828,6 @@ async function openDocPreview(doc: KbItem) {
               确认删除
             </template>
           </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 3D preview -->
-    <div
-      v-if="previewItem && previewItem.previewUrl"
-      class="fixed inset-0 z-[60] bg-bg-base/85 backdrop-blur-sm flex items-center justify-center p-4"
-    >
-      <div
-        class="bg-bg-elevated border border-hairline rounded-lg shadow-2xl w-full max-w-5xl flex flex-col max-h-[90vh]"
-      >
-        <div class="flex items-center justify-between px-5 py-3 border-b border-hairline">
-          <div class="flex items-center gap-2.5">
-            <Boxes class="size-5 text-iron" />
-            <div>
-              <div class="text-[13.5px] text-text-primary font-medium">
-                {{ previewItem.name }}
-              </div>
-              <div class="text-[11px] text-text-muted mt-0.5 font-mono">
-                三维图纸 · {{ previewItem.fileType?.toUpperCase() }} ·
-                {{ fmtSize(previewItem.size) }} · 上传人 {{ previewItem.uploader || '—' }}
-              </div>
-            </div>
-          </div>
-          <button
-            type="button"
-            class="size-8 rounded hover:bg-hairline/60 inline-flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors"
-            aria-label="关闭"
-            @click="previewItem = null"
-          >
-            <X class="size-4" />
-          </button>
-        </div>
-        <div class="p-4 flex-1 overflow-hidden">
-          <FbxViewer
-            :url="previewItem.previewUrl"
-            :file-type="previewItem.fileType"
-            height="60vh"
-            fallback-hint="若预签名 URL 已过期，请重新刷新列表后再试。"
-          />
-          <div
-            v-if="previewItem.summary"
-            class="mt-3 text-[12px] text-text-secondary leading-relaxed"
-          >
-            {{ previewItem.summary }}
-          </div>
-          <div
-            v-if="previewItem.tags && previewItem.tags.length > 0"
-            class="mt-2.5 flex flex-wrap gap-1.5"
-          >
-            <span
-              v-for="t in previewItem.tags"
-              :key="t"
-              class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-molybdenum/10 text-molybdenum"
-            >
-              <Tag class="size-2.5" />
-              {{ t }}
-            </span>
-          </div>
         </div>
       </div>
     </div>

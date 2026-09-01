@@ -9,6 +9,7 @@ import {
   Download,
   FileUp,
   FolderOpen,
+  History,
   Loader2,
   Maximize2,
   Minimize2,
@@ -17,6 +18,7 @@ import {
   Upload,
 } from 'lucide-vue-next'
 import { PageHeader, Panel, Tag } from '@/components/ui-kit'
+import { fmtSize, KB_UPLOAD_MAX_BYTES } from '@/lib/read-file-smart'
 import { ApiError } from '@/lib/api'
 import { getAccessToken } from '@/lib/auth'
 import { listKnowledgeBases, type KnowledgeBaseItem } from '@/lib/knowledge-api'
@@ -25,6 +27,8 @@ import {
   downloadTenderFile,
   fetchTenderDefaults,
   fetchTenderLibrary,
+  fetchTenderRecord,
+  fetchTenderRecords,
   generateTender,
   parseTenderInvitation,
   uploadTenderSlot,
@@ -34,6 +38,7 @@ import {
   type QualificationStatus,
   type QuoteLineIn,
   type SlotStatus,
+  type TenderRecordItem,
 } from '@/lib/tenders-api'
 import TenderDocEditor from '@/components/tenders/TenderDocEditor.vue'
 
@@ -119,6 +124,12 @@ const allowBuiltinQuote = ref(false)
 const currentStepIndex = ref(0)
 const maxStepReached = ref(0)
 const previewFullscreen = ref(false)
+const showRecords = ref(false)
+const recordsLoading = ref(false)
+const records = ref<TenderRecordItem[]>([])
+const recordsTotal = ref(0)
+const recordsQuery = ref('')
+const openingRecordId = ref<string | null>(null)
 
 const paySum = computed(
   () => form.prepaidPct + form.arrivalPct + form.settlementPct + form.warrantyPct,
@@ -277,6 +288,89 @@ function mergeSlotStatus(payload: SlotStatus) {
   else slotStatuses.value.push(next)
 }
 
+async function loadRecords() {
+  if (!getAccessToken()) return
+  recordsLoading.value = true
+  try {
+    const data = await fetchTenderRecords({
+      q: recordsQuery.value.trim() || undefined,
+      limit: 50,
+    })
+    records.value = data.items || []
+    recordsTotal.value = data.total || 0
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载生成记录失败'
+  } finally {
+    recordsLoading.value = false
+  }
+}
+
+function formatRecordTime(ms: number) {
+  if (!ms) return '—'
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function toggleRecords() {
+  showRecords.value = !showRecords.value
+  if (showRecords.value) void loadRecords()
+}
+
+async function openRecordPreview(item: TenderRecordItem) {
+  if (!item.docxAvailable) {
+    error.value = '该记录的 Word 文件已丢失，无法预览'
+    return
+  }
+  openingRecordId.value = item.id
+  error.value = ''
+  try {
+    const detail = await fetchTenderRecord(item.id)
+    result.value = {
+      id: detail.id,
+      projectName: detail.projectName,
+      tenderer: detail.tenderer,
+      bidPriceYuan: detail.bidPriceYuan,
+      legalPersonName: detail.legalPersonName,
+      docxFile: detail.docxFile,
+      pdfFile: detail.pdfFile,
+      downloadName: detail.downloadName,
+      pdfDownloadName: detail.pdfDownloadName,
+      warnings: detail.warnings || [],
+      username: detail.username,
+      createdAt: detail.createdAt,
+      docxAvailable: detail.docxAvailable,
+      pdfAvailable: detail.pdfAvailable,
+    }
+    showRecords.value = false
+    setPreviewFullscreen(false)
+    advanceStep(2)
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '打开记录失败'
+  } finally {
+    openingRecordId.value = null
+  }
+}
+
+async function downloadRecord(item: TenderRecordItem, kind: 'docx' | 'pdf') {
+  const file = kind === 'docx' ? item.docxFile : item.pdfFile
+  const name = kind === 'docx' ? item.downloadName : item.pdfDownloadName
+  if (!file || !name) return
+  if (kind === 'docx' && !item.docxAvailable) {
+    error.value = '该记录的 Word 文件已丢失'
+    return
+  }
+  downloading.value = kind
+  error.value = ''
+  try {
+    await downloadTenderFile(file, name)
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '下载失败'
+  } finally {
+    downloading.value = null
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', onPreviewFullscreenKey)
   if (!getAccessToken()) {
@@ -299,6 +393,7 @@ onMounted(async () => {
     if (!Array.isArray(form.quoteLines)) form.quoteLines = []
     if (form.includePlaceholders == null) form.includePlaceholders = true
     if (form.includeCommitment == null) form.includeCommitment = true
+    void loadRecords()
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载默认值失败'
   } finally {
@@ -474,6 +569,7 @@ async function onFormStepNext() {
       includeCommitment: true,
       includePlaceholders: true,
     })
+    void loadRecords()
     advanceStep(2)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '生成预览失败'
@@ -521,6 +617,16 @@ async function onDownload(kind: 'docx' | 'pdf') {
     <template #badges>
       <Tag tone="molybdenum">邀请书抽字段</Tag>
       <Tag>程序填模</Tag>
+      <button
+        type="button"
+        class="inline-flex h-7 items-center gap-1 rounded-full border border-border px-2.5 text-[11px] hover:bg-accent transition-colors"
+        :class="showRecords ? 'border-iron bg-iron/10 text-foreground' : 'text-muted-foreground'"
+        @click="toggleRecords"
+      >
+        <History class="size-3.5" />
+        生成记录
+        <span v-if="recordsTotal" class="font-mono">{{ recordsTotal }}</span>
+      </button>
     </template>
   </PageHeader>
 
@@ -530,6 +636,87 @@ async function onDownload(kind: 'docx' | 'pdf') {
   >
     {{ error }}
   </p>
+
+  <section v-if="showRecords" class="tender-card mb-5 max-w-5xl mx-auto">
+    <div class="tender-card-head">
+      <div class="min-w-0">
+        <h2 class="text-[14px] font-semibold">生成记录</h2>
+        <p class="text-[11px] text-muted-foreground mt-0.5">
+          每次生成都会入库；可在线预览或重新下载 Word
+        </p>
+      </div>
+      <button type="button" class="tender-ghost-btn shrink-0" @click="showRecords = false">
+        收起
+      </button>
+    </div>
+
+    <div class="mt-3 flex flex-wrap items-center gap-2">
+      <input
+        v-model="recordsQuery"
+        class="kb-input font-sans max-w-xs"
+        placeholder="搜索项目 / 招标人 / 创建人"
+        @keydown.enter.prevent="loadRecords"
+      />
+      <button type="button" class="tender-ghost-btn" :disabled="recordsLoading" @click="loadRecords">
+        <Loader2 v-if="recordsLoading" class="size-3.5 animate-spin" />
+        查询
+      </button>
+    </div>
+
+    <div v-if="recordsLoading && !records.length" class="py-8 text-center text-[12px] text-muted-foreground">
+      <Loader2 class="inline size-4 animate-spin mr-2" />加载记录…
+    </div>
+    <p v-else-if="!records.length" class="mt-4 text-[12px] text-muted-foreground text-center py-6">
+      暂无生成记录。完成「识别填表 → 下一步：预览编辑」后会出现在这里。
+    </p>
+    <ul v-else class="mt-3 divide-y divide-border/70">
+      <li
+        v-for="item in records"
+        :key="item.id"
+        class="flex flex-col sm:flex-row sm:items-center gap-2 py-3"
+      >
+        <div class="min-w-0 flex-1">
+          <div class="text-[13px] font-medium truncate">{{ item.projectName || '未命名项目' }}</div>
+          <div class="mt-0.5 text-[11px] text-muted-foreground">
+            {{ item.tenderer || '—' }}
+            · {{ formatPrice(item.bidPriceYuan) }} 元
+            · {{ item.username || '—' }}
+            · {{ formatRecordTime(item.createdAt) }}
+            <span v-if="!item.docxAvailable" class="text-sulfur ml-1">文件缺失</span>
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            class="tender-ghost-btn"
+            :disabled="!item.docxAvailable || openingRecordId === item.id"
+            @click="openRecordPreview(item)"
+          >
+            <Loader2 v-if="openingRecordId === item.id" class="size-3.5 animate-spin" />
+            预览
+          </button>
+          <button
+            type="button"
+            class="tender-ghost-btn"
+            :disabled="!item.docxAvailable || downloading === 'docx'"
+            @click="downloadRecord(item, 'docx')"
+          >
+            <Download class="size-3.5" />
+            Word
+          </button>
+          <button
+            v-if="item.pdfFile"
+            type="button"
+            class="tender-ghost-btn"
+            :disabled="!item.pdfAvailable || downloading === 'pdf'"
+            @click="downloadRecord(item, 'pdf')"
+          >
+            资质
+          </button>
+        </div>
+      </li>
+    </ul>
+  </section>
 
   <div v-if="loading" class="py-16 text-center text-[12px] text-muted-foreground">
     <Loader2 class="inline size-4 animate-spin mr-2" />加载默认信息…
@@ -632,7 +819,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
             {{ inviteFile ? inviteFile.name : '点击或拖拽上传投标邀请书' }}
           </p>
           <p class="text-[11px] text-muted-foreground mt-1">
-            {{ inviteFile ? '点击可更换文件' : 'PDF / DOCX / 图片，单文件建议 ≤ 30 MB' }}
+            {{ inviteFile ? '点击可更换文件' : `PDF / DOCX / 图片，单文件最大 ${fmtSize(KB_UPLOAD_MAX_BYTES)}` }}
           </p>
         </button>
 

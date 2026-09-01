@@ -924,7 +924,7 @@ onUnmounted(() => {
                 "
               >
                 <option value="">选择模板填入…</option>
-                <option value="__layout_json__">充电站平面布置 JSON</option>
+                <option value="__layout_json__">布置 JSON 契约</option>
                 <option v-for="p in prompts" :key="p.id" :value="p.id">{{ p.name }}</option>
               </select>
             </template>

@@ -20,6 +20,7 @@ import {
   deleteKnowledgeBase,
   listKnowledgeBaseCatalog,
   updateKnowledgeBase,
+  type KbAccess,
   type KnowledgeBaseItem,
 } from '@/lib/knowledge-api'
 import { libraryCardAccentByName } from '@/lib/library-card-theme'
@@ -40,6 +41,7 @@ function accentOf(base: KnowledgeBaseItem, index: number) {
 const router = useRouter()
 const items = ref<KnowledgeBaseItem[]>([])
 const canCreate = ref(false)
+const accessFilter = ref<KbAccess>('view')
 const aclTarget = ref<KnowledgeBaseItem | null>(null)
 const loading = ref(true)
 const saving = ref(false)
@@ -65,7 +67,7 @@ function redirectLoginIfNeeded(err: unknown) {
 async function load() {
   loading.value = true
   try {
-    const data = await listKnowledgeBaseCatalog()
+    const data = await listKnowledgeBaseCatalog({ access: accessFilter.value })
     items.value = data.items
     canCreate.value = data.canCreate
   } catch (e) {
@@ -85,6 +87,10 @@ watch(toast, (v) => {
   toastTimer = setTimeout(() => {
     toast.value = null
   }, 4200)
+})
+
+watch(accessFilter, () => {
+  void load()
 })
 
 onMounted(() => {
@@ -230,6 +236,26 @@ async function confirmDelete() {
         <p class="mt-1 text-[12px] text-text-secondary">
           自定义创建多个知识库；进入库内上传 PDF / Word / Excel / 文本，或粘贴、抓取 URL。
         </p>
+      </div>
+      <div class="flex items-center gap-1 rounded-md border border-hairline p-0.5 self-start">
+        <button
+          v-for="opt in [
+            { id: 'view', label: '全部' },
+            { id: 'use', label: '我能用' },
+            { id: 'manage', label: '我能维护' },
+          ] as { id: KbAccess; label: string }[]"
+          :key="opt.id"
+          type="button"
+          class="h-7 px-2.5 rounded text-[11px]"
+          :class="
+            accessFilter === opt.id
+              ? 'bg-molybdenum/15 text-molybdenum'
+              : 'text-text-muted hover:text-text-primary'
+          "
+          @click="accessFilter = opt.id"
+        >
+          {{ opt.label }}
+        </button>
       </div>
     </header>
 

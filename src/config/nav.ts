@@ -128,3 +128,39 @@ export function flattenNavItems(groups: NavGroup[] = NAV_GROUPS): NavItem[] {
     g.items ? [...g.items] : (g.children || []).flatMap((c) => c.items),
   )
 }
+
+/** 侧栏 / 工作台优先展示的四个业务入口（顺序固定） */
+export const PRIMARY_NAV_HREFS = [
+  '/ai-chat',
+  '/tenders',
+  '/knowledge',
+  '/tender-library',
+] as const
+
+export const NAV_ITEM_DESC: Record<string, string> = {
+  '/': '工作台总览与运行状态',
+  '/ai-chat': '多会话问答与工具调用',
+  '/knowledge': '文档入库、检索与预览',
+  '/tenders': '邀请书识别与文档生成',
+  '/tender-library': '企业常备资料与扫描件',
+  '/scene-agents': '绑定提示词、知识库与 MCP',
+  '/workflows': '编排知识检索 / LLM / 智能体',
+  '/model-manage': '配置快速 / 深度 / Embedding',
+  '/prompt-manage': '系统提示词与模板管理',
+  '/mcp-manage': '接入 MCP 服务并探测健康',
+  '/users': '账号、角色与菜单权限',
+  '/logs': '操作审计与登录记录',
+  '/settings': '主题、环境与系统信息',
+}
+
+export function getPrimaryNavItems(groups: NavGroup[]): NavItem[] {
+  const byHref = new Map(flattenNavItems(groups).map((it) => [it.href, it]))
+  return PRIMARY_NAV_HREFS.map((href) => byHref.get(href)).filter(
+    (it): it is NavItem => Boolean(it),
+  )
+}
+
+export function getMoreNavItems(groups: NavGroup[]): NavItem[] {
+  const primary = new Set<string>(PRIMARY_NAV_HREFS)
+  return flattenNavItems(groups).filter((it) => it.href !== '/' && !primary.has(it.href))
+}

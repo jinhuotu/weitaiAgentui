@@ -2,18 +2,23 @@
  * 知识库上传校验：原文件交给后端解析，前端只做类型/大小拦截。
  */
 
-export const THREE_D_EXTS = ['fbx', 'obj', 'gltf', 'glb', 'stl']
+const THREE_D_EXTS = ['fbx', 'obj', 'gltf', 'glb', 'stl']
 
-export const KB_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+export const KB_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
 
 export const KB_UPLOAD_EXTS = [
   'pdf',
   'docx',
   'xlsx',
+  'xls',
   'pptx',
   'txt',
   'md',
   'csv',
+  'json',
+  'xml',
+  'yaml',
+  'yml',
   'png',
   'jpg',
   'jpeg',
@@ -25,7 +30,7 @@ export const KB_UPLOAD_EXTS = [
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff']
 const CAD_EXTS = ['dwg', 'dxf', 'step', 'stp', 'iges', 'igs']
 
-const ALLOWED_HINT = 'pdf / docx / xlsx / pptx / txt / md / csv / png / jpg / webp'
+const ALLOWED_HINT = 'pdf / docx / xlsx / xls / pptx / txt / md / csv / json / xml / yaml / png / jpg / webp'
 
 export function fileExt(name: string): string {
   return name.split('.').pop()?.toLowerCase() || ''
@@ -52,7 +57,6 @@ export function validateKbUploadFile(file: File): string | null {
     return `暂不支持 .${t}，请先转为 png / jpg。当前支持：${ALLOWED_HINT}`
   }
   if (t === 'doc') return '旧版 .doc 请另存为 .docx 后上传'
-  if (t === 'xls') return '旧版 .xls 请另存为 .xlsx 后上传'
   if (t === 'ppt') return '旧版 .ppt 请另存为 .pptx 后上传'
   if (THREE_D_EXTS.includes(t) || CAD_EXTS.includes(t) || IMAGE_EXTS.includes(t)) {
     return `暂不支持 .${t}。当前支持：${ALLOWED_HINT}`

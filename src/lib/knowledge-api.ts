@@ -11,6 +11,9 @@ export type KnowledgeBaseItem = {
   createdAt: number;
   updatedAt: number;
   createdAtUtc?: boolean;
+  canView?: boolean;
+  canUse?: boolean;
+  canManage?: boolean;
 };
 
 export type KbDocItem = {
@@ -37,6 +40,9 @@ export type KbDocItem = {
   ocrPages?: number;
   ocrCapped?: boolean;
   formulaFallback?: boolean;
+  reviewStatus?: 'pending' | 'approved' | 'rejected' | string;
+  reviewComment?: string | null;
+  taskId?: string | null;
   duplicate?: boolean;
   createdAt: number;
   createdAtUtc?: boolean;
@@ -150,10 +156,15 @@ export async function deleteKnowledgeBase(baseId: string): Promise<void> {
   });
 }
 
-export async function listKnowledgeDocuments(baseId: string): Promise<KbDocItem[]> {
+export async function listKnowledgeDocuments(
+  baseId: string,
+  opts?: { reviewStatus?: string },
+): Promise<KbDocItem[]> {
+  const params = new URLSearchParams({ baseId });
+  if (opts?.reviewStatus) params.set('reviewStatus', opts.reviewStatus);
   const data = await apiRequest<{ items: KbDocItem[] }>(
-    `/api/v1/knowledge/documents?baseId=${encodeURIComponent(baseId)}`,
-    { token: requireToken() }
+    `/api/v1/knowledge/documents?${params.toString()}`,
+    { token: requireToken() },
   );
   return data.items || [];
 }
@@ -398,4 +409,79 @@ export async function saveKnowledgeBaseAcl(
       },
     },
   );
+}
+
+export type KbIngestTask = {
+  id: string;
+  baseId?: string | null;
+  docId?: string | null;
+  docName?: string | null;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | string;
+  progress: number;
+  errorMsg?: string | null;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+};
+
+export async function listKnowledgeIngestTasks(baseId: string): Promise<KbIngestTask[]> {
+  const data = await apiRequest<{ items: KbIngestTask[] }>(
+    `/api/v1/knowledge/ingest-tasks?baseId=${encodeURIComponent(baseId)}`,
+    { token: requireToken() },
+  );
+  return data.items || [];
+}
+
+export async function cancelKnowledgeIngestTask(baseId: string, taskId: string): Promise<void> {
+  await apiRequest(
+    `/api/v1/knowledge/ingest-tasks/${encodeURIComponent(taskId)}/cancel?baseId=${encodeURIComponent(baseId)}`,
+    { method: 'POST', token: requireToken() },
+  );
+}
+
+export async function reviewKnowledgeDocument(input: {
+  baseId: string;
+  docId: string;
+  action: 'approve' | 'reject';
+  comment?: string;
+}): Promise<{ item: KbDocItem; items: KbDocItem[] }> {
+  return apiRequest(
+    `/api/v1/knowledge/documents/${encodeURIComponent(input.docId)}/review`,
+    {
+      method: 'POST',
+      token: requireToken(),
+      body: {
+        baseId: input.baseId,
+        action: input.action,
+        comment: input.comment || null,
+      },
+    },
+  );
+}
+
+export type QdrantSettings = {
+  name: string;
+  exists: boolean;
+  points: number;
+  vectorSize?: number | null;
+  quantization?: string;
+  envQuantization?: string;
+};
+
+export async function getQdrantSettings(): Promise<QdrantSettings> {
+  const data = await apiRequest<{ item: QdrantSettings }>('/api/v1/knowledge/qdrant/settings', {
+    token: requireToken(),
+  });
+  return data.item;
+}
+
+export async function applyQdrantSettings(): Promise<{
+  item: QdrantSettings;
+  reindex: { reindexed: number; failed: number; total: number };
+}> {
+  return apiRequest('/api/v1/knowledge/qdrant/settings/apply', {
+    method: 'POST',
+    token: requireToken(),
+    body: { confirm: true },
+  });
 }

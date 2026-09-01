@@ -87,11 +87,38 @@ export type TenderDefaults = BidBrief & {
 }
 
 export type GenerateResult = {
+  id?: string
+  projectName?: string
+  tenderer?: string
+  bidPriceYuan?: number
+  legalPersonName?: string
   docxFile: string
   pdfFile: string | null
   downloadName: string
   pdfDownloadName: string | null
   warnings: string[]
+  username?: string
+  createdAt?: number
+  docxAvailable?: boolean
+  pdfAvailable?: boolean
+}
+
+export type TenderRecordItem = {
+  id: string
+  projectName: string
+  tenderer: string
+  bidPriceYuan: number
+  legalPersonName: string
+  docxFile: string
+  pdfFile: string | null
+  downloadName: string
+  pdfDownloadName: string | null
+  warnings: string[]
+  username: string
+  createdAt: number
+  docxAvailable: boolean
+  pdfAvailable: boolean
+  brief?: BidBrief
 }
 
 export type TenderEditorConfig = {
@@ -191,6 +218,25 @@ export async function generateTender(body: BidBrief): Promise<GenerateResult> {
     method: 'POST',
     token: token(),
     body,
+  })
+}
+
+export async function fetchTenderRecords(params?: {
+  q?: string
+  limit?: number
+  offset?: number
+}): Promise<{ total: number; items: TenderRecordItem[] }> {
+  const q = new URLSearchParams()
+  if (params?.q) q.set('q', params.q)
+  if (params?.limit != null) q.set('limit', String(params.limit))
+  if (params?.offset != null) q.set('offset', String(params.offset))
+  const qs = q.toString()
+  return apiRequest(`/api/v1/tenders/records${qs ? `?${qs}` : ''}`, { token: token() })
+}
+
+export async function fetchTenderRecord(recordId: string): Promise<TenderRecordItem> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}`, {
+    token: token(),
   })
 }
 
