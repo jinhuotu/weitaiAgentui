@@ -27,7 +27,11 @@ function filterVirtualNetworkUrls(): Plugin {
   }
 }
 
+// 生产挂子路径时设置，例如 VITE_BASE_PATH=/weitai/ （须以 / 开头、/ 结尾）
+const base = process.env.VITE_BASE_PATH || '/'
+
 export default defineConfig({
+  base,
   plugins: [vue(), tailwindcss(), filterVirtualNetworkUrls()],
   resolve: {
     alias: {

@@ -61,7 +61,8 @@ function buildFeatureRoutes(): RouteRecordRaw[] {
 }
 
 const router = createRouter({
-  history: createWebHistory(),
+  // 与 vite.config base / VITE_BASE_PATH 对齐（如生产 /weitai/）
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
       path: '/login',
