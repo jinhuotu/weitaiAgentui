@@ -21,6 +21,7 @@ import {
   modelTypeLabel,
   coerceModelType,
   normalizeApiBase,
+  isLoopbackApiBase,
   updateModelConfig,
   EMBEDDING_MODEL_TYPE_OPTIONS,
   LLM_MODEL_TYPE_OPTIONS,
@@ -193,14 +194,10 @@ async function submit() {
   }
   const apiBase = normalizeApiBase(form.value.apiBase)
   if (!apiBase) {
-    formError.value = 'API Base 无效，请填写以 https:// 开头的地址，且不要重复协议'
+    formError.value = 'API Base 无效。局域网请填 http://IP:端口/v1，云端请填 https:// 地址'
     return
   }
   form.value.apiBase = apiBase
-  if (!editing.value && !form.value.apiKey.trim()) {
-    formError.value = '新建时必须填写 API Key'
-    return
-  }
   saving.value = true
   formError.value = null
   try {
@@ -240,7 +237,7 @@ async function submit() {
     } else {
       const item = await createModelConfig({
         ...payload,
-        apiKey: f.apiKey.trim(),
+        apiKey: f.apiKey.trim() || 'sk-local',
       })
       items.value = [item, ...items.value]
       toast.value = { type: 'ok', msg: '已创建配置' }
@@ -291,7 +288,7 @@ function onDeleteOpen(v: boolean) {
           模型管理
         </h1>
         <p class="mt-1 text-[12px] text-text-secondary">
-          配置 OpenAI 兼容的对话模型与 Embedding 模型。勾选「启用」后即可在智能问答等页面选择使用；「快速/深度」只是该模式的默认模型（每模式一条），不会禁用其它已启用模型。
+          配置 OpenAI 兼容的对话模型与 Embedding 模型。局域网自建（vLLM / Ollama 等）可留空 API Key；API Base 请填推理机的局域网 IP，不要用 127.0.0.1（除非模型和本系统 API 跑在同一台电脑）。勾选「启用」后即可在智能问答等页面选择使用。
         </p>
       </div>
       <div class="flex gap-2">
@@ -408,7 +405,7 @@ function onDeleteOpen(v: boolean) {
 
         <div class="text-[11px] text-text-secondary">
           API Key：
-          <span class="font-mono text-text-muted">{{ item.apiKeyMasked || '—' }}</span>
+          <span class="font-mono text-text-muted">{{ item.apiKeyMasked || '未设置（局域网可空）' }}</span>
         </div>
 
         <div class="flex flex-wrap gap-1.5 text-[10.5px]">
@@ -449,7 +446,7 @@ function onDeleteOpen(v: boolean) {
     <AppDialog
       :open="modalOpen"
       :title="editing ? '编辑模型配置' : '新增模型配置'"
-      description="API Key 仅写入数据库；列表中脱敏展示。编辑时留空 Key 表示不修改。"
+      description="云端模型请填 API Key；局域网自建可留空。编辑时留空 Key 表示不修改。"
       @update:open="onModalOpen"
     >
       <div class="space-y-3 -mx-0">
@@ -504,25 +501,33 @@ function onDeleteOpen(v: boolean) {
           <input
             v-model="form.apiBase"
             class="kb-input"
-            placeholder="https://api.openai.com/v1"
+            placeholder="http://192.168.x.x:8001/v1 或 https://api.openai.com/v1"
           />
           <div class="mt-1 text-[10.5px] text-text-muted">
-            填 OpenAI 兼容根地址，不要重复 https://，也不要贴到 /chat/completions
-            或 DashScope generation 完整路径。阿里云 MaaS 示例：
-            https://xxx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+            OpenAI 兼容根地址。局域网示例：http://192.168.2.112:8001/v1
+            （IP 和端口之间用冒号，不要写成 112/:8001）。
+          </div>
+          <div
+            v-if="isLoopbackApiBase(form.apiBase)"
+            class="mt-1 text-[10.5px] text-iron"
+          >
+            当前是 127.0.0.1/localhost，只指向运行本系统的这台电脑。若模型在局域网其它机器，请改成那台机器的 IP。
           </div>
         </label>
         <label class="block">
           <div class="text-[11px] text-text-secondary mb-1">
-            {{ editing ? 'API Key（留空不改）' : 'API Key' }}
+            {{ editing ? 'API Key（留空不改）' : 'API Key（局域网可留空）' }}
           </div>
           <input
             v-model="form.apiKey"
             class="kb-input"
             type="password"
             autocomplete="new-password"
-            :placeholder="editing ? `当前 ${editing.apiKeyMasked}` : 'sk-...'"
+            :placeholder="editing ? `当前 ${editing.apiKeyMasked || '未设置'}` : '云端填 sk-...，局域网自建可留空'"
           />
+          <div class="mt-1 text-[10.5px] text-text-muted">
+            vLLM / Ollama / SGLang 等本地 OpenAI 兼容服务通常不校验 Key，可留空。
+          </div>
         </label>
         <label class="block">
           <div class="text-[11px] text-text-secondary mb-1">模型标识</div>

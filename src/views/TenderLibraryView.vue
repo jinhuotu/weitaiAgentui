@@ -1,14 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { FileText, FolderOpen, Loader2, Trash2, Upload } from 'lucide-vue-next'
+import { FileText, FolderOpen, Loader2, Pencil, Plus, Trash2, Upload } from 'lucide-vue-next'
 import { PageHeader, Panel, Tag } from '@/components/ui-kit'
+import AppAlertDialog from '@/components/ui/AppAlertDialog.vue'
+import TenderScanGallery from '@/components/tenders/TenderScanGallery.vue'
 import { ApiError } from '@/lib/api'
 import { getAccessToken } from '@/lib/auth'
 import {
   clearTenderSlot,
+  createTenderLibraryItem,
+  deleteTenderLibraryFile,
+  deleteTenderLibraryItem,
   fetchTenderLibrary,
+  resolveLibraryFileId,
+  updateTenderLibraryItem,
   uploadTenderSlot,
+  type SlotFileInfo,
   type SlotStatus,
 } from '@/lib/tenders-api'
 
@@ -16,11 +24,22 @@ const router = useRouter()
 const loading = ref(true)
 const error = ref('')
 const hint = ref('')
+const baseId = ref('')
 const slots = ref<SlotStatus[]>([])
 const uploadingKey = ref<string | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const pendingKey = ref<string | null>(null)
 const pendingReplace = ref(true)
+
+const showEditor = ref(false)
+const editingKey = ref<string | null>(null)
+const editorTitle = ref('')
+const editorHint = ref('')
+const saving = ref(false)
+const pendingDelete = ref<SlotStatus | null>(null)
+const pendingDeleteFile = ref<{ slot: SlotStatus; file: SlotFileInfo } | null>(null)
+const deleting = ref(false)
+const removingFileId = ref<string | null>(null)
 
 const filledCount = computed(() => slots.value.filter((s) => s.fileCount > 0).length)
 
@@ -40,10 +59,116 @@ async function reload() {
     const data = await fetchTenderLibrary()
     slots.value = data.slots || []
     hint.value = data.hint || ''
+    baseId.value = data.baseId || ''
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载资料库失败'
   } finally {
     loading.value = false
+  }
+}
+
+function openCreate() {
+  editingKey.value = null
+  editorTitle.value = ''
+  editorHint.value = ''
+  showEditor.value = true
+}
+
+function openEdit(slot: SlotStatus) {
+  editingKey.value = slot.key
+  editorTitle.value = slot.title
+  editorHint.value = slot.hint || ''
+  showEditor.value = true
+}
+
+async function saveItem() {
+  const title = editorTitle.value.trim()
+  if (!title) {
+    error.value = '请填写资料名称'
+    return
+  }
+  saving.value = true
+  error.value = ''
+  try {
+    if (editingKey.value) {
+      const item = await updateTenderLibraryItem(editingKey.value, {
+        title,
+        hint: editorHint.value.trim(),
+      })
+      const idx = slots.value.findIndex((s) => s.key === editingKey.value)
+      if (idx >= 0) slots.value.splice(idx, 1, { ...slots.value[idx], ...item })
+    } else {
+      const item = await createTenderLibraryItem({
+        title,
+        hint: editorHint.value.trim(),
+      })
+      slots.value.push(item)
+    }
+    showEditor.value = false
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '保存资料项失败'
+  } finally {
+    saving.value = false
+  }
+}
+
+function askDeleteItem(slot: SlotStatus) {
+  if (!slot.key) return
+  pendingDelete.value = slot
+}
+
+function onDeleteOpen(open: boolean) {
+  if (!open && !deleting.value) pendingDelete.value = null
+}
+
+function askDeleteFile(slot: SlotStatus, file: SlotFileInfo) {
+  if (!resolveLibraryFileId(file)) return
+  pendingDeleteFile.value = { slot, file }
+}
+
+function onDeleteFileOpen(open: boolean) {
+  if (!open && !deleting.value) pendingDeleteFile.value = null
+}
+
+function applySlotUpdate(key: string, item: SlotStatus) {
+  const idx = slots.value.findIndex((s) => s.key === key)
+  if (idx >= 0) slots.value.splice(idx, 1, { ...slots.value[idx], ...item })
+}
+
+async function confirmDeleteFile() {
+  const row = pendingDeleteFile.value
+  const docId = row ? resolveLibraryFileId(row.file) : ''
+  if (!row?.slot.key || !docId) return
+  deleting.value = true
+  removingFileId.value = docId
+  error.value = ''
+  try {
+    const item = await deleteTenderLibraryFile(docId)
+    applySlotUpdate(row.slot.key, item)
+    pendingDeleteFile.value = null
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '删除文件失败'
+  } finally {
+    deleting.value = false
+    removingFileId.value = null
+  }
+}
+
+async function confirmDeleteItem() {
+  const slot = pendingDelete.value
+  if (!slot?.key) return
+  deleting.value = true
+  error.value = ''
+  uploadingKey.value = slot.key
+  try {
+    await deleteTenderLibraryItem(slot.key)
+    slots.value = slots.value.filter((s) => s.key !== slot.key)
+    pendingDelete.value = null
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '删除失败'
+  } finally {
+    deleting.value = false
+    uploadingKey.value = null
   }
 }
 
@@ -74,6 +199,8 @@ async function onFileChange(ev: Event) {
         hint: data.hint || slots.value.find((s) => s.key === key)?.hint || '',
         fileCount: data.fileCount,
         files: data.files || [],
+        docId: data.docId,
+        pinned: data.pinned,
       }
     }
     if (last) {
@@ -92,13 +219,14 @@ async function onClear(slot: SlotStatus) {
   error.value = ''
   uploadingKey.value = slot.key
   try {
-    await clearTenderSlot(slot.key)
+    const data = await clearTenderSlot(slot.key)
     const idx = slots.value.findIndex((s) => s.key === slot.key)
     if (idx >= 0) {
       slots.value.splice(idx, 1, {
         ...slots.value[idx],
-        fileCount: 0,
-        files: [],
+        ...data,
+        fileCount: data.fileCount ?? 0,
+        files: data.files || [],
       })
     }
   } catch (e) {
@@ -107,24 +235,35 @@ async function onClear(slot: SlotStatus) {
     uploadingKey.value = null
   }
 }
-
-function formatSize(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
 </script>
 
 <template>
   <PageHeader
     title="投标资料库"
-    description="维护公司常备扫描件（8 大类）。生成投标文件时自动引用，无需每次重新上传。"
+    description="资料存放在知识库中。可新增资料项并起名，生成投标文件时按名称自动引用。"
   >
     <template #badges>
-      <Tag tone="molybdenum">常备附件</Tag>
+      <Tag tone="molybdenum">知识库融合</Tag>
       <Tag>生成时自动引用</Tag>
     </template>
     <template #actions>
+      <button
+        type="button"
+        class="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-border text-[12px] hover:bg-accent"
+        @click="openCreate"
+      >
+        <Plus class="size-3.5" />
+        新增资料
+      </button>
+      <button
+        v-if="baseId"
+        type="button"
+        class="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-border text-[12px] hover:bg-accent"
+        @click="router.push(`/knowledge/${baseId}`)"
+      >
+        <FolderOpen class="size-3.5" />
+        在知识库打开
+      </button>
       <button
         type="button"
         class="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-border text-[12px] hover:bg-accent"
@@ -153,7 +292,7 @@ function formatSize(n: number): string {
         已维护
         <span class="text-foreground font-medium">{{ filledCount }}</span>
         /
-        {{ slots.length }} 类
+        {{ slots.length }} 项
       </p>
 
       <ul class="space-y-3">
@@ -176,17 +315,19 @@ function formatSize(n: number): string {
               <p v-if="slot.hint" class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
                 {{ slot.hint }}
               </p>
-              <ul v-if="slot.files.length" class="mt-2 space-y-0.5">
-                <li
-                  v-for="f in slot.files"
-                  :key="f.name"
-                  class="flex items-center gap-1.5 text-[11px] text-muted-foreground font-sans"
-                >
-                  <FolderOpen class="size-3 shrink-0 opacity-70" />
-                  <span class="truncate">{{ f.name }}</span>
-                  <span class="shrink-0 opacity-70">{{ formatSize(f.sizeBytes) }}</span>
-                </li>
-              </ul>
+              <p
+                v-if="slot.key === 'perf'"
+                class="mt-1 text-[11px] text-muted-foreground leading-relaxed"
+              >
+                上传后会扫描合同/发票，抽出项目名称、规格型号、买方、联系人、合同额、概况和是否在建。招标优先采用已竣工充电桩项目。
+              </p>
+              <TenderScanGallery
+                v-if="slot.files?.length"
+                :files="slot.files"
+                removable
+                :removing-id="removingFileId"
+                @remove="(file) => askDeleteFile(slot, file)"
+              />
             </div>
             <div class="flex shrink-0 flex-wrap items-center gap-1.5">
               <button
@@ -197,7 +338,7 @@ function formatSize(n: number): string {
               >
                 <Loader2 v-if="uploadingKey === slot.key" class="size-3 animate-spin" />
                 <Upload v-else class="size-3" />
-                {{ slot.fileCount ? '替换' : '上传' }}
+                {{ uploadingKey === slot.key ? (slot.key === 'perf' ? '识别中' : '上传中') : slot.fileCount ? '替换' : '上传' }}
               </button>
               <button
                 v-if="slot.fileCount"
@@ -209,14 +350,31 @@ function formatSize(n: number): string {
                 追加
               </button>
               <button
+                type="button"
+                class="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="uploadingKey === slot.key"
+                @click="openEdit(slot)"
+              >
+                <Pencil class="size-3" />
+                改名
+              </button>
+              <button
                 v-if="slot.fileCount"
                 type="button"
                 class="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
                 :disabled="uploadingKey === slot.key"
                 @click="onClear(slot)"
               >
+                清除文件
+              </button>
+              <button
+                type="button"
+                class="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="uploadingKey === slot.key"
+                @click="askDeleteItem(slot)"
+              >
                 <Trash2 class="size-3" />
-                清除
+                删除项
               </button>
             </div>
           </div>
@@ -233,4 +391,74 @@ function formatSize(n: number): string {
       />
     </Panel>
   </div>
+
+  <div
+    v-if="showEditor"
+    class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+    @click.self="showEditor = false"
+  >
+    <div class="w-full max-w-md rounded-xl border border-border bg-card p-4 shadow-xl">
+      <h3 class="text-[14px] font-semibold">{{ editingKey ? '修改资料项' : '新增资料项' }}</h3>
+      <p class="mt-1 text-[11px] text-muted-foreground">名称会用于 Word 附件小标题，解析邀请书时也会对照这份清单。</p>
+      <label class="mt-4 block text-[12px]">
+        资料名称
+        <input v-model="editorTitle" class="kb-input mt-1" placeholder="例如：ISO 体系证书" />
+      </label>
+      <label class="mt-3 block text-[12px]">
+        说明（可选）
+        <input v-model="editorHint" class="kb-input mt-1" placeholder="例如：须为公司现行有效证书" />
+      </label>
+      <div class="mt-4 flex justify-end gap-2">
+        <button type="button" class="h-8 px-3 rounded-md border border-border text-[12px]" @click="showEditor = false">
+          取消
+        </button>
+        <button
+          type="button"
+          class="h-8 px-3 rounded-md bg-iron text-white text-[12px] disabled:opacity-50"
+          :disabled="saving"
+          @click="saveItem"
+        >
+          <Loader2 v-if="saving" class="inline size-3.5 animate-spin mr-1" />
+          保存
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <AppAlertDialog
+    :open="Boolean(pendingDelete)"
+    title="删除资料项"
+    :description="`确定删除「${pendingDelete?.title || ''}」及其扫描件？删除后生成投标文件时将不再引用该项。`"
+    confirm-label="确认删除"
+    :loading="deleting"
+    destructive
+    @update:open="onDeleteOpen"
+    @confirm="confirmDeleteItem"
+  />
+  <AppAlertDialog
+    :open="Boolean(pendingDeleteFile)"
+    title="删除这份扫描件"
+    :description="`确定删除「${pendingDeleteFile?.file.performance?.projectName || pendingDeleteFile?.file.name || ''}」？不会删除整个资料项。`"
+    confirm-label="确认删除"
+    :loading="deleting"
+    destructive
+    @update:open="onDeleteFileOpen"
+    @confirm="confirmDeleteFile"
+  />
 </template>
+
+<style scoped>
+.kb-input {
+  background: var(--bg-surface, transparent);
+  border: 1px solid var(--hairline, hsl(var(--border)));
+  border-radius: 6px;
+  color: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  width: 100%;
+}
+.kb-input:focus {
+  outline: none;
+  border-color: var(--accent-molybdenum, hsl(var(--ring)));
+}
+</style>

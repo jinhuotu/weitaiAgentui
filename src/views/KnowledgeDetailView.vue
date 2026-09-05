@@ -39,7 +39,6 @@ import {
   listKnowledgeDocuments,
   listKnowledgeIngestTasks,
   reparseKnowledgeDocument,
-  reviewKnowledgeDocument,
   searchKnowledge,
   uploadKnowledgeDocument,
   type KbDocItem,
@@ -129,28 +128,31 @@ function fmtIngestToast(docName: string, item: KbDocItem) {
   if (item.status === 'parsing') {
     return `${docName} 已提交，排队解析中（文字页本地抽取，扫描页/图片走 OCR）`
   }
+  if (item.status === 'failed') {
+    return `${docName} 解析失败`
+  }
   const chunks = item.chunks ?? 0
   const chars = item.charCount ?? 0
   const ocr = item.ocrPages ? ` · OCR ${item.ocrPages} 次` : ''
   const cap = item.ocrCapped ? ' · 已达 OCR 页数上限' : ''
   const formula = item.formulaFallback ? ' · 含公式原文' : ''
-  if (item.reviewStatus === 'pending') {
-    return `${docName} 已解析：${chars.toLocaleString()} 字符 · ${chunks} 块，待审核后才会进入检索${ocr}${cap}${formula}`
-  }
-  if (item.reviewStatus === 'rejected') {
-    return `${docName} 已驳回，未进入检索`
+  if (chunks === 0) {
+    if (isSkipRag(item)) {
+      return `${docName} 已保存，判定为投标书/他司材料，未写入检索`
+    }
+    return `${docName} 已解析，正在写入检索${ocr}${cap}${formula}`
   }
   return `${docName} 已入库：${chars.toLocaleString()} 字符 · 切成 ${chunks} 块${ocr}${cap}${formula}`
 }
 
-function reviewLabel(it: KbItem) {
+function statusLabel(it: KbItem) {
   if (it.status === 'parsing') return '解析中'
   if (it.status === 'failed') return '失败'
   if (it.kind === 'drawing') return '附件'
-  const rs = it.reviewStatus || 'pending'
-  if (rs === 'approved') return '已上线'
-  if (rs === 'rejected') return '已驳回'
-  return '待审核'
+  if (it.reviewStatus === 'rejected') return '已驳回'
+  if (isSkipRag(it)) return '不检索'
+  if ((it.chunks ?? 0) === 0) return '入库中'
+  return '已就绪'
 }
 
 function ingestTaskLabel(t: KbIngestTask) {
@@ -183,17 +185,13 @@ const uploaderName = computed(
 )
 
 const base = ref<KnowledgeBaseItem | null>(null)
-const tab = ref<Tab>('text')
+const tab = ref<Tab>('file')
 const items = ref<KbItem[]>([])
 const loading = ref(true)
 const keyword = ref('')
-const reviewFilter = ref<'all' | 'pending' | 'approved' | 'rejected'>('all')
 const ingestTasks = ref<KbIngestTask[]>([])
 const ingestDismissAfter = ref<Record<string, number>>({})
 const cancellingTaskId = ref<string | null>(null)
-const reviewingId = ref<string | null>(null)
-const reviewDialog = ref<{ item: KbItem; action: 'approve' | 'reject' } | null>(null)
-const reviewComment = ref('')
 const dragOver = ref(false)
 const uploading = ref<string[]>([])
 const uploadJobs = ref<
@@ -210,6 +208,16 @@ function isDrawingLike(it: KbItem) {
   if (it.kind === 'drawing') return true
   const tags = it.tags || []
   return tags.some((t) => ['图纸附件', '图纸', '布置图', 'drawing'].includes(String(t)))
+}
+
+function isSkipRag(it: { tags?: string[] | null; kind?: string }) {
+  if (it.kind === 'drawing') return false
+  return (it.tags || []).some((t) => String(t) === 'bid_foreign')
+}
+
+function formatKbTag(tag: string) {
+  if (tag === 'bid_foreign') return '投标书·不检索'
+  return tag
 }
 
 const caseDocs = computed(() =>
@@ -248,14 +256,22 @@ const canViewOnly = computed(() => Boolean(base.value) && !canUse.value && !canM
 
 const parsingCount = computed(
   () =>
-    items.value.filter((it) => it.status === 'parsing').length +
-    uploadJobs.value.filter((j) => j.phase === 'parsing').length,
+    items.value.filter(
+      (it) =>
+        it.status === 'parsing' ||
+        (it.kind !== 'drawing' &&
+          it.status === 'ready' &&
+          it.reviewStatus !== 'rejected' &&
+          !isSkipRag(it) &&
+          (it.chunks ?? 0) === 0),
+    ).length + uploadJobs.value.filter((j) => j.phase === 'parsing').length,
 )
 
 const visibleIngestTasks = computed(() => {
   const now = Date.now()
   return ingestTasks.value.filter((t) => {
     if (t.status === 'queued' || t.status === 'running') return true
+    if (t.status === 'succeeded') return false
     const until = ingestDismissAfter.value[t.id]
     return Boolean(until && until > now)
   })
@@ -345,8 +361,9 @@ async function fetchIngestTasks() {
     const next = { ...ingestDismissAfter.value }
     const seen = new Set(list.map((t) => t.id))
     for (const t of list) {
-      const done = t.status === 'succeeded' || t.status === 'failed'
-      if (done) {
+      if (t.status === 'succeeded') {
+        delete next[t.id]
+      } else if (t.status === 'failed' || t.status === 'cancelled') {
         if (next[t.id] == null) next[t.id] = now + 30_000
       } else {
         delete next[t.id]
@@ -365,10 +382,9 @@ async function fetchIngestTasks() {
 async function fetchList() {
   if (!baseId.value) return
   try {
-    const reviewStatus = reviewFilter.value === 'all' ? undefined : reviewFilter.value
     const [baseInfo, docs] = await Promise.all([
       getKnowledgeBase(baseId.value),
-      listKnowledgeDocuments(baseId.value, reviewStatus ? { reviewStatus } : undefined),
+      listKnowledgeDocuments(baseId.value),
     ])
     await fetchIngestTasks()
     base.value = baseInfo
@@ -398,10 +414,6 @@ watch(toast, (v) => {
 
 watch(baseId, () => {
   loading.value = true
-  void fetchList()
-})
-
-watch(reviewFilter, () => {
   void fetchList()
 })
 
@@ -764,42 +776,6 @@ async function cancelIngestTask(task: KbIngestTask) {
   }
 }
 
-function openReview(item: KbItem, action: 'approve' | 'reject') {
-  reviewDialog.value = { item, action }
-  reviewComment.value = ''
-}
-
-async function submitReview() {
-  const dlg = reviewDialog.value
-  if (!dlg || !baseId.value) return
-  reviewingId.value = dlg.item.id
-  try {
-    await reviewKnowledgeDocument({
-      baseId: baseId.value,
-      docId: dlg.item.id,
-      action: dlg.action,
-      comment: reviewComment.value.trim() || undefined,
-    })
-    await fetchList()
-    toast.value = {
-      type: 'ok',
-      msg:
-        dlg.action === 'approve'
-          ? `「${dlg.item.name}」已通过，可被检索`
-          : `「${dlg.item.name}」已驳回，已移出检索`,
-    }
-    reviewDialog.value = null
-    reviewComment.value = ''
-  } catch (e) {
-    toast.value = {
-      type: 'err',
-      msg: e instanceof Error ? e.message : '审核失败',
-    }
-  } finally {
-    reviewingId.value = null
-  }
-}
-
 async function runProbe() {
   if (!probe.value.trim() || !baseId.value) return
   probeLoading.value = true
@@ -949,7 +925,7 @@ async function openDocPreview(doc: KbItem) {
         <p class="mt-1 text-[12px] text-text-secondary">
           {{
             base?.description ||
-            '上传 PDF / Word / Excel / 图片 / 文本。可复制文字本地解析，扫描页与图片走 OCR 后向量化。'
+            '上传 PDF / Word / Excel / 图片 / 文本。规范与产品说明会向量化检索；整份投标书、投标函、他司材料只存档不进检索。'
           }}
         </p>
       </div>
@@ -1037,7 +1013,7 @@ async function openDocPreview(doc: KbItem) {
                 </button>
               </div>
               <div class="text-[11px] text-text-secondary max-w-xl">
-                手册、规范请在此上传，解析后需维护人审核才会进入检索。充电站平面图请到「文本粘贴」，与案例卡一并入库（不 OCR）。单文件最大 {{ fmtSize(KB_UPLOAD_MAX_BYTES) }}。
+                手册、产品说明、认证规范可上传并检索。文件名含「投标文件」「投标函」或正文为其他公司投标书的，会保留原件但不向量化，检索自动跳过。充电站平面图请到「文本粘贴」。单文件最大 {{ fmtSize(KB_UPLOAD_MAX_BYTES) }}。
               </div>
               <input
                 ref="fileRef"
@@ -1332,27 +1308,6 @@ async function openDocPreview(doc: KbItem) {
           已导入资料（{{ filtered.length }}/{{ items.length }}）
         </h3>
         <div class="flex flex-wrap items-center gap-2">
-          <div class="flex items-center gap-0.5 rounded-md border border-hairline p-0.5">
-            <button
-              v-for="opt in [
-                { id: 'all', label: '全部' },
-                { id: 'pending', label: '待审核' },
-                { id: 'approved', label: '已上线' },
-                { id: 'rejected', label: '已驳回' },
-              ] as { id: typeof reviewFilter; label: string }[]"
-              :key="opt.id"
-              type="button"
-              class="h-7 px-2 rounded text-[11px]"
-              :class="
-                reviewFilter === opt.id
-                  ? 'bg-molybdenum/15 text-molybdenum'
-                  : 'text-text-muted hover:text-text-primary'
-              "
-              @click="reviewFilter = opt.id"
-            >
-              {{ opt.label }}
-            </button>
-          </div>
           <input
             v-model="keyword"
             placeholder="按名称/标签/摘要过滤..."
@@ -1535,12 +1490,14 @@ async function openDocPreview(doc: KbItem) {
                   :title="
                     it.kind === 'drawing'
                       ? '图纸附件不进向量'
+                      : isSkipRag(it)
+                        ? '判定为投标书/他司材料，未写入检索'
                       : it.chunks != null
                         ? `已切成 ${it.chunks} 块向量片段`
                         : undefined
                   "
                 >
-                  {{ it.kind === 'drawing' ? '附件' : it.chunks != null ? `${it.chunks} 块` : '—' }}
+                  {{ it.kind === 'drawing' ? '附件' : isSkipRag(it) ? '不检索' : it.chunks != null ? `${it.chunks} 块` : '—' }}
                 </td>
                 <td class="px-2 py-2.5 align-middle">
                   <div class="flex flex-wrap gap-1">
@@ -1550,7 +1507,7 @@ async function openDocPreview(doc: KbItem) {
                       class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-molybdenum/10 text-molybdenum whitespace-nowrap"
                     >
                       <Tag class="size-2.5 shrink-0" />
-                      {{ t }}
+                      {{ formatKbTag(t) }}
                     </span>
                   </div>
                 </td>
@@ -1569,46 +1526,37 @@ async function openDocPreview(doc: KbItem) {
                   <span
                     class="inline-flex items-center gap-1 text-[10.5px]"
                     :class="
-                      it.status === 'failed'
+                      it.status === 'failed' || it.reviewStatus === 'rejected'
                         ? 'text-iron'
-                        : it.status === 'parsing'
+                        : it.status === 'parsing' ||
+                            (it.kind !== 'drawing' && !isSkipRag(it) && (it.chunks ?? 0) === 0)
                           ? 'text-sulfur'
-                          : it.reviewStatus === 'approved'
-                            ? 'text-patina'
-                            : it.reviewStatus === 'rejected'
-                              ? 'text-iron'
-                              : 'text-sulfur'
+                          : 'text-patina'
                     "
-                    :title="it.errorMsg || it.reviewComment || undefined"
+                    :title="it.errorMsg || undefined"
                   >
-                    <Loader2 v-if="it.status === 'parsing'" class="size-3.5 animate-spin" />
-                    <XCircle v-else-if="it.status === 'failed'" class="size-3.5" />
-                    <Ok v-else-if="it.reviewStatus === 'approved' || it.kind === 'drawing'" class="size-3.5" />
-                    <XCircle v-else-if="it.reviewStatus === 'rejected'" class="size-3.5" />
-                    {{ reviewLabel(it) }}
+                    <Loader2
+                      v-if="
+                        it.status === 'parsing' ||
+                        (it.kind !== 'drawing' &&
+                          it.status === 'ready' &&
+                          it.reviewStatus !== 'rejected' &&
+                          !isSkipRag(it) &&
+                          (it.chunks ?? 0) === 0)
+                      "
+                      class="size-3.5 animate-spin"
+                    />
+                    <XCircle
+                      v-else-if="it.status === 'failed' || it.reviewStatus === 'rejected'"
+                      class="size-3.5"
+                    />
+                    <Ok v-else class="size-3.5" />
+                    {{ statusLabel(it) }}
                   </span>
                 </td>
                 <td class="px-2 py-2.5 text-center align-middle whitespace-nowrap">
                   <button
-                    v-if="canManage && it.status === 'ready' && it.kind !== 'drawing' && it.reviewStatus !== 'approved'"
-                    type="button"
-                    class="inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-patina hover:bg-patina/10 transition-colors whitespace-nowrap"
-                    title="通过后写入向量并可被检索"
-                    @click="openReview(it, 'approve')"
-                  >
-                    通过
-                  </button>
-                  <button
-                    v-if="canManage && it.status === 'ready' && it.kind !== 'drawing' && it.reviewStatus !== 'rejected'"
-                    type="button"
-                    class="ml-0.5 inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-iron hover:bg-iron/10 transition-colors whitespace-nowrap"
-                    title="驳回并删除向量"
-                    @click="openReview(it, 'reject')"
-                  >
-                    驳回
-                  </button>
-                  <button
-                    v-if="canManage && it.status === 'failed'"
+                    v-if="canManage && (it.status === 'failed' || it.reviewStatus === 'rejected')"
                     type="button"
                     :disabled="retryingId === it.id"
                     class="inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-iron hover:bg-iron/10 transition-colors whitespace-nowrap"
@@ -1682,53 +1630,6 @@ async function openDocPreview(doc: KbItem) {
       "
     >
       {{ toast.msg }}
-    </div>
-
-    <!-- Review confirm -->
-    <div
-      v-if="reviewDialog"
-      class="fixed inset-0 z-[60] bg-bg-base/80 backdrop-blur-sm flex items-center justify-center p-4"
-      @click.self="reviewDialog = null"
-    >
-      <div class="w-full max-w-md rounded-lg border border-hairline bg-bg-elevated shadow-2xl overflow-hidden">
-        <div class="px-5 pt-5 pb-3 space-y-2">
-          <div class="text-[14px] font-medium text-text-primary">
-            {{ reviewDialog.action === 'approve' ? '通过资料' : '驳回资料' }}
-          </div>
-          <p class="text-[12px] text-text-secondary leading-relaxed">
-            「{{ reviewDialog.item.name }}」
-            {{
-              reviewDialog.action === 'approve'
-                ? '通过后将写入向量库，可被对话与试检索命中。'
-                : '驳回后会删除该资料向量，检索不再命中。'
-            }}
-          </p>
-          <label class="block">
-            <div class="text-[11px] text-text-secondary mb-1">审核意见（可选）</div>
-            <textarea
-              v-model="reviewComment"
-              rows="3"
-              class="kb-input w-full text-[12px]"
-              placeholder="填写给上传者看的说明"
-            />
-          </label>
-        </div>
-        <div class="px-5 py-3 border-t border-hairline flex justify-end gap-2">
-          <button type="button" class="h-8 px-3 text-[12px] rounded-md border border-hairline" @click="reviewDialog = null">
-            取消
-          </button>
-          <button
-            type="button"
-            class="kb-btn-primary h-8 px-3 text-[12px]"
-            :class="reviewDialog.action === 'reject' ? 'bg-iron/80 hover:bg-iron' : ''"
-            :disabled="reviewingId === reviewDialog.item.id"
-            @click="submitReview()"
-          >
-            <Loader2 v-if="reviewingId === reviewDialog.item.id" class="size-3.5 animate-spin" />
-            {{ reviewDialog.action === 'approve' ? '确认通过' : '确认驳回' }}
-          </button>
-        </div>
-      </div>
     </div>
 
     <!-- Duplicate upload confirm -->

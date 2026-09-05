@@ -56,7 +56,7 @@ async function loadQdrant() {
 async function applyQdrant() {
   if (!auth.isAdmin || qdrantApplying.value) return
   const ok = window.confirm(
-    '将按 .env 的 QDRANT_QUANTIZATION 删除并重建向量集合，然后重嵌所有已审核资料。此操作不可撤销。确定继续？',
+    '将按 .env 的 QDRANT_QUANTIZATION 删除并重建向量集合，然后重嵌所有已入库资料。此操作不可撤销。确定继续？',
   )
   if (!ok) return
   qdrantApplying.value = true
@@ -177,7 +177,7 @@ onMounted(async () => {
         class="flex items-start gap-2 rounded-md border border-sulfur/30 bg-sulfur/10 px-3 py-2 text-[11px] text-sulfur"
       >
         <TriangleAlert class="size-3.5 shrink-0 mt-0.5" />
-        重建会短暂中断检索，并重嵌全部已审核资料。请二次确认。
+        重建会短暂中断检索，并重嵌全部已入库资料。请二次确认。
       </div>
       <button
         type="button"

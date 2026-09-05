@@ -1,4 +1,4 @@
-import { apiDownload, apiRequest } from './api'
+import { apiDownload, apiFetchBlob, apiRequest } from './api'
 import { getAccessToken } from './auth'
 
 export type PlaceholderItem = {
@@ -7,9 +7,28 @@ export type PlaceholderItem = {
   hint: string
 }
 
+export type PerformanceLine = {
+  projectName: string
+  spec: string
+  location: string
+  client: string
+  contact: string
+  amountYuan: number
+  summary: string
+  note: string
+  ongoing: boolean
+  chargerRelated?: boolean
+}
+
 export type SlotFileInfo = {
+  id?: string
+  fileId?: string
   name: string
+  fileName?: string
   sizeBytes: number
+  fileType?: string
+  kind?: 'image' | 'pdf' | 'file'
+  performance?: PerformanceLine
 }
 
 export type SlotStatus = {
@@ -18,6 +37,8 @@ export type SlotStatus = {
   hint: string
   fileCount: number
   files: SlotFileInfo[]
+  docId?: string
+  pinned?: boolean
 }
 
 export type QuoteLineIn = {
@@ -28,6 +49,13 @@ export type QuoteLineIn = {
   qty: number
   unitPrice: number
   amount: number
+}
+
+export type DeviationLine = {
+  seq: string
+  requirement: string
+  response: string
+  deviation: string
 }
 
 export type BidBrief = {
@@ -64,15 +92,26 @@ export type BidBrief = {
   agentAuthUntil: string
   trafficFeeNote: string
   extraNote: string
+  factoryRole: string
   attachQualifications: boolean
   includePlaceholders: boolean
   includeCommitment: boolean
   extraPlaceholders: PlaceholderItem[]
+  requiredSlotKeys: string[]
+  includeSlotKeys: string[]
   quoteTitle: string
   quoteTaxRate: number
   quoteSourceIncTax: number
   quoteSource: string
   quoteLines: QuoteLineIn[]
+  deviationLines: DeviationLine[]
+  performanceLines: PerformanceLine[]
+  constructionPlan: string
+  layoutPlan: string
+  powerPlan: string
+  omPlan: string
+  schedulePlan: string
+  techPlanNote: string
 }
 
 export type QualificationStatus = {
@@ -84,6 +123,20 @@ export type QualificationStatus = {
 export type TenderDefaults = BidBrief & {
   qualification: QualificationStatus
   slots: SlotStatus[]
+}
+
+export type AttachmentMatchItem = {
+  key: string
+  title: string
+  fileCount: number
+  required?: boolean
+  created?: boolean
+}
+
+export type AttachmentMatch = {
+  matched: AttachmentMatchItem[]
+  missingFiles: AttachmentMatchItem[]
+  createdItems: AttachmentMatchItem[]
 }
 
 export type GenerateResult = {
@@ -101,6 +154,7 @@ export type GenerateResult = {
   createdAt?: number
   docxAvailable?: boolean
   pdfAvailable?: boolean
+  attachmentMatch?: AttachmentMatch
 }
 
 export type TenderRecordItem = {
@@ -132,8 +186,16 @@ export type ParseInvitationResult = {
   notes: string[]
   placeholders: PlaceholderItem[]
   slots?: SlotStatus[]
+  catalogSlots?: SlotStatus[]
+  requiredSlotKeys?: string[]
+  includeSlotKeys?: string[]
+  attachmentMatch?: AttachmentMatch
   fileName: string
   charCount: number
+  pageCount?: number
+  ocrPages?: number
+  ocrCapped?: boolean
+  ocrMaxPages?: number
   preview: string
   knowledgeHits: { name?: string; docId?: string }[]
   quoteFileName?: string | null
@@ -149,13 +211,89 @@ export async function fetchTenderDefaults(): Promise<TenderDefaults> {
   return apiRequest<TenderDefaults>('/api/v1/tenders/defaults', { token: token() })
 }
 
+const FILE_ID_RE = /^([a-f0-9]{10,16})\.(png|jpe?g|webp|gif|bmp|pdf)$/i
+
+export function resolveLibraryFileId(
+  file: Pick<SlotFileInfo, 'id' | 'fileId' | 'fileName' | 'name'>,
+): string {
+  const direct = String(file.fileId || file.id || '').trim()
+  if (direct) return direct
+  const n = String(file.fileName || file.name || '').trim()
+  const m = FILE_ID_RE.exec(n)
+  return m?.[1] || ''
+}
+
+export function inferLibraryFileKind(
+  file: Pick<SlotFileInfo, 'kind' | 'fileType' | 'fileName' | 'name'>,
+): NonNullable<SlotFileInfo['kind']> {
+  if (file.kind === 'image' || file.kind === 'pdf' || file.kind === 'file') return file.kind
+  const raw = `${file.fileType || ''} ${file.fileName || ''} ${file.name || ''}`.toLowerCase()
+  if (raw.includes('pdf')) return 'pdf'
+  if (/\.(png|jpe?g|webp|gif|bmp)\b/.test(raw) || /\b(png|jpe?g|webp|gif|bmp)\b/.test(raw)) {
+    return 'image'
+  }
+  return 'file'
+}
+
+export function tenderLibraryFilePath(
+  docId: string,
+  opts?: { thumb?: boolean; withToken?: boolean },
+): string {
+  const q = new URLSearchParams()
+  if (opts?.thumb) q.set('thumb', '1')
+  if (opts?.withToken) {
+    const t = getAccessToken()
+    if (t) q.set('access_token', t)
+  }
+  const qs = q.toString()
+  return `/api/v1/tenders/library/files/${encodeURIComponent(docId)}${qs ? `?${qs}` : ''}`
+}
+
+export async function fetchTenderLibraryFile(
+  docId: string,
+  opts?: { thumb?: boolean },
+): Promise<Blob> {
+  return apiFetchBlob(tenderLibraryFilePath(docId, { thumb: opts?.thumb }), { token: token() })
+}
+
 export async function fetchTenderLibrary(): Promise<{
   slots: SlotStatus[]
   filledCount: number
   totalCount: number
   hint: string
+  baseId?: string
 }> {
   return apiRequest('/api/v1/tenders/library', { token: token() })
+}
+
+export async function createTenderLibraryItem(body: {
+  title: string
+  hint?: string
+  key?: string
+}): Promise<SlotStatus> {
+  return apiRequest('/api/v1/tenders/library/items', {
+    method: 'POST',
+    token: token(),
+    body,
+  })
+}
+
+export async function updateTenderLibraryItem(
+  key: string,
+  body: { title?: string; hint?: string },
+): Promise<SlotStatus> {
+  return apiRequest(`/api/v1/tenders/library/items/${encodeURIComponent(key)}`, {
+    method: 'PATCH',
+    token: token(),
+    body,
+  })
+}
+
+export async function deleteTenderLibraryItem(key: string): Promise<{ key: string; deleted: boolean }> {
+  return apiRequest(`/api/v1/tenders/library/items/${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+    token: token(),
+  })
 }
 
 export async function fetchTenderSlots(extras?: PlaceholderItem[]): Promise<SlotStatus[]> {
@@ -186,6 +324,13 @@ export async function uploadTenderSlot(
 
 export async function clearTenderSlot(key: string): Promise<SlotStatus> {
   return apiRequest(`/api/v1/tenders/slots/${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+    token: token(),
+  })
+}
+
+export async function deleteTenderLibraryFile(docId: string): Promise<SlotStatus> {
+  return apiRequest(`/api/v1/tenders/library/files/${encodeURIComponent(docId)}`, {
     method: 'DELETE',
     token: token(),
   })
@@ -240,12 +385,29 @@ export async function fetchTenderRecord(recordId: string): Promise<TenderRecordI
   })
 }
 
+export async function regenerateTenderRecord(recordId: string): Promise<GenerateResult> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/regenerate`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
+export async function deleteTenderRecord(
+  recordId: string,
+): Promise<{ deleted: boolean; id: string; removedFiles: string[] }> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}`, {
+    method: 'DELETE',
+    token: token(),
+  })
+}
+
 export async function fetchTenderEditorConfig(
   fileName: string,
   downloadName: string,
   heightPx?: number,
+  mode: 'edit' | 'view' = 'edit',
 ): Promise<TenderEditorConfig> {
-  const q = new URLSearchParams({ download_name: downloadName })
+  const q = new URLSearchParams({ download_name: downloadName, mode })
   if (heightPx && heightPx >= 400) {
     q.set('height', String(Math.round(heightPx)))
   }

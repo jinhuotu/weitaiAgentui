@@ -38,6 +38,26 @@ const NATIVE_AIGC_SUFFIXES = [
 ]
 const OPENAI_SUFFIXES = ['/chat/completions', '/completions', '/embeddings', '/images/generations']
 
+function hostIsPrivateOrLocal(host: string): boolean {
+  const name = (host || '').split(':')[0].trim().toLowerCase().replace(/^\[|\]$/g, '')
+  if (['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(name)) return true
+  const parts = name.split('.')
+  if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p) && Number(p) <= 255)) {
+    const a = Number(parts[0])
+    const b = Number(parts[1])
+    if (a === 10 || a === 127) return true
+    if (a === 192 && b === 168) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+  }
+  return false
+}
+
+export function isLoopbackApiBase(apiBase: string): boolean {
+  const host = (apiBase || '').split('://').pop()?.split('/')[0] || ''
+  const name = host.split(':')[0].trim().toLowerCase().replace(/^\[|\]$/g, '')
+  return ['127.0.0.1', 'localhost', '::1'].includes(name)
+}
+
 export function normalizeApiBase(raw: string): string {
   let text = (raw || '').trim().replace(/\s+/g, '').replace(/^['"]|['"]$/g, '')
   if (!text) return ''
@@ -49,6 +69,10 @@ export function normalizeApiBase(raw: string): string {
     text = text.slice(schemeMatch[0].length)
   }
   text = text.replace(/^(https?:\/\/)+/i, '').replace(/^\/+/, '').replace(/\/+$/, '')
+  if (!schemeMatch && hostIsPrivateOrLocal(text.split('/')[0] || '')) {
+    scheme = 'http'
+  }
+  text = text.replace(/^([^/]+)\/+:(\d+)/, '$1:$2').replace(/^([^/:]+):\/+(\d+)/, '$1:$2')
   const lower = `/${text.toLowerCase()}`
   for (const suffix of [...OPENAI_SUFFIXES, ...NATIVE_AIGC_SUFFIXES]) {
     if (lower.endsWith(suffix)) {
@@ -219,7 +243,7 @@ export async function createModelConfig(body: {
   kind: ModelKind;
   modelType: ModelType;
   apiBase: string;
-  apiKey: string;
+  apiKey?: string;
   modelName: string;
   temperature?: number | null;
   timeoutSeconds?: number;

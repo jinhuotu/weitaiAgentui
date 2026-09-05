@@ -8,6 +8,9 @@ const props = defineProps<{
   docxFile: string
   downloadName: string
   fullscreen?: boolean
+  layoutTick?: number
+  /** view=只读预览（更快）；edit=可改稿 */
+  mode?: 'edit' | 'view'
 }>()
 
 const loading = ref(true)
@@ -127,7 +130,12 @@ async function boot() {
       throw new Error('编辑器区域高度不足，请放大窗口后重试')
     }
 
-    const data = await fetchTenderEditorConfig(props.docxFile, props.downloadName, heightPx)
+    const data = await fetchTenderEditorConfig(
+      props.docxFile,
+      props.downloadName,
+      heightPx,
+      props.mode === 'view' ? 'view' : 'edit',
+    )
     const scriptUrl = `${data.documentServerUrl}/web-apps/apps/api/documents/api.js`
     await loadScript(scriptUrl)
     if (!window.DocsAPI) {
@@ -140,7 +148,7 @@ async function boot() {
     fillEditorFrame()
     await nextTick()
 
-    const editorId = `tender-doc-editor-${props.docxFile.replace(/\W/g, '')}`
+    const editorId = `tender-doc-editor-${props.docxFile.replace(/\W/g, '')}-${props.mode || 'edit'}`
     host.id = editorId
     host.innerHTML = ''
 
@@ -178,9 +186,22 @@ onMounted(() => {
 })
 
 watch(
-  () => [props.docxFile, props.downloadName] as const,
+  () => [props.docxFile, props.downloadName, props.mode] as const,
   () => {
     void boot()
+  },
+)
+
+watch(
+  () => props.layoutTick,
+  async () => {
+    await nextTick()
+    fillEditorFrame()
+    notifyEditorResize()
+    window.setTimeout(() => {
+      fillEditorFrame()
+      notifyEditorResize()
+    }, 80)
   },
 )
 
@@ -212,7 +233,9 @@ onBeforeUnmount(() => {
 
     <div v-if="loading" class="tender-doc-editor__overlay">
       <Loader2 class="size-5 animate-spin text-muted-foreground" />
-      <span class="text-[12px] text-muted-foreground">正在打开在线 Word…</span>
+      <span class="text-[12px] text-muted-foreground">
+        {{ mode === 'view' ? '正在打开只读预览…' : '正在打开在线 Word…' }}
+      </span>
     </div>
 
     <div

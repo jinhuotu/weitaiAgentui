@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   ChevronDown,
   ChevronLeft,
@@ -16,27 +16,35 @@ import {
   Sparkles,
   TriangleAlert,
   Upload,
+  ImagePlus,
 } from 'lucide-vue-next'
-import { PageHeader, Panel, Tag } from '@/components/ui-kit'
+import { PageHeader, Panel } from '@/components/ui-kit'
+import AppAlertDialog from '@/components/ui/AppAlertDialog.vue'
 import { fmtSize, KB_UPLOAD_MAX_BYTES } from '@/lib/read-file-smart'
 import { ApiError } from '@/lib/api'
 import { getAccessToken } from '@/lib/auth'
 import { listKnowledgeBases, type KnowledgeBaseItem } from '@/lib/knowledge-api'
 import {
   clearTenderSlot,
+  deleteTenderRecord,
   downloadTenderFile,
   fetchTenderDefaults,
   fetchTenderLibrary,
   fetchTenderRecord,
   fetchTenderRecords,
+  fetchTenderSlots,
   generateTender,
   parseTenderInvitation,
+  regenerateTenderRecord,
   uploadTenderSlot,
   type BidBrief,
+  type DeviationLine,
   type GenerateResult,
-  type PlaceholderItem,
+  type AttachmentMatch,
+  type AttachmentMatchItem,
+  type PerformanceLine,
   type QualificationStatus,
-  type QuoteLineIn,
+  type SlotFileInfo,
   type SlotStatus,
   type TenderRecordItem,
 } from '@/lib/tenders-api'
@@ -57,43 +65,142 @@ function emptyBrief(): BidBrief {
     settlementPct: 17,
     warrantyPct: 3,
     bidDate: new Date().toISOString().slice(0, 10),
-    bidderName: '',
+    bidderName: '河南伟泰光电科技有限公司',
     bidderNature: '有限责任公司',
-    bidderAddress: '',
+    bidderAddress:
+      '河南省郑州市高新区开发区梧桐街与红松路交叉口东南角远大产业园区内6号楼三层',
     bidderWebsite: '',
-    bidderPhone: '',
+    bidderPhone: '17630567052',
     bidderFax: '',
     bidderPostcode: '',
-    bidderEmail: '',
-    foundedDate: '',
+    bidderEmail: 'gzwceo@163.com',
+    foundedDate: '2017年07月',
     businessTerm: '长期',
-    legalPersonName: '',
+    legalPersonName: '张朝文',
     legalPersonGender: '男',
-    legalPersonAge: '',
+    legalPersonAge: '28',
     legalPersonTitle: '执行董事',
-    legalPersonIdNo: '',
+    legalPersonIdNo: '410521199802104053',
     agentName: '',
     agentIdNo: '',
     agentAuthUntil: '',
     trafficFeeNote: '',
     extraNote: '',
-    attachQualifications: true,
+    factoryRole: '',
+    attachQualifications: false,
     includePlaceholders: true,
     includeCommitment: true,
     extraPlaceholders: [],
+    requiredSlotKeys: [],
+    includeSlotKeys: [],
     quoteTitle: '',
     quoteTaxRate: 0.13,
     quoteSourceIncTax: 0,
     quoteSource: '',
     quoteLines: [],
+    deviationLines: [],
+    performanceLines: [],
+    constructionPlan: '',
+    layoutPlan: '',
+    powerPlan: '',
+    omPlan: '',
+    schedulePlan: '',
+    techPlanNote: '',
   }
 }
 
-function emptyQuoteLine(): QuoteLineIn {
-  return { seq: '', name: '', spec: '', unit: '', qty: 0, unitPrice: 0, amount: 0 }
+function emptyDeviationLine(): DeviationLine {
+  return { seq: '', requirement: '', response: '', deviation: '无偏差' }
+}
+
+function emptyPerformanceLine(): PerformanceLine {
+  return {
+    projectName: '',
+    spec: '',
+    location: '',
+    client: '',
+    contact: '',
+    amountYuan: 0,
+    summary: '',
+    note: '',
+    ongoing: false,
+    chargerRelated: false,
+  }
+}
+
+/** 本公司固定信息：接口/识别返回的空字符串不得覆盖这些默认值 */
+const COMPANY_DEFAULT_KEYS = [
+  'bidderName',
+  'bidderNature',
+  'bidderAddress',
+  'bidderWebsite',
+  'bidderPhone',
+  'bidderFax',
+  'bidderPostcode',
+  'bidderEmail',
+  'foundedDate',
+  'businessTerm',
+  'legalPersonName',
+  'legalPersonGender',
+  'legalPersonAge',
+  'legalPersonTitle',
+  'legalPersonIdNo',
+] as const satisfies readonly (keyof BidBrief)[]
+
+function ensureCompanyDefaults(target: BidBrief) {
+  const defaults = emptyBrief()
+  for (const key of COMPANY_DEFAULT_KEYS) {
+    const cur = target[key]
+    if (typeof cur === 'string' && !cur.trim()) {
+      ;(target as Record<string, unknown>)[key] = defaults[key]
+    }
+  }
+}
+
+/** 合并 brief：空字符串不覆盖已有公司默认；其它字段照常写入 */
+function mergeBriefIntoForm(brief: Partial<BidBrief>) {
+  const defaults = emptyBrief()
+  const next: Record<string, unknown> = { ...form }
+  for (const [key, value] of Object.entries(brief)) {
+    if (value === undefined) continue
+    const isCompany = (COMPANY_DEFAULT_KEYS as readonly string[]).includes(key)
+    if (isCompany && typeof value === 'string' && !value.trim()) {
+      const cur = next[key]
+      if (typeof cur === 'string' && cur.trim()) continue
+      next[key] = (defaults as Record<string, unknown>)[key]
+      continue
+    }
+    next[key] = value
+  }
+  Object.assign(form, next)
+  ensureCompanyDefaults(form)
+}
+
+function isWeakPerfTitle(name: string): boolean {
+  const compact = (name || '').replace(/\s+/g, '').toLowerCase()
+  if (!compact) return true
+  return /snipaste|screenshot|img_|dsc_|wechat|微信图片|屏幕截图|截图/.test(compact)
+}
+
+function absorbLibraryPerformance(files: SlotFileInfo[]) {
+  form.performanceLines = form.performanceLines.filter((row) => !isWeakPerfTitle(row.projectName))
+  const seen = new Set(
+    form.performanceLines
+      .map((row) => row.projectName.replace(/\s+/g, '').toLowerCase())
+      .filter(Boolean),
+  )
+  for (const file of files) {
+    const line = file.performance
+    if (!line?.projectName || isWeakPerfTitle(line.projectName)) continue
+    const key = line.projectName.replace(/\s+/g, '').toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    form.performanceLines.push({ ...emptyPerformanceLine(), ...line })
+  }
 }
 
 const router = useRouter()
+const route = useRoute()
 const loading = ref(true)
 const generating = ref(false)
 const parsing = ref(false)
@@ -108,8 +215,22 @@ const quoteFile = ref<File | null>(null)
 const kbList = ref<KnowledgeBaseItem[]>([])
 const selectedKbIds = ref<string[]>([])
 const parseNotes = ref<string[]>([])
-const parsePlaceholders = ref<PlaceholderItem[]>([])
+const attachmentMatch = ref<AttachmentMatch | null>(null)
+const parseOcr = ref<{
+  pageCount: number
+  ocrPages: number
+  ocrCapped: boolean
+  ocrMaxPages: number
+} | null>(null)
 const slotStatuses = ref<SlotStatus[]>([])
+const catalogSlots = ref<SlotStatus[]>([])
+const techDrawingSlot = ref<SlotStatus>({
+  key: 'tech_drawings',
+  title: '实施方案图纸',
+  hint: '本项目平面图、系统图或施工图。换标请覆盖，不要用其他项目图纸。',
+  fileCount: 0,
+  files: [],
+})
 const fileInput = ref<HTMLInputElement | null>(null)
 const quoteInput = ref<HTMLInputElement | null>(null)
 const slotFileInput = ref<HTMLInputElement | null>(null)
@@ -118,33 +239,105 @@ const pendingSlotReplace = ref(true)
 /** 识别后是否已跑过「识别并填表」 */
 const hasParsed = ref(false)
 /** 右侧资料库列表默认折叠为紧凑条 */
-const slotsExpanded = ref(false)
-const allowBuiltinQuote = ref(false)
-/** 向导当前步骤 0=上传 1=填表 2=预览编辑 3=生成下载 */
+const slotsExpanded = ref(true)
+/** 向导当前步骤 0=上传 1=填表生成 2=在线改稿 3=下载定稿 */
 const currentStepIndex = ref(0)
+/** 填写页切换商务标 / 技术标；生成时仍写入同一份 Word */
+type BidVolume = 'business' | 'technical'
+const activeVolume = ref<BidVolume>('business')
+const volumeHint = ref('')
 const maxStepReached = ref(0)
 const previewFullscreen = ref(false)
+/** 识别说明默认展开；每次重新识别后强制再展开 */
+const parseNotesEpoch = ref(0)
+const previewLayoutTick = ref(0)
 const showRecords = ref(false)
 const recordsLoading = ref(false)
 const records = ref<TenderRecordItem[]>([])
 const recordsTotal = ref(0)
 const recordsQuery = ref('')
 const openingRecordId = ref<string | null>(null)
+const regeneratingId = ref<string | null>(null)
+const deletingId = ref<string | null>(null)
+const confirmDeleteOpen = ref(false)
+const pendingDeleteItem = ref<TenderRecordItem | null>(null)
+const previewEditorMode = ref<'edit' | 'view'>('edit')
+const loadingFormId = ref<string | null>(null)
+const confirmGenerateOpen = ref(false)
+const confirmGenerateMode = ref<'form' | 'record'>('form')
+const pendingRegenItem = ref<TenderRecordItem | null>(null)
 
 const paySum = computed(
   () => form.prepaidPct + form.arrivalPct + form.settlementPct + form.warrantyPct,
 )
 
-const moneyLabel = computed(() => {
-  const n = Number(form.bidPriceYuan) || 0
-  return n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+const parseRiskNoteCount = computed(
+  () =>
+    parseNotes.value.filter((n) => /废标|未解析|未找到|缺|失败|警告/.test(n)).length,
+)
+
+const parseNotesSummary = computed(() => {
+  const total = parseNotes.value.length
+  if (!total) return ''
+  const risk = parseRiskNoteCount.value
+  if (risk) return `共 ${total} 条说明，其中 ${risk} 条需注意`
+  return `共 ${total} 条识别说明`
 })
+
+function noteTone(note: string) {
+  if (/废标/.test(note)) return 'text-sulfur'
+  if (/未解析|未找到|缺|失败/.test(note)) return 'text-sulfur/90'
+  if (/已回填|已匹配|已就绪/.test(note)) return 'text-emerald-700 dark:text-emerald-400'
+  return 'text-muted-foreground'
+}
+
+function isRiskNote(note: string) {
+  return /废标|未解析|未找到|缺|失败/.test(note)
+}
 
 function isBlank(value: unknown) {
   return !String(value ?? '').trim()
 }
 
 const agentIdRequired = computed(() => !isBlank(form.agentName))
+const hasAgent = computed(() => !isBlank(form.agentName) || !isBlank(form.agentIdNo))
+
+function uniqueSlotKeys(keys: string[] | undefined) {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of keys || []) {
+    const key = String(raw || '').trim()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(key)
+  }
+  return out
+}
+
+const effectiveRequiredKeys = computed(() => {
+  let keys = uniqueSlotKeys(form.requiredSlotKeys)
+  if (!keys.includes('id_legal')) keys = ['id_legal', ...keys]
+  if (hasAgent.value) {
+    if (!keys.includes('id_agent')) keys = [...keys, 'id_agent']
+  } else {
+    keys = keys.filter((k) => k !== 'id_agent')
+  }
+  return keys
+})
+
+const effectiveIncludeKeys = computed(() =>
+  uniqueSlotKeys([...(form.includeSlotKeys || []), ...effectiveRequiredKeys.value]),
+)
+
+const missingMaterialTitles = computed(() => {
+  const titles: string[] = []
+  for (const slot of placeholderItems.value) {
+    if (effectiveRequiredKeys.value.includes(slot.key) && !slot.fileCount) {
+      titles.push(slot.title || '扫描件')
+    }
+  }
+  return titles
+})
 
 const generateBlockers = computed(() => {
   const issues: string[] = []
@@ -159,8 +352,8 @@ const generateBlockers = computed(() => {
   if (isBlank(form.legalPersonAge)) issues.push('年龄')
   if (isBlank(form.legalPersonIdNo)) issues.push('法人身份证号')
   if (agentIdRequired.value && isBlank(form.agentIdNo)) issues.push('代理人身份证号')
-  if (!form.quoteLines.length && !allowBuiltinQuote.value) {
-    issues.push('工程量分项（上传清单或勾选内置模板）')
+  if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
+    issues.push('报价清单（请在本页上传工程量清单并点「识别清单」）')
   }
   return issues
 })
@@ -172,50 +365,112 @@ const generateButtonDisabled = computed(
 const generateButtonTooltip = computed(() => {
   if (generating.value) return ''
   if (generateBlockers.value.length) {
-    return `请先填写 ${generateBlockers.value.join('、')} 等关键信息`
+    return `请先完善：${generateBlockers.value.join('、')}`
   }
   return ''
 })
 
-const formStepNextLabel = computed(() =>
-  generating.value ? '正在生成预览…' : '下一步：预览编辑',
+const HIGH_DISQUALIFY_KEYS = new Set(['id_legal', 'id_agent', 'bond', 'seal', 'finance', 'credit'])
+const TECHNICAL_SLOT_KEYS = new Set(['product', 'tech_drawings'])
+const TECH_DRAWING_KEY = 'tech_drawings'
+
+function slotVolume(slot: SlotStatus): 'business' | 'technical' {
+  if (TECHNICAL_SLOT_KEYS.has(slot.key)) return 'technical'
+  if (HIGH_DISQUALIFY_KEYS.has(slot.key)) return 'business'
+  if (/方案|布置|配电|运维|图纸|检测|3C|技术规格/.test(slot.title || '')) return 'technical'
+  return 'business'
+}
+
+const technicalWarnings = computed(() => {
+  const issues: string[] = []
+  if (!form.deviationLines.some((row) => String(row.requirement || '').trim())) {
+    issues.push('技术偏差表为空，不响应技术要求会大量扣分')
+  }
+  if (!String(form.techPlanNote || '').trim()) issues.push('实施方案文字描述未写')
+  if (!techDrawingSlot.value.fileCount) issues.push('尚未上传实施方案图纸')
+  if (!form.performanceLines.some((row) => String(row.projectName || '').trim())) {
+    issues.push('类似业绩为空，资格评审可能扣分')
+  }
+  return issues
+})
+
+const softGenerateNotes = computed(() => {
+  const notes: string[] = []
+  if (missingMaterialTitles.value.length) {
+    notes.push(`未上传资料将以虚线框占位：${missingMaterialTitles.value.join('、')}`)
+  }
+  notes.push(...technicalWarnings.value)
+  return notes
+})
+
+const formStepNextLabel = computed(() => {
+  if (generating.value) return '正在生成…'
+  return result.value ? '重新生成并预览' : '生成并预览'
+})
+
+const confirmGenerateTitle = computed(() =>
+  confirmGenerateMode.value === 'record' ? '另存为新记录' : '重新生成将另存新记录',
+)
+
+const confirmGenerateDescription = computed(() =>
+  confirmGenerateMode.value === 'record'
+    ? '将用该记录保存的表单和当前资料库附件再生成一份 Word，不会覆盖原来的文件。'
+    : '将另存为一条新的生成记录。上次在预览里改过的 Word 不会自动合并进这次。',
 )
 
 const placeholderItems = computed((): SlotStatus[] => {
-  if (slotStatuses.value.length) return slotStatuses.value
-  const items = parsePlaceholders.value.length
-    ? parsePlaceholders.value
-    : form.extraPlaceholders
-  if (items.length) {
-    return items.map((x) => ({
-      key: x.key,
-      title: x.title,
-      hint: x.hint || '',
+  const byKey = new Map<string, SlotStatus>()
+  for (const slot of catalogSlots.value) {
+    if (slot.key) byKey.set(slot.key, slot)
+  }
+  for (const slot of slotStatuses.value) {
+    if (!slot.key) continue
+    const prev = byKey.get(slot.key)
+    byKey.set(slot.key, prev ? { ...prev, ...slot } : slot)
+  }
+  for (const extra of form.extraPlaceholders || []) {
+    if (!extra.key || byKey.has(extra.key)) continue
+    byKey.set(extra.key, {
+      key: extra.key,
+      title: extra.title,
+      hint: extra.hint || '',
       fileCount: 0,
       files: [],
-    }))
+    })
   }
-  return [
-    { key: 'id_legal', title: '法定代表人身份证正反面', hint: '', fileCount: 0, files: [] },
-    { key: 'id_agent', title: '授权代理人身份证及社保', hint: '', fileCount: 0, files: [] },
-    { key: 'perf', title: '类似项目合同及发票（≥20万元）', hint: '', fileCount: 0, files: [] },
-    { key: 'finance', title: '近三年财务 / 完税 / 社保', hint: '', fileCount: 0, files: [] },
-    { key: 'credit', title: '信用中国及企信公示查询页', hint: '', fileCount: 0, files: [] },
-    { key: 'product', title: '产品检测 / 3C / 对应功率证明', hint: '', fileCount: 0, files: [] },
-    { key: 'bond', title: '投标保证金回单', hint: '', fileCount: 0, files: [] },
-    { key: 'seal', title: '签章', hint: '', fileCount: 0, files: [] },
-  ]
+  const items: SlotStatus[] = []
+  for (const key of effectiveIncludeKeys.value) {
+    if (key === TECH_DRAWING_KEY) continue
+    const slot = byKey.get(key)
+    if (slot) items.push(slot)
+  }
+  return items
 })
+
+const optionalCatalogSlots = computed(() =>
+  catalogSlots.value.filter(
+    (slot) =>
+      slot.key
+      && slot.key !== TECH_DRAWING_KEY
+      && !effectiveIncludeKeys.value.includes(slot.key),
+  ),
+)
 
 const slotFilledCount = computed(
   () => placeholderItems.value.filter((s) => s.fileCount > 0).length,
 )
 
+const matchHasRows = computed(() => {
+  const m = attachmentMatch.value
+  if (!m) return false
+  return m.matched.length + m.missingFiles.length + m.createdItems.length > 0
+})
+
 const workflowSteps = [
   { key: 'upload', label: '上传邀请书' },
-  { key: 'form', label: '识别填表' },
-  { key: 'preview', label: '预览编辑' },
-  { key: 'generate', label: '生成文档' },
+  { key: 'form', label: '填商务/技术标' },
+  { key: 'preview', label: '在线改稿' },
+  { key: 'generate', label: '下载定稿' },
 ] as const
 
 const activeWorkflowIndex = computed(() => currentStepIndex.value)
@@ -238,10 +493,23 @@ function togglePreviewFullscreen() {
   setPreviewFullscreen(!previewFullscreen.value)
 }
 
+function togglePreviewHints() {
+  previewHintsOpen.value = !previewHintsOpen.value
+  window.setTimeout(() => {
+    previewLayoutTick.value += 1
+  }, 0)
+}
+
 function onPreviewFullscreenKey(ev: KeyboardEvent) {
-  if (ev.key === 'Escape' && previewFullscreen.value) {
+  if (ev.key !== 'Escape') return
+  if (previewFullscreen.value) {
     ev.preventDefault()
     setPreviewFullscreen(false)
+    return
+  }
+  if (showRecords.value) {
+    ev.preventDefault()
+    closeRecords()
   }
 }
 
@@ -250,7 +518,33 @@ function advanceStep(index: number) {
   maxStepReached.value = Math.max(maxStepReached.value, index)
 }
 
+async function selectVolume(volume: BidVolume) {
+  activeVolume.value = volume
+  volumeHint.value = ''
+  if (showRecords.value) closeRecords()
+
+  if (currentStepIndex.value === 0) {
+    if (hasParsed.value) {
+      advanceStep(1)
+      await nextTick()
+    } else if (volume === 'technical') {
+      volumeHint.value =
+        '请先上传邀请书并点「识别并继续」。技术标（偏差表、实施方案）在下一步填写；最终会生成一份同时包含商务标与技术标的 Word。'
+    }
+    return
+  }
+
+  if (currentStepIndex.value === 1) {
+    await nextTick()
+    // 只滚到卷内标题，避免把上方「识别说明」顶出视野
+    document
+      .getElementById(`tender-volume-${volume}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+}
+
 const dragOverInvite = ref(false)
+const dragOverDrawings = ref(false)
 
 function onPickFile(ev: Event) {
   const input = ev.target as HTMLInputElement
@@ -258,6 +552,8 @@ function onPickFile(ev: Event) {
   if (file !== inviteFile.value) {
     hasParsed.value = false
     parseNotes.value = []
+    parseOcr.value = null
+    attachmentMatch.value = null
   }
   inviteFile.value = file
 }
@@ -270,22 +566,88 @@ function onInviteDrop(ev: DragEvent) {
     if (file !== inviteFile.value) {
       hasParsed.value = false
       parseNotes.value = []
+      parseOcr.value = null
+      attachmentMatch.value = null
     }
     inviteFile.value = file
   }
 }
 
 function mergeSlotStatus(payload: SlotStatus) {
-  const idx = slotStatuses.value.findIndex((s) => s.key === payload.key)
   const next: SlotStatus = {
     key: payload.key,
-    title: payload.title || slotStatuses.value[idx]?.title || payload.key,
-    hint: payload.hint || slotStatuses.value[idx]?.hint || '',
+    title: payload.title || payload.key,
+    hint: payload.hint || '',
     fileCount: payload.fileCount ?? payload.files?.length ?? 0,
     files: payload.files || [],
+    docId: payload.docId,
+    pinned: payload.pinned,
   }
-  if (idx >= 0) slotStatuses.value.splice(idx, 1, next)
-  else slotStatuses.value.push(next)
+  const idx = slotStatuses.value.findIndex((s) => s.key === payload.key)
+  if (idx >= 0) {
+    const prev = slotStatuses.value[idx]
+    slotStatuses.value.splice(idx, 1, {
+      ...next,
+      title: next.title || prev.title,
+      hint: next.hint || prev.hint,
+    })
+  } else {
+    slotStatuses.value.push(next)
+  }
+  if (payload.key === TECH_DRAWING_KEY) {
+    techDrawingSlot.value = { ...techDrawingSlot.value, ...next }
+  }
+  const cidx = catalogSlots.value.findIndex((s) => s.key === payload.key)
+  if (cidx >= 0) {
+    const prev = catalogSlots.value[cidx]
+    catalogSlots.value.splice(cidx, 1, {
+      ...prev,
+      ...next,
+      title: next.title || prev.title,
+      hint: next.hint || prev.hint,
+    })
+  }
+  refreshAttachmentMatch()
+}
+
+function refreshAttachmentMatch() {
+  const report = attachmentMatch.value
+  if (!report) return
+  const counts = new Map<string, number>()
+  for (const slot of [...catalogSlots.value, ...slotStatuses.value]) {
+    if (slot.key) counts.set(slot.key, slot.fileCount || 0)
+  }
+  const seen = new Set<string>()
+  const matched: AttachmentMatchItem[] = []
+  const missingFiles: AttachmentMatchItem[] = []
+  const createdItems: AttachmentMatchItem[] = []
+  for (const item of [...report.matched, ...report.missingFiles, ...report.createdItems]) {
+    if (!item.key || seen.has(item.key)) continue
+    seen.add(item.key)
+    const fileCount = counts.has(item.key) ? counts.get(item.key)! : item.fileCount
+    const next = { ...item, fileCount }
+    if (fileCount > 0) matched.push({ ...next, created: false })
+    else if (item.created) createdItems.push(next)
+    else missingFiles.push(next)
+  }
+  attachmentMatch.value = { matched, missingFiles, createdItems }
+}
+
+function includeOptionalSlot(slot: SlotStatus) {
+  if (!slot.key) return
+  if (!form.includeSlotKeys.includes(slot.key)) {
+    form.includeSlotKeys = [...form.includeSlotKeys, slot.key]
+  }
+  mergeSlotStatus(slot)
+}
+
+function excludeOptionalSlot(slot: SlotStatus) {
+  if (!slot.key || effectiveRequiredKeys.value.includes(slot.key)) return
+  form.includeSlotKeys = form.includeSlotKeys.filter((k) => k !== slot.key)
+}
+
+function isRequiredSlot(key: string) {
+  return effectiveRequiredKeys.value.includes(key)
 }
 
 async function loadRecords() {
@@ -305,6 +667,11 @@ async function loadRecords() {
   }
 }
 
+function formatPrice(n: number) {
+  const value = Number(n) || 0
+  return value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
+
 function formatRecordTime(ms: number) {
   if (!ms) return '—'
   const d = new Date(ms)
@@ -312,20 +679,69 @@ function formatRecordTime(ms: number) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+function closeRecords() {
+  showRecords.value = false
+}
+
 function toggleRecords() {
-  showRecords.value = !showRecords.value
-  if (showRecords.value) void loadRecords()
+  if (showRecords.value) {
+    closeRecords()
+    return
+  }
+  showRecords.value = true
+  void loadRecords()
 }
 
 async function openRecordPreview(item: TenderRecordItem) {
-  if (!item.docxAvailable) {
+  if (!item.docxAvailable || !item.docxFile) {
     error.value = '该记录的 Word 文件已丢失，无法预览'
     return
   }
+  // 列表项已有文件名，不必再拉详情（含 brief），直接进只读预览更快
   openingRecordId.value = item.id
   error.value = ''
   try {
-    const detail = await fetchTenderRecord(item.id)
+    result.value = {
+      id: item.id,
+      projectName: item.projectName,
+      tenderer: item.tenderer,
+      bidPriceYuan: item.bidPriceYuan,
+      legalPersonName: item.legalPersonName,
+      docxFile: item.docxFile,
+      pdfFile: item.pdfFile,
+      downloadName: item.downloadName || `${item.projectName || 'bid'}.docx`,
+      pdfDownloadName: item.pdfDownloadName,
+      warnings: item.warnings || [],
+      username: item.username,
+      createdAt: item.createdAt,
+      docxAvailable: item.docxAvailable,
+      pdfAvailable: item.pdfAvailable,
+    }
+    previewEditorMode.value = 'view'
+    closeRecords()
+    setPreviewFullscreen(false)
+    advanceStep(2)
+    return true
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '打开记录失败'
+    return false
+  } finally {
+    openingRecordId.value = null
+  }
+}
+
+async function openRecordFromQuery() {
+  const id = String(route.query.record || '').trim()
+  if (!id || !getAccessToken()) return
+  openingRecordId.value = id
+  error.value = ''
+  try {
+    // 深链仍需详情（列表可能未加载）
+    const detail = await fetchTenderRecord(id)
+    if (!detail.docxAvailable || !detail.docxFile) {
+      error.value = '该记录的 Word 文件已丢失，无法预览'
+      return
+    }
     result.value = {
       id: detail.id,
       projectName: detail.projectName,
@@ -342,13 +758,163 @@ async function openRecordPreview(item: TenderRecordItem) {
       docxAvailable: detail.docxAvailable,
       pdfAvailable: detail.pdfAvailable,
     }
-    showRecords.value = false
+    previewEditorMode.value = 'view'
+    closeRecords()
     setPreviewFullscreen(false)
     advanceStep(2)
+    if (route.query.record) {
+      const nextQuery = { ...route.query }
+      delete nextQuery.record
+      await router.replace({ path: '/tenders', query: nextQuery })
+    }
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '打开记录失败'
   } finally {
     openingRecordId.value = null
+  }
+}
+
+async function refreshTechDrawings() {
+  try {
+    const slots = await fetchTenderSlots([
+      {
+        key: TECH_DRAWING_KEY,
+        title: techDrawingSlot.value.title,
+        hint: techDrawingSlot.value.hint,
+      },
+    ])
+    const row = slots.find((s) => s.key === TECH_DRAWING_KEY)
+    if (row) {
+      techDrawingSlot.value = {
+        ...techDrawingSlot.value,
+        ...row,
+        title: row.title || techDrawingSlot.value.title,
+        hint: row.hint || techDrawingSlot.value.hint,
+      }
+    }
+  } catch {
+    /* 图纸槽位读取失败不打断表单 */
+  }
+}
+
+async function refreshLibrary() {
+  try {
+    const library = await fetchTenderLibrary()
+    if (library?.slots?.length) {
+      catalogSlots.value = library.slots
+      slotStatuses.value = library.slots
+    }
+  } catch {
+    /* 资料库刷新失败不打断表单载入 */
+  }
+}
+
+function hydrateTechPlanNote(brief: BidBrief): string {
+  const note = String(brief.techPlanNote || '').trim()
+  if (note) return note
+  return [
+    brief.constructionPlan,
+    brief.layoutPlan,
+    brief.powerPlan,
+    brief.omPlan,
+    brief.schedulePlan,
+  ]
+    .map((s) => String(s || '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function applyBriefToForm(brief: BidBrief) {
+  Object.assign(form, emptyBrief())
+  mergeBriefIntoForm(brief)
+  form.techPlanNote = hydrateTechPlanNote(form)
+  if (!Array.isArray(form.quoteLines)) form.quoteLines = []
+  if (!Array.isArray(form.deviationLines)) form.deviationLines = []
+  if (!Array.isArray(form.performanceLines)) form.performanceLines = []
+  if (!Array.isArray(form.extraPlaceholders)) form.extraPlaceholders = []
+  if (!Array.isArray(form.requiredSlotKeys)) form.requiredSlotKeys = []
+  if (!Array.isArray(form.includeSlotKeys)) form.includeSlotKeys = []
+}
+
+async function loadRecordForm(item: TenderRecordItem) {
+  loadingFormId.value = item.id
+  error.value = ''
+  try {
+    const detail = await fetchTenderRecord(item.id)
+    if (!detail.brief) {
+      error.value = '该记录没有保存表单，无法载入'
+      return
+    }
+    applyBriefToForm(detail.brief)
+    hasParsed.value = true
+    closeRecords()
+    setPreviewFullscreen(false)
+    advanceStep(1)
+    await refreshLibrary()
+    await refreshTechDrawings()
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '载入表单失败'
+  } finally {
+    loadingFormId.value = null
+  }
+}
+
+async function regenerateRecord(item: TenderRecordItem) {
+  regeneratingId.value = item.id
+  error.value = ''
+  generating.value = true
+  try {
+    result.value = await regenerateTenderRecord(item.id)
+    previewEditorMode.value = 'view'
+    closeRecords()
+    setPreviewFullscreen(false)
+    advanceStep(2)
+    await loadRecords()
+    await refreshLibrary()
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '重新生成失败'
+  } finally {
+    regeneratingId.value = null
+    generating.value = false
+  }
+}
+
+function askDeleteRecord(item: TenderRecordItem) {
+  pendingDeleteItem.value = item
+  confirmDeleteOpen.value = true
+}
+
+function onConfirmDeleteOpen(open: boolean) {
+  confirmDeleteOpen.value = open
+  if (!open && !deletingId.value) {
+    pendingDeleteItem.value = null
+  }
+}
+
+async function confirmDeleteRecord() {
+  const item = pendingDeleteItem.value
+  if (!item) {
+    confirmDeleteOpen.value = false
+    return
+  }
+  deletingId.value = item.id
+  error.value = ''
+  try {
+    await deleteTenderRecord(item.id)
+    records.value = records.value.filter((r) => r.id !== item.id)
+    recordsTotal.value = Math.max(0, recordsTotal.value - 1)
+    if (result.value?.id === item.id) {
+      result.value = null
+      if (currentStepIndex.value >= 2) {
+        currentStepIndex.value = 1
+      }
+    }
+    confirmDeleteOpen.value = false
+    pendingDeleteItem.value = null
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '删除记录失败'
+  } finally {
+    deletingId.value = null
   }
 }
 
@@ -385,21 +951,50 @@ onMounted(async () => {
       fetchTenderLibrary().catch(() => null),
     ])
     qualification.value = data.qualification
-    slotStatuses.value = library?.slots?.length ? library.slots : data.slots || []
+    catalogSlots.value = library?.slots?.length ? library.slots : data.slots || []
+    slotStatuses.value = catalogSlots.value
     kbList.value = bases
     const { qualification: _q, slots: _s, ...rest } = data as TenderDefaultsLoose
-    Object.assign(form, rest)
+    mergeBriefIntoForm(rest as Partial<BidBrief>)
     if (!Array.isArray(form.extraPlaceholders)) form.extraPlaceholders = []
+    if (!Array.isArray(form.requiredSlotKeys)) form.requiredSlotKeys = []
+    if (!Array.isArray(form.includeSlotKeys)) form.includeSlotKeys = []
     if (!Array.isArray(form.quoteLines)) form.quoteLines = []
+    if (!Array.isArray(form.deviationLines)) form.deviationLines = []
+    if (!Array.isArray(form.performanceLines)) form.performanceLines = []
     if (form.includePlaceholders == null) form.includePlaceholders = true
     if (form.includeCommitment == null) form.includeCommitment = true
+    form.techPlanNote = hydrateTechPlanNote(form)
     void loadRecords()
+    void refreshTechDrawings()
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载默认值失败'
   } finally {
     loading.value = false
   }
+  void openRecordFromQuery()
 })
+
+watch(
+  () => String(route.query.record || ''),
+  (id, prev) => {
+    if (id && id !== prev && !loading.value) void openRecordFromQuery()
+  },
+)
+
+watch(previewFullscreen, (on) => {
+  if (on) previewHintsOpen.value = false
+  window.setTimeout(() => {
+    previewLayoutTick.value += 1
+  }, 0)
+})
+
+watch(
+  () => result.value?.docxFile,
+  () => {
+    previewHintsOpen.value = false
+  },
+)
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onPreviewFullscreenKey)
@@ -413,7 +1008,30 @@ type TenderDefaultsLoose = BidBrief & {
 
 function onPickQuote(ev: Event) {
   const input = ev.target as HTMLInputElement
-  quoteFile.value = input.files?.[0] ?? null
+  const file = input.files?.[0] ?? null
+  if (file !== quoteFile.value) {
+    // 补传/更换清单后必须重新识别，否则「识别并继续」会因 hasParsed 跳过解析
+    hasParsed.value = false
+  }
+  quoteFile.value = file
+}
+
+async function reparseQuoteFromForm() {
+  if (!inviteFile.value) {
+    error.value = '邀请书文件已失效，请返回上一步重新上传邀请书与报价清单'
+    return
+  }
+  if (!quoteFile.value) {
+    error.value = '请先选择报价清单 Excel / Word'
+    return
+  }
+  error.value = ''
+  await onParseInvitation()
+  if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
+    error.value =
+      error.value ||
+      '未能从清单解析出报价行。请确认 Excel 含「设备/名称」与数量或单价列，或返回上一步更换文件后重试'
+  }
 }
 
 function toggleKb(id: string) {
@@ -422,21 +1040,53 @@ function toggleKb(id: string) {
     : [...selectedKbIds.value, id]
 }
 
-function addQuoteRow() {
-  form.quoteLines.push({
-    ...emptyQuoteLine(),
-    seq: String(form.quoteLines.length + 1),
+function addDeviationRow() {
+  form.deviationLines.push({
+    ...emptyDeviationLine(),
+    seq: String(form.deviationLines.length + 1),
   })
 }
 
-function removeQuoteRow(index: number) {
-  form.quoteLines.splice(index, 1)
+function removeDeviationRow(index: number) {
+  form.deviationLines.splice(index, 1)
 }
 
-function touchQuoteRow(row: QuoteLineIn) {
-  const qty = Number(row.qty) || 0
-  const price = Number(row.unitPrice) || 0
-  row.amount = Math.round(qty * price * 100) / 100
+function fillDeviationFromQuote(opts?: { silent?: boolean }) {
+  const rows = form.quoteLines
+    .map((row, i) => {
+      const name = String(row.name || '').trim()
+      const spec = String(row.spec || '').trim()
+      if (!name && !spec) return null
+      const requirement = name && spec ? `${name}\n${spec}` : name || spec
+      const response =
+        name && spec
+          ? `我司所投${name}：\n${spec}\n含供货、安装、调试，安装费已含在综合单价内。`
+          : `我司所投${name || '产品'}：${spec || name}，含供货、安装、调试，安装费已含在综合单价内。`
+      return {
+        seq: String(i + 1),
+        requirement,
+        response,
+        deviation: '无偏差',
+      } satisfies DeviationLine
+    })
+    .filter((row): row is DeviationLine => row != null)
+  if (!rows.length) {
+    if (!opts?.silent) error.value = '请先识别报价清单，再生成偏差表'
+    return
+  }
+  form.deviationLines = rows
+}
+
+const quoteSpecFilledCount = computed(
+  () => form.quoteLines.filter((r) => String(r.spec || '').trim()).length,
+)
+
+function addPerformanceRow() {
+  form.performanceLines.push({ ...emptyPerformanceLine() })
+}
+
+function removePerformanceRow(index: number) {
+  form.performanceLines.splice(index, 1)
 }
 
 const quoteQtySum = computed(() =>
@@ -459,15 +1109,36 @@ async function onParseInvitation() {
       current: { ...form },
       quoteFile: quoteFile.value,
     })
-    Object.assign(form, data.brief)
+    mergeBriefIntoForm(data.brief)
+    form.techPlanNote = hydrateTechPlanNote(form)
     if (!Array.isArray(form.extraPlaceholders)) form.extraPlaceholders = []
+    if (!Array.isArray(form.requiredSlotKeys)) form.requiredSlotKeys = data.requiredSlotKeys || []
+    if (!Array.isArray(form.includeSlotKeys)) form.includeSlotKeys = data.includeSlotKeys || []
     if (!Array.isArray(form.quoteLines)) form.quoteLines = []
+    if (!Array.isArray(form.deviationLines)) form.deviationLines = []
+    if (!Array.isArray(form.performanceLines)) form.performanceLines = []
     parseNotes.value = data.notes || []
-    parsePlaceholders.value = data.placeholders || []
+    parseNotesEpoch.value += 1
+    attachmentMatch.value = data.attachmentMatch || null
+    parseOcr.value = {
+      pageCount: data.pageCount || 0,
+      ocrPages: data.ocrPages || 0,
+      ocrCapped: Boolean(data.ocrCapped),
+      ocrMaxPages: data.ocrMaxPages || 0,
+    }
+    if (data.catalogSlots?.length) catalogSlots.value = data.catalogSlots
     if (data.slots?.length) slotStatuses.value = data.slots
-    if (form.quoteLines.length) allowBuiltinQuote.value = false
-    else allowBuiltinQuote.value = true
+    if (!form.deviationLines.length && form.quoteLines.length) {
+      fillDeviationFromQuote({ silent: true })
+    } else if (form.quoteLines.length && quoteSpecFilledCount.value) {
+      // 重新识别带出技术参数后，刷新偏差表明细
+      const thin = form.deviationLines.every(
+        (d) => !String(d.requirement || '').includes('\n') && String(d.requirement || '').length < 40,
+      )
+      if (thin) fillDeviationFromQuote({ silent: true })
+    }
     hasParsed.value = true
+    volumeHint.value = ''
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '识别邀请书失败'
   } finally {
@@ -510,11 +1181,49 @@ async function onSlotFileChange(ev: Event) {
       }
     }
     if (last) mergeSlotStatus(last)
+    if (key === TECH_DRAWING_KEY && last) {
+      techDrawingSlot.value = { ...techDrawingSlot.value, ...last }
+    }
+    if (key === 'perf' && last?.files?.length) absorbLibraryPerformance(last.files)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '上传失败'
   } finally {
     uploadingKey.value = null
   }
+}
+
+function onDrawingsDrop(ev: DragEvent) {
+  ev.preventDefault()
+  dragOverDrawings.value = false
+  const files = Array.from(ev.dataTransfer?.files || [])
+  if (!files.length) return
+  void (async () => {
+    pendingSlotKey.value = TECH_DRAWING_KEY
+    pendingSlotReplace.value = !techDrawingSlot.value.fileCount
+    error.value = ''
+    uploadingKey.value = TECH_DRAWING_KEY
+    try {
+      let last: SlotStatus | null = null
+      for (let i = 0; i < files.length; i++) {
+        const data = await uploadTenderSlot(TECH_DRAWING_KEY, files[i], {
+          replace: !techDrawingSlot.value.fileCount && i === 0,
+        })
+        last = {
+          key: TECH_DRAWING_KEY,
+          title: data.title || techDrawingSlot.value.title,
+          hint: data.hint || techDrawingSlot.value.hint,
+          fileCount: data.fileCount,
+          files: data.files || [],
+        }
+      }
+      if (last) mergeSlotStatus(last)
+    } catch (e) {
+      error.value = e instanceof ApiError || e instanceof Error ? e.message : '上传失败'
+    } finally {
+      uploadingKey.value = null
+      pendingSlotKey.value = null
+    }
+  })()
 }
 
 async function onClearSlot(slot: SlotStatus) {
@@ -539,8 +1248,10 @@ async function onClearSlot(slot: SlotStatus) {
 
 function slotFileLabel(slot: SlotStatus): string {
   if (!slot.fileCount) return ''
-  if (slot.files.length === 1) return slot.files[0].name
-  return `${slot.files[0]?.name || '已上传'} 等 ${slot.fileCount} 个文件`
+  const first = slot.files[0]
+  const label = first?.performance?.projectName || first?.name || '已上传'
+  if (slot.files.length === 1) return label
+  return `${label} 等 ${slot.fileCount} 个文件`
 }
 
 async function onUploadStepNext() {
@@ -549,18 +1260,19 @@ async function onUploadStepNext() {
     return
   }
   error.value = ''
-  if (!hasParsed.value) {
+  // 已识别过但仍无报价行、或刚换了清单时，必须再跑一遍解析
+  const hasQuoteRows = form.quoteLines.some((row) => String(row.name || '').trim())
+  const needParse = !hasParsed.value || (Boolean(quoteFile.value) && !hasQuoteRows)
+  if (needParse) {
     await onParseInvitation()
     if (!hasParsed.value) return
   }
   advanceStep(1)
+  await nextTick()
+  document.getElementById('tender-parse-notes')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-async function onFormStepNext() {
-  if (generateBlockers.value.length) {
-    error.value = `请先完善：${generateBlockers.value.join('、')}`
-    return
-  }
+async function doGenerate() {
   error.value = ''
   generating.value = true
   try {
@@ -568,14 +1280,58 @@ async function onFormStepNext() {
       ...form,
       includeCommitment: true,
       includePlaceholders: true,
+      requiredSlotKeys: effectiveRequiredKeys.value,
+      includeSlotKeys: effectiveIncludeKeys.value,
     })
+    if (result.value.attachmentMatch) {
+      attachmentMatch.value = result.value.attachmentMatch
+    }
     void loadRecords()
+    previewEditorMode.value = 'view'
     advanceStep(2)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '生成预览失败'
   } finally {
     generating.value = false
   }
+}
+
+async function onFormStepNext() {
+  if (generateBlockers.value.length) {
+    error.value = `请先完善：${generateBlockers.value.join('、')}`
+    return
+  }
+  if (result.value) {
+    confirmGenerateMode.value = 'form'
+    pendingRegenItem.value = null
+    confirmGenerateOpen.value = true
+    return
+  }
+  await doGenerate()
+}
+
+function askRegenerateRecord(item: TenderRecordItem) {
+  confirmGenerateMode.value = 'record'
+  pendingRegenItem.value = item
+  confirmGenerateOpen.value = true
+}
+
+function onConfirmGenerateOpen(open: boolean) {
+  if (!open && !generating.value) {
+    confirmGenerateOpen.value = false
+    pendingRegenItem.value = null
+  }
+}
+
+async function confirmGenerateAgain() {
+  confirmGenerateOpen.value = false
+  if (confirmGenerateMode.value === 'record' && pendingRegenItem.value) {
+    const item = pendingRegenItem.value
+    pendingRegenItem.value = null
+    await regenerateRecord(item)
+    return
+  }
+  await doGenerate()
 }
 
 function onPreviewStepNext() {
@@ -611,21 +1367,53 @@ async function onDownload(kind: 'docx' | 'pdf') {
 
 <template>
   <PageHeader
+    class="tender-page-header"
+    :class="{ 'tender-page-header--preview': currentStepIndex === 2 }"
     title="投标文件"
-    description="四步向导：上传 → 填表 → 在线预览编辑 → 下载定稿"
+    :description="currentStepIndex === 2 ? '' : '缺扫描件仍可生成：Word 附件区用虚线框占位，补齐后重新生成即可。公司名称、报价清单等基本信息仍需先填。'"
   >
     <template #badges>
-      <Tag tone="molybdenum">邀请书抽字段</Tag>
-      <Tag>程序填模</Tag>
+      <div
+        class="tender-volume-switch"
+        role="tablist"
+        aria-label="填写商务标或技术标"
+      >
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="activeVolume === 'business'"
+          class="tender-volume-btn"
+          :class="{ 'tender-volume-btn--active': activeVolume === 'business' }"
+          @click="selectVolume('business')"
+        >
+          商务标
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="activeVolume === 'technical'"
+          class="tender-volume-btn"
+          :class="{ 'tender-volume-btn--active': activeVolume === 'technical' }"
+          @click="selectVolume('technical')"
+        >
+          技术标
+        </button>
+      </div>
+    </template>
+    <template #actions>
       <button
         type="button"
-        class="inline-flex h-7 items-center gap-1 rounded-full border border-border px-2.5 text-[11px] hover:bg-accent transition-colors"
-        :class="showRecords ? 'border-iron bg-iron/10 text-foreground' : 'text-muted-foreground'"
-        @click="toggleRecords"
+        class="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[12px] transition-colors"
+        :class="
+          showRecords
+            ? 'border-iron bg-iron/10 text-foreground'
+            : 'border-border text-muted-foreground hover:bg-accent hover:text-foreground'
+        "
+        @click.stop="toggleRecords"
       >
         <History class="size-3.5" />
         生成记录
-        <span v-if="recordsTotal" class="font-mono">{{ recordsTotal }}</span>
+        <span v-if="recordsTotal" class="font-mono text-[11px]">{{ recordsTotal }}</span>
       </button>
     </template>
   </PageHeader>
@@ -637,16 +1425,28 @@ async function onDownload(kind: 'docx' | 'pdf') {
     {{ error }}
   </p>
 
-  <section v-if="showRecords" class="tender-card mb-5 max-w-5xl mx-auto">
+  <p
+    v-if="volumeHint && currentStepIndex === 0 && !showRecords"
+    class="mb-4 text-[12px] text-muted-foreground border border-border bg-card rounded-md px-3 py-2"
+  >
+    {{ volumeHint }}
+  </p>
+
+  <div v-if="loading" class="py-16 text-center text-[12px] text-muted-foreground">
+    <Loader2 class="inline size-4 animate-spin mr-2" />加载默认信息…
+  </div>
+
+  <section v-else-if="showRecords" class="tender-card mx-auto w-full max-w-4xl">
     <div class="tender-card-head">
       <div class="min-w-0">
-        <h2 class="text-[14px] font-semibold">生成记录</h2>
+        <h2 id="tender-records-title" class="text-[14px] font-semibold">生成记录</h2>
         <p class="text-[11px] text-muted-foreground mt-0.5">
-          每次生成都会入库；可在线预览或重新下载 Word
+          每次生成另存一条；可删除无用记录。预览默认只读，打开更快。
         </p>
       </div>
-      <button type="button" class="tender-ghost-btn shrink-0" @click="showRecords = false">
-        收起
+      <button type="button" class="tender-ghost-btn shrink-0" @click="closeRecords">
+        <ChevronLeft class="size-3.5" />
+        返回向导
       </button>
     </div>
 
@@ -663,11 +1463,14 @@ async function onDownload(kind: 'docx' | 'pdf') {
       </button>
     </div>
 
-    <div v-if="recordsLoading && !records.length" class="py-8 text-center text-[12px] text-muted-foreground">
+    <div
+      v-if="recordsLoading && !records.length"
+      class="py-8 text-center text-[12px] text-muted-foreground"
+    >
       <Loader2 class="inline size-4 animate-spin mr-2" />加载记录…
     </div>
     <p v-else-if="!records.length" class="mt-4 text-[12px] text-muted-foreground text-center py-6">
-      暂无生成记录。完成「识别填表 → 下一步：预览编辑」后会出现在这里。
+      暂无生成记录。在「填表生成」点「生成并预览」后会出现在这里；重新生成会另存新记录。
     </p>
     <ul v-else class="mt-3 divide-y divide-border/70">
       <li
@@ -685,7 +1488,25 @@ async function onDownload(kind: 'docx' | 'pdf') {
             <span v-if="!item.docxAvailable" class="text-sulfur ml-1">文件缺失</span>
           </div>
         </div>
-        <div class="flex shrink-0 items-center gap-1.5">
+        <div class="flex shrink-0 items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            class="tender-ghost-btn"
+            :disabled="loadingFormId === item.id"
+            @click="loadRecordForm(item)"
+          >
+            <Loader2 v-if="loadingFormId === item.id" class="size-3.5 animate-spin" />
+            载入表单
+          </button>
+          <button
+            type="button"
+            class="tender-ghost-btn"
+            :disabled="regeneratingId === item.id"
+            @click="askRegenerateRecord(item)"
+          >
+            <Loader2 v-if="regeneratingId === item.id" class="size-3.5 animate-spin" />
+            重新生成
+          </button>
           <button
             type="button"
             class="tender-ghost-btn"
@@ -713,21 +1534,30 @@ async function onDownload(kind: 'docx' | 'pdf') {
           >
             资质
           </button>
+          <button
+            type="button"
+            class="tender-ghost-btn text-sulfur hover:text-sulfur"
+            :disabled="deletingId === item.id"
+            @click="askDeleteRecord(item)"
+          >
+            <Loader2 v-if="deletingId === item.id" class="size-3.5 animate-spin" />
+            删除
+          </button>
         </div>
       </li>
     </ul>
   </section>
-
-  <div v-if="loading" class="py-16 text-center text-[12px] text-muted-foreground">
-    <Loader2 class="inline size-4 animate-spin mr-2" />加载默认信息…
-  </div>
 
   <div
     v-else
     class="tender-page mx-auto"
     :class="currentStepIndex === 2 ? 'tender-page--preview max-w-[1600px]' : 'max-w-3xl'"
   >
-    <nav class="tender-steps mb-6" aria-label="投标生成流程">
+    <nav
+      class="tender-steps"
+      :class="currentStepIndex === 2 ? 'mb-2 shrink-0' : 'mb-6'"
+      aria-label="投标生成流程"
+    >
       <ol class="flex items-center gap-0">
         <li
           v-for="(step, i) in workflowSteps"
@@ -799,7 +1629,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
             <div class="min-w-0">
               <h2 class="text-[14px] font-semibold text-foreground">甲方邀请书</h2>
               <p class="text-[11px] text-muted-foreground mt-0.5">
-                支持 PDF、Word、图片；可选上传工程量清单 Excel
+                支持 PDF、Word、图片；请同时上传报价清单 Excel（生成必填）
               </p>
             </div>
           </div>
@@ -826,15 +1656,17 @@ async function onDownload(kind: 'docx' | 'pdf') {
         <div v-if="inviteFile" class="mt-3 flex flex-wrap items-center gap-2">
           <button type="button" class="tender-ghost-btn" @click="quoteInput?.click()">
             <Upload class="size-3.5" />
-            工程量清单（可选）
+            报价清单（生成必填）
           </button>
           <span class="text-[11px] text-muted-foreground truncate max-w-[240px]">
-            {{ quoteFile ? quoteFile.name : 'Excel / Word' }}
+            {{ quoteFile ? quoteFile.name : 'Excel / Word，点「识别并继续」一并解析' }}
           </span>
         </div>
 
         <div v-if="kbList.length" class="mt-4 pt-4 border-t border-border/60">
-          <p class="text-[11px] text-muted-foreground mb-2">可选知识库（对照资格条款）</p>
+          <p class="text-[11px] text-muted-foreground mb-2">
+            可选知识库（默认不选）。只对照资格条款种类，不会套用历史投标书或他司合同。
+          </p>
           <div class="flex flex-wrap gap-1.5">
             <button
               v-for="b in kbList"
@@ -870,13 +1702,98 @@ async function onDownload(kind: 'docx' | 'pdf') {
       </footer>
     </section>
 
-    <!-- 步骤 2：识别填表 -->
+    <!-- 步骤 2：填表生成 -->
     <section v-else-if="currentStepIndex === 1" class="tender-step-panel space-y-4">
-      <div v-if="parseNotes.length" class="tender-card">
-        <p class="text-[12px] font-medium text-foreground mb-2">识别说明</p>
-        <ul class="space-y-1 text-[11px] text-muted-foreground">
-          <li v-for="(n, i) in parseNotes" :key="i">{{ n }}</li>
+      <div
+        v-if="parseOcr?.ocrCapped"
+        class="tender-card border-sulfur/40 bg-sulfur/10"
+      >
+        <p class="text-[12px] text-sulfur leading-relaxed">
+          邀请书共 {{ parseOcr.pageCount || '—' }} 页，OCR 已达上限 {{ parseOcr.ocrMaxPages }} 页（实际识别
+          {{ parseOcr.ocrPages }} 页）。未识别页未进入抽取，请提高 OCR_MAX_PAGES 后点「识别并继续」重试。
+        </p>
+      </div>
+      <Panel
+        v-if="parseNotes.length"
+        id="tender-parse-notes"
+        :key="'parse-notes-' + parseNotesEpoch"
+        title="识别说明"
+        subtitle="邀请书识别结果与风险提示，生成前请先过一遍"
+        collapsible
+        :default-open="true"
+        class-name="tender-parse-notes"
+      >
+        <template #summary>{{ parseNotesSummary }}</template>
+        <ul class="space-y-1.5 text-[11px] leading-relaxed">
+          <li
+            v-for="(n, i) in parseNotes"
+            :key="i"
+            class="flex gap-1.5"
+            :class="noteTone(n)"
+          >
+            <TriangleAlert
+              v-if="isRiskNote(n)"
+              class="size-3.5 shrink-0 mt-0.5"
+            />
+            <span class="min-w-0">{{ n }}</span>
+          </li>
         </ul>
+      </Panel>
+      <div v-if="matchHasRows && attachmentMatch" class="tender-card">
+        <p class="text-[12px] font-medium text-foreground mb-2">资料库对照（按本标 key 匹配，不用其他项目文件顶）</p>
+        <ul class="space-y-1.5 text-[11px]">
+          <li v-if="attachmentMatch.matched.length" class="text-emerald-700 dark:text-emerald-400">
+            已匹配扫描件：{{ attachmentMatch.matched.map((x) => x.title).join('、') }}
+          </li>
+          <li
+            v-for="item in attachmentMatch.missingFiles"
+            :key="'miss-' + item.key"
+            :class="item.required ? 'text-sulfur' : 'text-muted-foreground'"
+          >
+            {{ item.required ? '未上传，生成时用虚线框占位' : '已纳入未上传' }}：{{ item.title }}
+          </li>
+          <li
+            v-for="item in attachmentMatch.createdItems"
+            :key="'new-' + item.key"
+            class="text-muted-foreground"
+          >
+            资料库原先没有，已建空项请上传：{{ item.title }}
+          </li>
+        </ul>
+        <button
+          type="button"
+          class="mt-2 text-[11px] text-foreground underline underline-offset-2"
+          @click="router.push('/tender-library')"
+        >
+          去资料库上传
+        </button>
+      </div>
+      <div
+        v-if="result?.warnings?.length"
+        class="tender-card border-sulfur/40 bg-sulfur/10"
+      >
+        <p class="text-[12px] font-medium text-sulfur mb-2">上次生成提示</p>
+        <ul class="space-y-1 text-[11px] text-sulfur">
+          <li v-for="(w, i) in result.warnings" :key="i" class="flex gap-1.5">
+            <TriangleAlert class="size-3.5 shrink-0 mt-0.5" />
+            {{ w }}
+          </li>
+        </ul>
+      </div>
+
+      <div
+        v-if="activeVolume === 'business'"
+        id="tender-volume-business"
+        class="space-y-4"
+      >
+      <div class="rounded-lg border border-border/70 bg-card px-3 py-2.5">
+        <div class="flex flex-wrap items-baseline gap-2">
+          <h2 class="text-[13px] font-semibold">商务标</h2>
+          <span class="text-[11px] text-muted-foreground">未上传的扫描件会在 Word 里画虚线框，不阻止生成</span>
+        </div>
+        <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+          公司、资质、人员、业绩、报价、各种函件。下面带 * 的项和必填扫描件齐了才能生成。
+        </p>
       </div>
 
       <Panel title="项目与招标人" subtitle="识别结果可再改；投标人侧不会被邀请书覆盖">
@@ -916,7 +1833,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
         </div>
       </Panel>
 
-      <Panel title="报价与承诺" subtitle="分项来自工程量清单；数量不随总价变，单价可按投标总价折算">
+      <Panel title="报价与承诺" subtitle="报价单由工程量清单识别生成，写入 Word「分项报价表」；技术参数写入「技术偏差表」">
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
           <label class="col-span-2 text-[12px] space-y-1">
             <span class="text-muted-foreground">投标总价（元）<span class="tender-req" aria-hidden="true">*</span></span>
@@ -931,13 +1848,13 @@ async function onDownload(kind: 'docx' | 'pdf') {
             />
             <span class="block text-[11px] text-muted-foreground leading-relaxed">
               <template v-if="form.quoteLines.length">
-                当前清单 {{ form.quoteLines.length }} 项
+                已识别报价清单 {{ form.quoteLines.length }} 项
                 <span v-if="form.quoteTitle">（{{ form.quoteTitle }}）</span>
                 ，不含税合计约 {{ quoteAmountSum.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }} 元。
                 若总价与清单含税不同，生成时只折算单价。
               </template>
               <template v-else>
-                尚未解析到本次工程量。生成时会暂用内置高途智成港清单（7kW×133、30kW×56 等）。请上传工程量 Excel/Word 后点「识别并填表」。
+                尚未解析到工程量。请在下方上传报价清单 Excel/Word 并点「识别清单」，没有报价清单不能生成。
               </template>
             </span>
           </label>
@@ -981,90 +1898,178 @@ async function onDownload(kind: 'docx' | 'pdf') {
           <span class="text-muted-foreground">流量费说明</span>
           <input v-model="form.trafficFeeNote" class="kb-input font-sans" />
         </label>
+        <label class="mt-3 block text-[12px] space-y-1">
+          <span class="text-muted-foreground">原厂承诺角色</span>
+          <input
+            v-model="form.factoryRole"
+            class="kb-input font-sans"
+            placeholder="空则按项目内容判断：充电设备生产厂商 / 投标产品生产厂商"
+          />
+        </label>
 
-        <div class="mt-4">
-          <div class="flex items-center justify-between mb-2">
-            <p class="text-[12px] text-muted-foreground">
-              分项明细
-              <span v-if="form.quoteLines.length"> · 数量合计 {{ quoteQtySum }}</span>
-            </p>
-            <button
-              type="button"
-              class="h-7 px-2 rounded-md border border-border text-[11px] hover:bg-accent"
-              @click="addQuoteRow"
-            >
-              增行
-            </button>
+        <div
+          class="mt-4 rounded-md border border-border/70 px-3 py-2.5 space-y-2"
+          :class="form.quoteLines.length ? 'bg-accent/20' : 'bg-sulfur/5 border-sulfur/25'"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="min-w-0">
+              <p class="text-[12px] font-medium text-foreground">
+                {{ form.quoteLines.length ? '报价清单（只读预览）' : '报价清单（待上传）' }}
+              </p>
+              <p class="mt-0.5 text-[11px] text-muted-foreground leading-relaxed">
+                <template v-if="form.quoteLines.length">
+                  生成 Word 时写入「分项报价表」（含技术参数列）；技术参数同步写入技术标「技术偏差表」。
+                  <span v-if="quoteSpecFilledCount">已解析明细 {{ quoteSpecFilledCount }}/{{ form.quoteLines.length }} 项。</span>
+                  <span v-else class="text-sulfur">未解析到技术参数列，请确认 Excel 含「技术参数要求」列后重新识别。</span>
+                </template>
+                <template v-else>
+                  选择工程量 Excel/Word 后点「识别清单」。需保留本页会话中的邀请书文件。
+                </template>
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-1.5 shrink-0">
+              <button type="button" class="tender-ghost-btn" @click="quoteInput?.click()">
+                <Upload class="size-3.5" />
+                {{ quoteFile ? '更换清单' : '上传清单' }}
+              </button>
+              <button
+                type="button"
+                class="tender-ghost-btn"
+                :disabled="parsing || !quoteFile || !inviteFile"
+                :title="!inviteFile ? '请返回上一步重新上传邀请书' : !quoteFile ? '请先选择清单文件' : ''"
+                @click="reparseQuoteFromForm"
+              >
+                <Loader2 v-if="parsing" class="size-3.5 animate-spin" />
+                <Sparkles v-else class="size-3.5" />
+                {{ parsing ? '识别中…' : '识别清单' }}
+              </button>
+            </div>
           </div>
-          <div class="overflow-x-auto border border-border rounded-md">
-            <table class="w-full text-[11px] border-collapse min-w-[640px]">
+          <p v-if="quoteFile" class="text-[11px] text-muted-foreground truncate">
+            已选文件：{{ quoteFile.name }}
+          </p>
+          <p v-else-if="!inviteFile" class="text-[11px] text-sulfur">
+            邀请书文件已失效，请点「上一步」重新上传邀请书与清单。
+          </p>
+
+          <div v-if="form.quoteLines.length" class="overflow-x-auto border border-border rounded-md bg-background">
+            <table class="w-full text-[11px] border-collapse min-w-[720px]">
               <thead>
                 <tr class="text-muted-foreground bg-accent/40">
                   <th class="px-2 py-1.5 text-left font-medium w-10">序</th>
-                  <th class="px-2 py-1.5 text-left font-medium">名称</th>
-                  <th class="px-2 py-1.5 text-left font-medium">规格/参数</th>
+                  <th class="px-2 py-1.5 text-left font-medium w-36">设备</th>
+                  <th class="px-2 py-1.5 text-left font-medium min-w-[220px]">技术参数 / 明细</th>
                   <th class="px-2 py-1.5 text-left font-medium w-12">单位</th>
                   <th class="px-2 py-1.5 text-left font-medium w-16">数量</th>
                   <th class="px-2 py-1.5 text-left font-medium w-24">不含税单价</th>
                   <th class="px-2 py-1.5 text-left font-medium w-24">合价</th>
-                  <th class="w-10"></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="!form.quoteLines.length">
-                  <td colspan="8" class="px-2 py-3 text-muted-foreground">
-                    识别邀请书或上传工程量清单后出现在这里，也可先手工增行。
+                <tr
+                  v-for="(row, i) in form.quoteLines"
+                  :key="i"
+                  class="border-t border-border align-top"
+                >
+                  <td class="px-2 py-1.5">{{ row.seq || i + 1 }}</td>
+                  <td class="px-2 py-1.5 font-medium">{{ row.name || '—' }}</td>
+                  <td class="px-2 py-1.5 text-muted-foreground">
+                    <pre
+                      v-if="String(row.spec || '').trim()"
+                      class="m-0 max-h-28 overflow-y-auto whitespace-pre-wrap break-words font-sans text-[11px] leading-relaxed"
+                    >{{ row.spec }}</pre>
+                    <span v-else class="text-sulfur/80">（无明细）</span>
                   </td>
-                </tr>
-                <tr v-for="(row, i) in form.quoteLines" :key="i" class="border-t border-border">
-                  <td class="px-1 py-1">
-                    <input v-model="row.seq" class="kb-input font-sans !py-1 !px-1" />
-                  </td>
-                  <td class="px-1 py-1 min-w-[120px]">
-                    <input v-model="row.name" class="kb-input font-sans !py-1 !px-1" />
-                  </td>
-                  <td class="px-1 py-1 min-w-[160px]">
-                    <input v-model="row.spec" class="kb-input font-sans !py-1 !px-1" />
-                  </td>
-                  <td class="px-1 py-1">
-                    <input v-model="row.unit" class="kb-input font-sans !py-1 !px-1" />
-                  </td>
-                  <td class="px-1 py-1">
-                    <input
-                      v-model.number="row.qty"
-                      type="number"
-                      min="0"
-                      step="any"
-                      class="kb-input font-sans !py-1 !px-1"
-                      @change="touchQuoteRow(row)"
-                    />
-                  </td>
-                  <td class="px-1 py-1">
-                    <input
-                      v-model.number="row.unitPrice"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      class="kb-input font-sans !py-1 !px-1"
-                      @change="touchQuoteRow(row)"
-                    />
-                  </td>
-                  <td class="px-1 py-1">
-                    <input v-model.number="row.amount" type="number" step="0.01" class="kb-input font-sans !py-1 !px-1" />
-                  </td>
-                  <td class="px-1 py-1 text-center">
-                    <button type="button" class="text-muted-foreground hover:text-sulfur" @click="removeQuoteRow(i)">
-                      删
-                    </button>
-                  </td>
+                  <td class="px-2 py-1.5">{{ row.unit || '—' }}</td>
+                  <td class="px-2 py-1.5 font-sans">{{ row.qty || 0 }}</td>
+                  <td class="px-2 py-1.5 font-sans">{{ Number(row.unitPrice || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}</td>
+                  <td class="px-2 py-1.5 font-sans">{{ Number(row.amount || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
+          <p v-if="form.quoteLines.length" class="text-[11px] text-muted-foreground">
+            数量合计 {{ quoteQtySum }} · 不含税合计
+            {{ quoteAmountSum.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }} 元
+          </p>
         </div>
       </Panel>
 
-      <Panel title="投标人（伟泰）" subtitle="默认河南伟泰光电科技有限公司">
+      <Panel title="类似业绩" subtitle="上传合同/发票后自动识别；生成时合并资料库，并优先填已竣工充电桩项目">
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-[12px] text-muted-foreground">
+            {{ form.performanceLines.length ? `${form.performanceLines.length} 条` : '尚未填写，上传资料库合同或识别邀请书后会抽出项目、买方、金额' }}
+          </p>
+          <button
+            type="button"
+            class="h-7 px-2 rounded-md border border-border text-[11px] hover:bg-accent"
+            @click="addPerformanceRow"
+          >
+            增行
+          </button>
+        </div>
+        <div class="overflow-x-auto border border-border rounded-md">
+          <table class="w-full text-[11px] border-collapse min-w-[760px]">
+            <thead>
+              <tr class="text-muted-foreground bg-accent/40">
+                <th class="px-2 py-1.5 text-left font-medium min-w-[140px]">项目/合同</th>
+                <th class="px-2 py-1.5 text-left font-medium">规格型号</th>
+                <th class="px-2 py-1.5 text-left font-medium">买方</th>
+                <th class="px-2 py-1.5 text-left font-medium">联系人</th>
+                <th class="px-2 py-1.5 text-left font-medium w-24">合同额（元）</th>
+                <th class="px-2 py-1.5 text-left font-medium">概况</th>
+                <th class="px-2 py-1.5 text-left font-medium w-16">在建</th>
+                <th class="w-10"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="!form.performanceLines.length">
+                <td colspan="8" class="px-2 py-3 text-muted-foreground">
+                  资料库上传合同/发票时会识别项目名称、规格型号、买方、联系人、合同额、概况和是否在建。招标优先认可已竣工充电桩；也可在此手工改。
+                </td>
+              </tr>
+              <tr v-for="(row, i) in form.performanceLines" :key="i" class="border-t border-border">
+                <td class="px-1 py-1">
+                  <input v-model="row.projectName" class="kb-input font-sans !py-1 !px-1" placeholder="工程/合同名称" />
+                </td>
+                <td class="px-1 py-1 min-w-[100px]">
+                  <input v-model="row.spec" class="kb-input font-sans !py-1 !px-1" placeholder="直流功率/群充/箱变" />
+                </td>
+                <td class="px-1 py-1 min-w-[100px]">
+                  <input v-model="row.client" class="kb-input font-sans !py-1 !px-1" placeholder="甲方/买方" />
+                </td>
+                <td class="px-1 py-1">
+                  <input v-model="row.contact" class="kb-input font-sans !py-1 !px-1" placeholder="可空或保密" />
+                </td>
+                <td class="px-1 py-1">
+                  <input v-model.number="row.amountYuan" type="number" min="0" step="0.01" class="kb-input font-sans !py-1 !px-1" />
+                </td>
+                <td class="px-1 py-1 min-w-[120px]">
+                  <input v-model="row.summary" class="kb-input font-sans !py-1 !px-1" placeholder="桩数、场站、EPC/供货" />
+                </td>
+                <td class="px-1 py-1 text-center">
+                  <input v-model="row.ongoing" type="checkbox" title="勾选表示在建未竣工" />
+                </td>
+                <td class="px-1 py-1 text-center">
+                  <button type="button" class="text-muted-foreground hover:text-sulfur" @click="removePerformanceRow(i)">
+                    删
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <Panel
+        title="投标人（伟泰）"
+        subtitle="本公司信息：邀请书不会改这些字段，空项用默认值或上次投标回填"
+        collapsible
+        :default-open="false"
+      >
+        <template #summary>
+          {{ form.bidderName || '—' }} · {{ form.foundedDate || '成立日期未填' }} · {{ form.bidderPhone || '电话未填' }}
+        </template>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <label class="md:col-span-2 text-[12px] space-y-1">
             <span class="text-muted-foreground">投标人全称<span class="tender-req" aria-hidden="true">*</span></span>
@@ -1085,7 +2090,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
               class="kb-input font-sans"
               required
               aria-required="true"
-              placeholder="如 2016年3月"
+              placeholder="如 2017年07月"
             />
           </label>
           <label class="text-[12px] space-y-1">
@@ -1099,7 +2104,16 @@ async function onDownload(kind: 'docx' | 'pdf') {
         </div>
       </Panel>
 
-      <Panel title="法定代表人 / 授权" subtitle="身份证请装订时另附，本版只填文字">
+      <Panel
+        title="法定代表人 / 授权"
+        subtitle="身份证请装订时另附，本版只填文字"
+        collapsible
+        :default-open="false"
+      >
+        <template #summary>
+          {{ form.legalPersonName || '法人未填' }} · {{ form.legalPersonAge ? `${form.legalPersonAge}岁` : '年龄未填' }} ·
+          {{ form.legalPersonIdNo || '身份证未填' }}
+        </template>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
           <label class="text-[12px] space-y-1">
             <span class="text-muted-foreground">法人姓名<span class="tender-req" aria-hidden="true">*</span></span>
@@ -1149,7 +2163,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
             {{ slotFilledCount }}/{{ placeholderItems.length }}
           </div>
           <p class="text-[11px] text-muted-foreground leading-relaxed">
-            资料库已维护项直接写入 Word，未维护的画虚线框。
+            未上传的商务标 / 技术资料会在 Word 里用虚线框占位，不阻止生成。补齐扫描件后可重新生成。
             <button
               type="button"
               class="text-foreground underline underline-offset-2 ml-0.5"
@@ -1160,18 +2174,12 @@ async function onDownload(kind: 'docx' | 'pdf') {
           </p>
         </div>
 
-        <label
+        <p
           v-if="!form.quoteLines.length"
-          class="flex items-start gap-2.5 text-[12px] p-2.5 rounded-md bg-accent/30 border border-border/50"
+          class="text-[12px] p-2.5 rounded-md bg-sulfur/10 border border-sulfur/30 text-sulfur"
         >
-          <input v-model="allowBuiltinQuote" type="checkbox" class="mt-0.5" />
-          <span>
-            使用内置工程量模板
-            <span class="block text-[11px] text-muted-foreground mt-0.5 font-normal">
-              未解析到清单时已默认勾选；有 Excel 清单请返回上一步上传后重新识别
-            </span>
-          </span>
-        </label>
+          还没有报价清单。请在上方「报价与承诺」上传工程量 Excel 并点「识别清单」，否则不能生成。
+        </p>
 
         <div class="mt-3 rounded-lg border border-border/60 overflow-hidden">
           <button
@@ -1181,7 +2189,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
           >
             <span class="inline-flex items-center gap-1.5 text-muted-foreground">
               <FolderOpen class="size-3.5" />
-              本标补充资料
+              本标附件
             </span>
             <span class="inline-flex items-center gap-1 shrink-0 text-foreground/80">
               {{ slotsExpanded ? '收起' : '展开' }}
@@ -1203,6 +2211,15 @@ async function onDownload(kind: 'docx' | 'pdf') {
                   <span v-if="slot.fileCount" class="text-emerald-700 dark:text-emerald-400">【已补】</span>
                   <span v-else class="text-sulfur">【待补】</span>
                   {{ slot.title }}
+                  <span
+                    v-if="isRequiredSlot(slot.key)"
+                    class="ml-1 text-[10px] text-sulfur"
+                  >{{ HIGH_DISQUALIFY_KEYS.has(slot.key) ? '建议补' : '本标附件' }}</span>
+                  <span
+                    v-else-if="slotVolume(slot) === 'technical'"
+                    class="ml-1 text-[10px] text-muted-foreground"
+                  >技术标·扣分</span>
+                  <span v-else class="ml-1 text-[10px] text-muted-foreground">可选</span>
                 </div>
                 <div v-if="slotFileLabel(slot)" class="mt-0.5 truncate text-[10px] text-muted-foreground">
                   {{ slotFileLabel(slot) }}
@@ -1235,7 +2252,38 @@ async function onDownload(kind: 'docx' | 'pdf') {
                 >
                   清除
                 </button>
+                <button
+                  v-if="!isRequiredSlot(slot.key)"
+                  type="button"
+                  class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent"
+                  @click="excludeOptionalSlot(slot)"
+                >
+                  移出
+                </button>
               </div>
+            </li>
+            <li
+              v-if="optionalCatalogSlots.length"
+              class="pt-1 text-[10px] text-muted-foreground"
+            >
+              资料库其他项（可选纳入本标）
+            </li>
+            <li
+              v-for="slot in optionalCatalogSlots"
+              :key="'opt-' + slot.key"
+              class="flex items-start gap-2 rounded border border-dashed border-border/60 px-2 py-1.5"
+            >
+              <div class="min-w-0 flex-1 text-muted-foreground">
+                {{ slot.title }}
+                <span v-if="slot.fileCount" class="ml-1 text-emerald-700 dark:text-emerald-400">已有扫描件</span>
+              </div>
+              <button
+                type="button"
+                class="h-6 shrink-0 rounded border border-border px-1.5 text-[10px] hover:bg-accent"
+                @click="includeOptionalSlot(slot)"
+              >
+                纳入本标
+              </button>
             </li>
           </ul>
         </div>
@@ -1243,16 +2291,185 @@ async function onDownload(kind: 'docx' | 'pdf') {
         <label class="flex items-start gap-2.5 text-[12px] mt-4">
           <input v-model="form.attachQualifications" type="checkbox" class="mt-0.5" />
           <span class="text-muted-foreground leading-relaxed">
-            插入企业资质 PDF
+            插入企业资质 PDF（较慢，建议装订时另附）
             <span class="block text-[11px] mt-0.5">
               {{
                 qualification?.found
-                  ? `已就绪（${Math.round((qualification.sizeBytes || 0) / 1024 / 1024)} MB）`
+                  ? `已就绪（${Math.round((qualification.sizeBytes || 0) / 1024 / 1024)} MB）；勾选后只嵌入前若干页`
                   : '未找到时将提示补附'
               }}
             </span>
           </span>
         </label>
+        <p class="mt-2 text-[11px] text-muted-foreground leading-relaxed">
+          所有扫描件默认不写入 Word（仅虚线框占位），生成会快很多；装订时从资料库打印原件附上即可。
+        </p>
+      </div>
+      </div>
+
+      <div
+        v-if="activeVolume === 'technical'"
+        id="tender-volume-technical"
+        class="space-y-4"
+      >
+      <div class="rounded-lg border border-border/70 bg-card px-3 py-2.5">
+        <div class="flex flex-wrap items-baseline gap-2">
+          <h2 class="text-[13px] font-semibold">技术标</h2>
+          <span class="text-[11px] text-muted-foreground">废标风险较低，但不响应技术要求会大量扣分</span>
+        </div>
+        <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+          上传本项目图纸，再写一段文字说明。缺图纸会在 Word 里画虚线框，不阻止生成。
+        </p>
+      </div>
+
+      <Panel
+        title="技术偏差表"
+        subtitle="对应招标技术要求与投标响应；可从报价清单生成后微调"
+      >
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-[12px] text-muted-foreground">
+            {{ form.deviationLines.length ? `${form.deviationLines.length} 条` : '尚未填写' }}
+          </p>
+          <div class="flex items-center gap-1.5">
+            <button
+              type="button"
+              class="h-7 px-2 rounded-md border border-border text-[11px] hover:bg-accent"
+              :disabled="!form.quoteLines.length"
+              @click="fillDeviationFromQuote()"
+            >
+              从报价清单生成
+            </button>
+            <button
+              type="button"
+              class="h-7 px-2 rounded-md border border-border text-[11px] hover:bg-accent"
+              @click="addDeviationRow"
+            >
+              增行
+            </button>
+          </div>
+        </div>
+        <div class="overflow-x-auto border border-border rounded-md">
+          <table class="w-full text-[11px] border-collapse min-w-[640px]">
+            <thead>
+              <tr class="text-muted-foreground bg-accent/40">
+                <th class="px-2 py-1.5 text-left font-medium w-10">序</th>
+                <th class="px-2 py-1.5 text-left font-medium">招标文件要求</th>
+                <th class="px-2 py-1.5 text-left font-medium">投标文件响应</th>
+                <th class="px-2 py-1.5 text-left font-medium w-20">偏差</th>
+                <th class="w-10"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="!form.deviationLines.length">
+                <td colspan="5" class="px-2 py-3 text-muted-foreground">
+                  识别邀请书/清单后会出现在这里，也可点「从报价清单生成」或手工增行。
+                </td>
+              </tr>
+              <tr v-for="(row, i) in form.deviationLines" :key="i" class="border-t border-border">
+                <td class="px-1 py-1">
+                  <input v-model="row.seq" class="kb-input font-sans !py-1 !px-1" />
+                </td>
+                <td class="px-1 py-1 min-w-[160px]">
+                  <input v-model="row.requirement" class="kb-input font-sans !py-1 !px-1" />
+                </td>
+                <td class="px-1 py-1 min-w-[160px]">
+                  <input v-model="row.response" class="kb-input font-sans !py-1 !px-1" />
+                </td>
+                <td class="px-1 py-1">
+                  <input v-model="row.deviation" class="kb-input font-sans !py-1 !px-1" />
+                </td>
+                <td class="px-1 py-1 text-center">
+                  <button type="button" class="text-muted-foreground hover:text-sulfur" @click="removeDeviationRow(i)">
+                    删
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <Panel title="充电站实施方案" subtitle="写入技术标：本项目图纸 + 文字说明。不要编造桩数，不要用其他项目图纸">
+        <div class="space-y-3">
+          <div class="space-y-1.5">
+            <span class="text-[12px] text-muted-foreground">上传图纸</span>
+            <div
+              class="tender-dropzone w-full cursor-pointer"
+              :class="{
+                'tender-dropzone--active': dragOverDrawings,
+                'tender-dropzone--filled': techDrawingSlot.fileCount > 0,
+              }"
+              @click="pickSlotFile(techDrawingSlot, !techDrawingSlot.fileCount)"
+              @dragover.prevent="dragOverDrawings = true"
+              @dragleave.prevent="dragOverDrawings = false"
+              @drop.prevent="onDrawingsDrop"
+            >
+              <ImagePlus class="size-7 text-muted-foreground/70 mb-2" />
+              <p class="text-[13px] font-medium text-foreground">
+                {{
+                  uploadingKey === TECH_DRAWING_KEY
+                    ? '正在上传…'
+                    : techDrawingSlot.fileCount
+                      ? `${techDrawingSlot.fileCount} 张图纸`
+                      : '点击或拖拽上传平面图 / 系统图'
+                }}
+              </p>
+              <p class="text-[11px] text-muted-foreground mt-1">
+                {{
+                  techDrawingSlot.fileCount
+                    ? slotFileLabel(techDrawingSlot) || '点击可继续追加'
+                    : 'PDF / PNG / JPG，换标请覆盖'
+                }}
+              </p>
+            </div>
+            <div v-if="techDrawingSlot.fileCount" class="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="uploadingKey === TECH_DRAWING_KEY"
+                @click.stop="pickSlotFile(techDrawingSlot, true)"
+              >
+                覆盖
+              </button>
+              <button
+                type="button"
+                class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="uploadingKey === TECH_DRAWING_KEY"
+                @click.stop="pickSlotFile(techDrawingSlot, false)"
+              >
+                追加
+              </button>
+              <button
+                type="button"
+                class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="uploadingKey === TECH_DRAWING_KEY"
+                @click.stop="onClearSlot(techDrawingSlot)"
+              >
+                清除
+              </button>
+            </div>
+          </div>
+          <label class="block text-[12px] space-y-1">
+            <span class="text-muted-foreground">文字描述</span>
+            <textarea
+              v-model="form.techPlanNote"
+              rows="6"
+              class="kb-input font-sans min-h-[120px]"
+              placeholder="按本邀请书写施工、布置、配电、运维与工期要点。没有原文请手工写，不要编造桩数和图纸。"
+            />
+          </label>
+        </div>
+      </Panel>
+      </div>
+
+      <div
+        v-if="softGenerateNotes.length"
+        class="rounded-md border border-border bg-accent/30 px-3 py-2.5"
+      >
+        <p class="text-[12px] font-medium mb-1">缺项用虚线框占位，不阻止生成</p>
+        <ul class="space-y-0.5 text-[11px] text-muted-foreground">
+          <li v-for="(w, i) in softGenerateNotes" :key="i">{{ w }}</li>
+        </ul>
       </div>
 
       <footer class="tender-step-footer">
@@ -1285,8 +2502,15 @@ async function onDownload(kind: 'docx' | 'pdf') {
           </p>
         </div>
       </footer>
-      <p v-if="generating && form.attachQualifications" class="mt-2 text-[11px] text-muted-foreground text-center">
-        插入资质扫描件可能需要十几秒
+      <p class="mt-1 text-center text-[11px] text-muted-foreground">
+        生成一份 Word，同时写入商务标与技术标。上方切换只改变当前填写内容。
+      </p>
+      <p v-if="generating" class="mt-2 text-[11px] text-muted-foreground text-center">
+        {{
+          form.attachQualifications
+            ? '正在写入扫描件与资质页（已限页加速）…'
+            : '正在生成 Word（扫描件仅占位，不嵌入大图）…'
+        }}
       </p>
     </section>
 
@@ -1297,28 +2521,79 @@ async function onDownload(kind: 'docx' | 'pdf') {
           <div class="min-w-0">
             <h2 class="text-[14px] font-semibold text-foreground">在线预览与编辑</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
-              与桌面 Word 一致；修改会自动保存。可用全屏查看完整表格。
+              {{
+                previewEditorMode === 'view'
+                  ? '当前为只读预览（更快）。需要改稿时点「切换编辑」。'
+                  : '在线修改会自动保存到这一份；回填表再生成会另存新记录。'
+              }}
             </p>
           </div>
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              class="tender-ghost-btn"
+              @click="previewEditorMode = previewEditorMode === 'view' ? 'edit' : 'view'"
+            >
+              {{ previewEditorMode === 'view' ? '切换编辑' : '切换只读' }}
+            </button>
+            <button
+              type="button"
+              class="tender-ghost-btn"
+              :title="previewFullscreen ? '还原窗口（Esc）' : '全屏预览'"
+              :aria-label="previewFullscreen ? '还原窗口' : '全屏预览'"
+              @click="togglePreviewFullscreen"
+            >
+              <Minimize2 v-if="previewFullscreen" class="size-3.5" />
+              <Maximize2 v-else class="size-3.5" />
+              {{ previewFullscreen ? '还原' : '全屏' }}
+            </button>
+          </div>
+        </div>
+
+        <div
+          v-if="result.warnings.length && !previewFullscreen"
+          class="tender-preview-hints shrink-0 rounded-md border border-sulfur/30 bg-sulfur/10"
+        >
           <button
             type="button"
-            class="tender-ghost-btn shrink-0"
-            :title="previewFullscreen ? '还原窗口（Esc）' : '全屏预览'"
-            :aria-label="previewFullscreen ? '还原窗口' : '全屏预览'"
-            @click="togglePreviewFullscreen"
+            class="flex w-full items-center gap-2 px-3 py-1.5 text-left"
+            :aria-expanded="previewHintsOpen"
+            @click="togglePreviewHints"
           >
-            <Minimize2 v-if="previewFullscreen" class="size-3.5" />
-            <Maximize2 v-else class="size-3.5" />
-            {{ previewFullscreen ? '还原' : '全屏' }}
+            <TriangleAlert class="size-3.5 shrink-0 text-sulfur" />
+            <span class="min-w-0 flex-1 text-[12px] font-medium text-sulfur">
+              生成提示
+              <span class="font-normal text-sulfur/80">（{{ result.warnings.length }} 条）</span>
+              <span
+                v-if="!previewHintsOpen"
+                class="ml-1 font-normal text-sulfur/70"
+              >已折叠，避免挡住 Word</span>
+            </span>
+            <ChevronUp v-if="previewHintsOpen" class="size-3.5 shrink-0 text-sulfur" />
+            <ChevronDown v-else class="size-3.5 shrink-0 text-sulfur" />
+            <span class="shrink-0 text-[11px] text-sulfur/80">{{
+              previewHintsOpen ? '收起' : '展开'
+            }}</span>
           </button>
+          <ul
+            v-if="previewHintsOpen"
+            class="tender-preview-hints-list space-y-1 border-t border-sulfur/20 px-3 py-2 text-[11px] text-sulfur"
+          >
+            <li v-for="(w, i) in result.warnings" :key="i" class="flex gap-1.5">
+              <TriangleAlert class="size-3.5 shrink-0 mt-0.5" />
+              {{ w }}
+            </li>
+          </ul>
         </div>
 
         <TenderDocEditor
-          :key="result.docxFile"
+          :key="`${result.docxFile}-${previewEditorMode}`"
           class="tender-preview-editor"
           :docx-file="result.docxFile"
           :download-name="result.downloadName"
           :fullscreen="previewFullscreen"
+          :layout-tick="previewLayoutTick"
+          :mode="previewEditorMode"
         />
 
         <footer class="tender-step-footer shrink-0 pt-2">
@@ -1327,20 +2602,20 @@ async function onDownload(kind: 'docx' | 'pdf') {
             上一步
           </button>
           <button type="button" class="tender-primary-btn min-w-[160px]" @click="onPreviewStepNext">
-            下一步：下载定稿
+            去下载定稿
             <ChevronRight class="size-3.5" />
           </button>
         </footer>
       </div>
     </section>
 
-    <!-- 步骤 4：生成文档 / 下载 -->
+    <!-- 步骤 4：下载定稿 -->
     <section v-else-if="currentStepIndex === 3 && result" class="tender-step-panel space-y-4">
       <section class="tender-card tender-card--success">
         <div class="tender-card-head border-b-0 pb-0">
           <h2 class="text-[14px] font-semibold text-patina">投标文件已就绪</h2>
           <p class="text-[11px] text-muted-foreground mt-0.5">
-            下载 Word 后请更新目录页码并盖章；在线编辑的内容已保存。
+            一份 Word，内含商务标（资格、报价、业绩、函件）和技术标（偏差表与实施方案）。目录独占一页，页码与正文分页对齐。
           </p>
         </div>
         <ul v-if="result.warnings.length" class="mt-3 space-y-1 text-[11px] text-sulfur">
@@ -1396,8 +2671,36 @@ async function onDownload(kind: 'docx' | 'pdf') {
             <dt class="text-[11px] text-muted-foreground">投标内容</dt>
             <dd class="mt-0.5 line-clamp-2 text-muted-foreground">{{ form.bidContent || '—' }}</dd>
           </div>
+          <div>
+            <dt class="text-[11px] text-muted-foreground">原厂角色</dt>
+            <dd class="mt-0.5">{{ form.factoryRole || '（按项目自动）' }}</dd>
+          </div>
+          <div>
+            <dt class="text-[11px] text-muted-foreground">商务标 / 技术标</dt>
+            <dd class="mt-0.5">
+              {{ form.performanceLines.length }} 条业绩 · {{ form.deviationLines.length }} 条偏差
+              · {{ form.techPlanNote ? '已写方案说明' : '方案说明未写' }}
+              · 图纸 {{ techDrawingSlot.fileCount }} 张
+            </dd>
+          </div>
         </dl>
       </Panel>
+
+      <div
+        v-if="result.attachmentMatch && (result.attachmentMatch.matched.length || result.attachmentMatch.missingFiles.length || result.attachmentMatch.createdItems.length)"
+        class="tender-card"
+      >
+        <p class="text-[12px] font-medium mb-1">本标附件对照</p>
+        <p v-if="result.attachmentMatch.matched.length" class="text-[11px] text-emerald-700 dark:text-emerald-400">
+          已写入扫描件 {{ result.attachmentMatch.matched.length }} 项
+        </p>
+        <p v-if="result.attachmentMatch.missingFiles.length" class="text-[11px] text-muted-foreground">
+          未上传 {{ result.attachmentMatch.missingFiles.map((x) => x.title).join('、') }}
+        </p>
+        <p v-if="result.attachmentMatch.createdItems.length" class="text-[11px] text-muted-foreground">
+          资料库新建空项 {{ result.attachmentMatch.createdItems.map((x) => x.title).join('、') }}
+        </p>
+      </div>
 
       <footer class="tender-step-footer">
         <button type="button" class="tender-ghost-btn" @click="onStepBack">
@@ -1410,6 +2713,30 @@ async function onDownload(kind: 'docx' | 'pdf') {
       </footer>
     </section>
   </div>
+
+  <AppAlertDialog
+    :open="confirmGenerateOpen"
+    :title="confirmGenerateTitle"
+    :description="confirmGenerateDescription"
+    confirm-label="确认另存生成"
+    :loading="generating"
+    @update:open="onConfirmGenerateOpen"
+    @confirm="confirmGenerateAgain"
+  />
+  <AppAlertDialog
+    :open="confirmDeleteOpen"
+    title="删除生成记录"
+    :description="
+      pendingDeleteItem
+        ? `确定删除「${pendingDeleteItem.projectName || '未命名项目'}」这条记录？对应 Word 文件也会删除，不可恢复。`
+        : '确定删除该记录？'
+    "
+    confirm-label="确认删除"
+    destructive
+    :loading="!!deletingId"
+    @update:open="onConfirmDeleteOpen"
+    @confirm="confirmDeleteRecord"
+  />
 </template>
 
 <style scoped>
@@ -1461,17 +2788,45 @@ async function onDownload(kind: 'docx' | 'pdf') {
   flex-direction: column;
   gap: 1rem;
 }
-.tender-step-panel--preview {
-  width: 100%;
-  flex: 1;
-  min-height: calc(100dvh - 11rem);
-  display: flex;
-  flex-direction: column;
+.tender-volume-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 0.5rem;
+  border: 1px solid var(--hairline, hsl(var(--border)));
+  background: var(--bg-elevated, hsl(var(--card)));
+}
+.tender-volume-btn {
+  height: 1.75rem;
+  padding: 0 0.75rem;
+  border: none;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--muted-foreground, hsl(var(--muted-foreground)));
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tender-volume-btn--active {
+  background: color-mix(in srgb, var(--accent-iron, hsl(var(--primary))) 88%, black);
+  color: #fff;
 }
 .tender-page--preview {
   display: flex;
   flex-direction: column;
-  min-height: calc(100dvh - 8rem);
+  height: calc(100dvh - 6.75rem);
+  min-height: 0;
+}
+.tender-page-header--preview {
+  margin-bottom: 0.5rem !important;
+}
+.tender-step-panel--preview {
+  width: 100%;
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .tender-preview-shell {
   flex: 1;
@@ -1505,6 +2860,10 @@ async function onDownload(kind: 'docx' | 'pdf') {
   min-height: 0;
   align-self: stretch;
   width: 100%;
+}
+.tender-preview-hints-list {
+  max-height: 7.5rem;
+  overflow-y: auto;
 }
 .tender-step-footer {
   display: flex;

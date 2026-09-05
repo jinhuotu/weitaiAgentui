@@ -39,11 +39,15 @@ type RequestOptions = {
 
 function friendlyMessage(status: number, msg?: string): string {
   const detail = (msg || '').trim()
+  const unauthorized = /^unauthorized$/i.test(detail) || detail === 'Not authenticated'
   if (status === 401) {
-    if (detail && !/^unauthorized$/i.test(detail) && detail !== 'Not authenticated') {
+    if (detail && !unauthorized) {
       return `登录已过期或未登录（${detail}）。请重新登录后再试`
     }
     return '登录已过期或未登录，请重新登录后再试'
+  }
+  if (unauthorized) {
+    return '知识库或模型鉴权失败。请检查「模型管理」中的 Embedding API Key，或先取消勾选知识库再识别'
   }
   if (status === 403) {
     return '没有权限执行此操作'
@@ -53,6 +57,9 @@ function friendlyMessage(status: number, msg?: string): string {
       (msg && msg.trim()) ||
       '接口不存在（404）。若刚加过后端路由，请先关掉占用 8100 的旧 API 进程再启动'
     )
+  }
+  if (status === 422) {
+    return detail || '提交内容未通过校验，请检查必填项'
   }
   // 优先展示后端具体错误（如 MCP stdio 失败原因）
   if (msg && msg.trim()) {
@@ -65,8 +72,23 @@ function friendlyMessage(status: number, msg?: string): string {
 }
 
 function envelopeMessage(payload: ApiEnvelope<unknown> & { detail?: unknown }): string | undefined {
-  if (payload.msg && String(payload.msg).trim()) return String(payload.msg).trim()
+  if (payload.msg && String(payload.msg).trim() && payload.msg !== 'ok') {
+    return String(payload.msg).trim()
+  }
   if (typeof payload.detail === 'string' && payload.detail.trim()) return payload.detail.trim()
+  if (Array.isArray(payload.detail)) {
+    const parts = payload.detail.map((item) => {
+      if (!item || typeof item !== 'object') return String(item)
+      const row = item as { loc?: unknown; msg?: unknown }
+      const loc = Array.isArray(row.loc)
+        ? row.loc.filter((x) => x !== 'body' && x !== 'query').join('.')
+        : ''
+      const msg = String(row.msg || '').trim()
+      if (loc && msg) return `${loc}: ${msg}`
+      return msg
+    }).filter(Boolean)
+    if (parts.length) return parts.join('；')
+  }
   return undefined
 }
 

@@ -1,18 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Ellipsis,
-  Loader2,
-  X,
-} from 'lucide-vue-next'
-import { Tag } from '@/components/ui-kit'
+import { ChevronRight, Ellipsis, FileText, Loader2, X } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
-import { fetchModelRuntime, type ModelConfigItem } from '@/lib/models-api'
+import { fetchModelRuntime } from '@/lib/models-api'
 import { listChatSessions } from '@/lib/ai-chat-api'
 import { listKnowledgeBases } from '@/lib/knowledge-api'
+import { fetchTenderRecords, type TenderRecordItem } from '@/lib/tenders-api'
+import { fmtAgo } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth'
 import { NAV_GROUPS, NAV_ITEM_DESC, filterNavGroups, getMoreNavItems, getPrimaryNavItems } from '@/config/nav'
 
@@ -24,6 +19,9 @@ const error = ref('')
 const status = ref<Awaited<ReturnType<typeof fetchModelRuntime>> | null>(null)
 const sessionCount = ref(0)
 const kbCount = ref(0)
+const tenderRecords = ref<TenderRecordItem[]>([])
+const tenderTotal = ref(0)
+const tenderError = ref('')
 const moreOpen = ref(false)
 
 const visiblePrimary = computed(() =>
@@ -40,14 +38,17 @@ const moreItems = computed(() =>
   })),
 )
 
-function modelName(item: ModelConfigItem | null | undefined) {
-  if (!item) return '未绑定'
-  return item.name || item.modelName || '已配置'
-}
-
 function openModule(href: string, _label: string) {
   moreOpen.value = false
   void router.push(href)
+}
+
+function openTenderRecord(item: TenderRecordItem) {
+  void router.push({ path: '/tenders', query: { record: item.id } })
+}
+
+function openTenderHistory() {
+  void router.push('/tenders')
 }
 
 function onDocClick(ev: MouseEvent) {
@@ -61,14 +62,24 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [st, sessions, bases] = await Promise.all([
+    const [st, sessions, bases, rec] = await Promise.all([
       fetchModelRuntime(),
       listChatSessions().catch(() => []),
       listKnowledgeBases().catch(() => []),
+      fetchTenderRecords({ limit: 5 }).catch(() => null),
     ])
     status.value = st
     sessionCount.value = sessions.length
     kbCount.value = bases.length
+    if (rec) {
+      tenderRecords.value = rec.items || []
+      tenderTotal.value = rec.total || 0
+      tenderError.value = ''
+    } else {
+      tenderRecords.value = []
+      tenderTotal.value = 0
+      tenderError.value = '加载投标记录失败'
+    }
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : '加载总览失败'
   } finally {
@@ -97,6 +108,12 @@ onUnmounted(() => {
           <p class="portal-hero__desc">
             常用业务从下方四个入口进入；管理与配置请点「更多」。
           </p>
+          <p
+            v-if="error"
+            class="mt-2 text-[12px] text-destructive"
+          >
+            {{ error }}
+          </p>
 
           <div class="portal-stats">
             <div class="portal-stat">
@@ -120,13 +137,11 @@ onUnmounted(() => {
 
         <div class="portal-runtime">
           <div class="portal-runtime__head">
-            <span class="text-[12px] font-medium">模型运行时</span>
-            <div class="flex gap-1.5">
-              <Tag v-if="status?.llm_configured" tone="patina">LLM</Tag>
-              <Tag v-else tone="sulfur">LLM</Tag>
-              <Tag v-if="status?.embedding_configured" tone="patina">Emb</Tag>
-              <Tag v-else tone="sulfur">Emb</Tag>
-            </div>
+            <span class="text-[12px] font-medium">历史投标文件</span>
+            <button type="button" class="portal-runtime__more" @click="openTenderHistory">
+              全部{{ tenderTotal ? ` ${tenderTotal}` : '' }}
+              <ChevronRight class="size-3.5" />
+            </button>
           </div>
 
           <div v-if="loading" class="flex items-center gap-2 py-6 text-[12px] text-muted-foreground">
@@ -134,29 +149,30 @@ onUnmounted(() => {
             加载中…
           </div>
           <div
-            v-else-if="error"
+            v-else-if="tenderError"
             class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[12px] text-destructive"
           >
-            {{ error }}
+            {{ tenderError }}
           </div>
-          <ul v-else class="portal-runtime__list">
-            <li>
-              <span>快速模式</span>
-              <span class="portal-runtime__name">{{ modelName(status?.llm_fast) }}</span>
-              <CheckCircle2 v-if="status?.llm_fast" class="size-3.5 text-patina" />
-              <AlertTriangle v-else class="size-3.5 text-sulfur" />
-            </li>
-            <li>
-              <span>深度模式</span>
-              <span class="portal-runtime__name">{{ modelName(status?.llm_deep) }}</span>
-              <CheckCircle2 v-if="status?.llm_deep" class="size-3.5 text-patina" />
-              <AlertTriangle v-else class="size-3.5 text-sulfur" />
-            </li>
-            <li>
-              <span>Embedding</span>
-              <span class="portal-runtime__name">{{ modelName(status?.embedding) }}</span>
-              <CheckCircle2 v-if="status?.embedding" class="size-3.5 text-patina" />
-              <AlertTriangle v-else class="size-3.5 text-sulfur" />
+          <p v-else-if="!tenderRecords.length" class="py-6 text-[12px] text-muted-foreground">
+            还没有生成记录。可从「投标文件」识别邀请书后生成。
+          </p>
+          <ul v-else class="portal-tenders">
+            <li v-for="item in tenderRecords" :key="item.id">
+              <button type="button" class="portal-tender" @click="openTenderRecord(item)">
+                <span class="portal-tender__icon" aria-hidden="true">
+                  <FileText class="size-3.5" />
+                </span>
+                <span class="min-w-0 flex-1">
+                  <span class="portal-tender__name">{{ item.projectName || '未命名项目' }}</span>
+                  <span class="portal-tender__meta">
+                    {{ item.tenderer || '—' }}
+                    · {{ fmtAgo(item.createdAt, true) }}
+                    <span v-if="!item.docxAvailable" class="text-sulfur"> · 文件缺失</span>
+                  </span>
+                </span>
+                <ChevronRight class="size-3.5 shrink-0 text-muted-foreground" />
+              </button>
             </li>
           </ul>
         </div>
@@ -351,34 +367,83 @@ onUnmounted(() => {
   margin-bottom: 0.5rem;
 }
 
-.portal-runtime__list {
+.portal-runtime__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 0.6875rem;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+}
+
+.portal-runtime__more:hover {
+  color: var(--accent-iron, #2563eb);
+}
+
+.portal-tenders {
   margin: 0;
   padding: 0;
   list-style: none;
+  max-height: 13.5rem;
+  overflow: auto;
 }
 
-.portal-runtime__list li {
-  display: grid;
-  grid-template-columns: 4.5rem minmax(0, 1fr) auto;
+.portal-tender {
+  display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.55rem 0;
-  font-size: 0.75rem;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.5rem 0.15rem;
+  text-align: left;
+  border: none;
   border-top: 1px solid color-mix(in srgb, hsl(var(--border)) 70%, transparent);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 0.4rem;
 }
 
-.portal-runtime__list li:first-child {
+.portal-tenders li:first-child .portal-tender {
   border-top: none;
 }
 
-.portal-runtime__name {
+.portal-tender:hover {
+  background: color-mix(in srgb, var(--accent-iron, #2563eb) 7%, transparent);
+}
+
+.portal-tender__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, var(--accent-iron, #2563eb) 12%, transparent);
+  color: var(--accent-iron, #2563eb);
+  flex-shrink: 0;
+}
+
+.portal-tender__name {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+  font-weight: 550;
+}
+
+.portal-tender__meta {
+  display: block;
+  margin-top: 0.1rem;
   font-size: 0.6875rem;
   color: hsl(var(--muted-foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .primary-grid {
