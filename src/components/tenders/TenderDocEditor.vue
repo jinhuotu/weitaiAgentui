@@ -19,7 +19,6 @@ const editorHost = ref<HTMLElement | null>(null)
 const editorRoot = ref<HTMLElement | null>(null)
 let docEditor: { destroyEditor?: () => void } | null = null
 let resizeObserver: ResizeObserver | null = null
-let lastBootHeight = 0
 let notifyingResize = false
 
 declare global {
@@ -61,7 +60,6 @@ function fillEditorFrame() {
     iframe.setAttribute('height', String(h))
     iframe.setAttribute('width', String(w))
   }
-  lastBootHeight = h
 }
 
 function notifyEditorResize() {
@@ -153,11 +151,9 @@ async function boot() {
     host.innerHTML = ''
 
     docEditor = window.DocsAPI.DocEditor(editorId, data.config)
-    lastBootHeight = heightPx
 
     watchHostResize((h) => {
       if (loading.value || error.value) return
-      lastBootHeight = h
       fillEditorFrame()
       notifyEditorResize()
     })

@@ -58,7 +58,8 @@ import {
 } from '@/lib/workflows-api'
 import { LAYOUT_LLM_SYSTEM_PROMPT } from '@/lib/layout-plan'
 
-const nodeTypes = { condition: markRaw(WfConditionNode) }
+// vue-tsc 对 Vue Flow NodeComponent 泛型过深，与本仓库 CanvasNode 策略一致
+const nodeTypes = { condition: markRaw(WfConditionNode) } as Record<string, object>
 
 const NODE_META: Record<
   WorkflowNodeType,

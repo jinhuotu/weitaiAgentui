@@ -252,6 +252,7 @@ const previewFullscreen = ref(false)
 const parseNotesEpoch = ref(0)
 const previewLayoutTick = ref(0)
 const showRecords = ref(false)
+const previewHintsOpen = ref(true)
 const recordsLoading = ref(false)
 const records = ref<TenderRecordItem[]>([])
 const recordsTotal = ref(0)
@@ -671,6 +672,7 @@ function formatPrice(n: number) {
   const value = Number(n) || 0
   return value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 }
+const moneyLabel = computed(() => formatPrice(form.bidPriceYuan))
 
 function formatRecordTime(ms: number) {
   if (!ms) return '—'
