@@ -3,9 +3,6 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ChevronRight, Ellipsis, FileText, Loader2, X } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
-import { fetchModelRuntime } from '@/lib/models-api'
-import { listChatSessions } from '@/lib/ai-chat-api'
-import { listKnowledgeBases } from '@/lib/knowledge-api'
 import { fetchTenderRecords, type TenderRecordItem } from '@/lib/tenders-api'
 import { fmtAgo } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth'
@@ -16,9 +13,10 @@ const auth = useAuthStore()
 
 const loading = ref(true)
 const error = ref('')
-const status = ref<Awaited<ReturnType<typeof fetchModelRuntime>> | null>(null)
-const sessionCount = ref(0)
-const kbCount = ref(0)
+const myTaskCount = ref(0)
+const processingCount = ref(0)
+const pendingCount = ref(0)
+const wonCount = ref(0)
 const tenderRecords = ref<TenderRecordItem[]>([])
 const tenderTotal = ref(0)
 const tenderError = ref('')
@@ -47,8 +45,17 @@ function openTenderRecord(item: TenderRecordItem) {
   void router.push({ path: '/tenders', query: { record: item.id } })
 }
 
+function openWorkTasks(status?: 'processing' | 'pending' | 'won') {
+  moreOpen.value = false
+  void router.push(status ? { path: '/work-tasks', query: { status } } : '/work-tasks')
+}
+
 function openTenderHistory() {
   void router.push('/tenders')
+}
+
+function countByStatus(items: TenderRecordItem[], status: string): number {
+  return items.filter((item) => item.status === status).length
 }
 
 function onDocClick(ev: MouseEvent) {
@@ -62,15 +69,15 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [st, sessions, bases, rec] = await Promise.all([
-      fetchModelRuntime(),
-      listChatSessions().catch(() => []),
-      listKnowledgeBases().catch(() => []),
+    const [mine, rec] = await Promise.all([
+      fetchTenderRecords({ scope: 'mine', limit: 200 }).catch(() => null),
       fetchTenderRecords({ limit: 5 }).catch(() => null),
     ])
-    status.value = st
-    sessionCount.value = sessions.length
-    kbCount.value = bases.length
+    const mineItems = mine?.items || []
+    myTaskCount.value = mineItems.length
+    processingCount.value = countByStatus(mineItems, 'processing')
+    pendingCount.value = countByStatus(mineItems, 'pending')
+    wonCount.value = countByStatus(mineItems, 'won')
     if (rec) {
       tenderRecords.value = rec.items || []
       tenderTotal.value = rec.total || 0
@@ -106,7 +113,7 @@ onUnmounted(() => {
           <p class="portal-hero__eyebrow">河南伟泰光电 · 智能体交互系统</p>
           <h1 class="portal-hero__title">工作台</h1>
           <p class="portal-hero__desc">
-            常用业务从下方四个入口进入；管理与配置请点「更多」。
+            上方为本人投标任务；常用业务从下方入口进入，管理与配置请点「更多」。
           </p>
           <p
             v-if="error"
@@ -116,22 +123,22 @@ onUnmounted(() => {
           </p>
 
           <div class="portal-stats">
-            <div class="portal-stat">
-              <span class="portal-stat__value">{{ loading ? '—' : sessionCount }}</span>
-              <span class="portal-stat__label">会话</span>
-            </div>
-            <div class="portal-stat">
-              <span class="portal-stat__value">{{ loading ? '—' : kbCount }}</span>
-              <span class="portal-stat__label">知识库</span>
-            </div>
-            <div class="portal-stat">
-              <span class="portal-stat__value">{{ status?.llm_configured ? '就绪' : '待配' }}</span>
-              <span class="portal-stat__label">LLM</span>
-            </div>
-            <div class="portal-stat">
-              <span class="portal-stat__value">{{ status?.embedding_configured ? '就绪' : '待配' }}</span>
-              <span class="portal-stat__label">Embedding</span>
-            </div>
+            <button type="button" class="portal-stat" @click="openWorkTasks()">
+              <span class="portal-stat__value">{{ loading ? '—' : myTaskCount }}</span>
+              <span class="portal-stat__label">我的任务</span>
+            </button>
+            <button type="button" class="portal-stat" @click="openWorkTasks('processing')">
+              <span class="portal-stat__value portal-stat__value--coolant">{{ loading ? '—' : processingCount }}</span>
+              <span class="portal-stat__label">编制中</span>
+            </button>
+            <button type="button" class="portal-stat" @click="openWorkTasks('pending')">
+              <span class="portal-stat__value portal-stat__value--sulfur">{{ loading ? '—' : pendingCount }}</span>
+              <span class="portal-stat__label">待审批</span>
+            </button>
+            <button type="button" class="portal-stat" @click="openWorkTasks('won')">
+              <span class="portal-stat__value portal-stat__value--patina">{{ loading ? '—' : wonCount }}</span>
+              <span class="portal-stat__label">已中标</span>
+            </button>
           </div>
         </div>
 
@@ -336,6 +343,14 @@ onUnmounted(() => {
   border-radius: 0.65rem;
   border: 1px solid color-mix(in srgb, var(--hairline, hsl(var(--border))) 80%, transparent);
   background: color-mix(in srgb, hsl(var(--background)) 55%, transparent);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.portal-stat:hover {
+  border-color: color-mix(in srgb, var(--accent-iron, #2563eb) 40%, hsl(var(--border)));
+  background: color-mix(in srgb, var(--accent-iron, #2563eb) 6%, transparent);
 }
 
 .portal-stat__value {
@@ -343,6 +358,18 @@ onUnmounted(() => {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
+}
+
+.portal-stat__value--coolant {
+  color: var(--accent-coolant, #0ea5e9);
+}
+
+.portal-stat__value--sulfur {
+  color: var(--accent-sulfur, #d97706);
+}
+
+.portal-stat__value--patina {
+  color: var(--accent-patina, #059669);
 }
 
 .portal-stat__label {

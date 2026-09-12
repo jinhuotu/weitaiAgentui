@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { watch, onMounted, onUnmounted } from 'vue'
+import { computed, watch, onMounted, onUnmounted } from 'vue'
 import { X } from 'lucide-vue-next'
 
 const props = withDefaults(
@@ -8,14 +8,20 @@ const props = withDefaults(
     title?: string
     description?: string
     wide?: boolean
+    size?: 'default' | 'wide' | 'xl'
   }>(),
-  { wide: false },
+  { wide: false, size: undefined },
 )
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
   close: []
 }>()
+
+const resolvedSize = computed(() => {
+  if (props.size) return props.size
+  return props.wide ? 'wide' : 'default'
+})
 
 function close() {
   emit('update:open', false)
@@ -50,14 +56,18 @@ onUnmounted(() => {
       <div
         :class="[
           'relative z-10 w-full rounded-lg border border-border bg-card shadow-2xl',
-          wide ? 'max-w-2xl' : 'max-w-lg',
+          resolvedSize === 'xl'
+            ? 'flex h-[90vh] max-w-[min(96vw,80rem)] flex-col'
+            : resolvedSize === 'wide'
+              ? 'max-w-2xl'
+              : 'max-w-lg',
         ]"
         role="dialog"
         aria-modal="true"
       >
         <header
           v-if="title || $slots.title"
-          class="flex items-start justify-between gap-3 border-b border-border px-5 py-4"
+          class="flex shrink-0 items-start justify-between gap-3 border-b border-border px-5 py-4"
         >
           <div class="min-w-0">
             <h2 class="text-sm font-semibold tracking-wide">
@@ -79,12 +89,18 @@ onUnmounted(() => {
             <X class="size-4" />
           </button>
         </header>
-        <div class="px-5 py-4">
+        <div
+          :class="
+            resolvedSize === 'xl'
+              ? 'flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-4'
+              : 'px-5 py-4'
+          "
+        >
           <slot />
         </div>
         <footer
           v-if="$slots.footer"
-          class="flex items-center justify-end gap-2 border-t border-border px-5 py-3"
+          class="flex shrink-0 items-center justify-end gap-2 border-t border-border px-5 py-3"
         >
           <slot name="footer" />
         </footer>

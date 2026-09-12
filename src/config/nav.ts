@@ -13,6 +13,9 @@ import {
   BookOpenText,
   FolderOpen,
   FileText,
+  ClipboardList,
+  FolderKanban,
+  BadgeCheck,
 } from 'lucide-vue-next'
 
 export type NavItem = {
@@ -102,6 +105,9 @@ export const NAV_GROUPS: NavGroup[] = [
     icon: BotMessageSquare,
     items: [
       { href: '/ai-chat', label: 'AI 智能问答', icon: BotMessageSquare },
+      { href: '/work-tasks', label: '工作任务', icon: ClipboardList },
+      { href: '/tender-tasks', label: '全部投标任务', icon: FolderKanban },
+      { href: '/approval', label: '审批流程', icon: BadgeCheck },
       { href: '/knowledge', label: '知识库', icon: LibraryBig },
       { href: '/tenders', label: '投标文件', icon: FileText },
       { href: '/tender-library', label: '投标资料库', icon: FolderOpen },
@@ -129,9 +135,12 @@ export function flattenNavItems(groups: NavGroup[] = NAV_GROUPS): NavItem[] {
   )
 }
 
-/** 侧栏 / 工作台优先展示的四个业务入口（顺序固定） */
+/** 侧栏 / 工作台常显业务入口（顺序固定）；未列入的归入「更多」 */
 export const PRIMARY_NAV_HREFS = [
   '/ai-chat',
+  '/work-tasks',
+  '/tender-tasks',
+  '/approval',
   '/tenders',
   '/knowledge',
   '/tender-library',
@@ -140,6 +149,9 @@ export const PRIMARY_NAV_HREFS = [
 export const NAV_ITEM_DESC: Record<string, string> = {
   '/': '工作台总览与运行状态',
   '/ai-chat': '多会话问答与工具调用',
+  '/work-tasks': '本人投标任务与状态跟进',
+  '/tender-tasks': '全量投标任务筛选与导出',
+  '/approval': '待审、已审与我发起的申请',
   '/knowledge': '文档入库、检索与预览',
   '/tenders': '邀请书识别与文档生成',
   '/tender-library': '企业常备资料与扫描件',

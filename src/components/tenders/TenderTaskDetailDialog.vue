@@ -1,0 +1,180 @@
+<script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
+import { Download, Loader2, TriangleAlert } from 'lucide-vue-next'
+import AppDialog from '@/components/ui/AppDialog.vue'
+import ApprovalSteps from '@/components/tenders/ApprovalSteps.vue'
+import TenderDocEditor from '@/components/tenders/TenderDocEditor.vue'
+import TenderStatusTag from '@/components/tenders/TenderStatusTag.vue'
+import { ApiError } from '@/lib/api'
+import {
+  APPROVAL_STEPS,
+  formatBudget,
+  stepIndex,
+  type TenderTask,
+} from '@/lib/tender-tasks'
+import {
+  downloadTenderFile,
+  fetchTenderRecord,
+  type TenderRecordItem,
+} from '@/lib/tenders-api'
+
+const props = defineProps<{
+  open: boolean
+  task: TenderTask | null
+}>()
+
+const emit = defineEmits<{
+  'update:open': [value: boolean]
+}>()
+
+const record = ref<TenderRecordItem | null>(null)
+const loading = ref(false)
+const error = ref('')
+const downloading = ref(false)
+const layoutTick = ref(0)
+
+const approvalCurrent = (task: TenderTask) =>
+  task.status === 'approved' || task.status === 'submitted' || task.status === 'won'
+    ? APPROVAL_STEPS.length - 1
+    : stepIndex(task.currentStep || '提交申请')
+
+async function loadRecord(task: TenderTask) {
+  loading.value = true
+  error.value = ''
+  record.value = null
+  try {
+    const detail = await fetchTenderRecord(task.recordId)
+    record.value = detail
+    if (!detail.docxAvailable || !detail.docxFile) {
+      error.value = '该记录的 Word 文件已丢失，无法预览'
+    }
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载投标文件失败'
+  } finally {
+    loading.value = false
+  }
+  await nextTick()
+  layoutTick.value += 1
+  window.setTimeout(() => {
+    layoutTick.value += 1
+  }, 160)
+}
+
+watch(
+  () => [props.open, props.task?.recordId] as const,
+  ([open, recordId]) => {
+    if (!open || !props.task || !recordId) {
+      record.value = null
+      error.value = ''
+      loading.value = false
+      return
+    }
+    void loadRecord(props.task)
+  },
+)
+
+async function onDownload() {
+  const file = record.value?.docxFile
+  if (!file) return
+  downloading.value = true
+  try {
+    await downloadTenderFile(file, record.value?.downloadName || `${props.task?.projectName || 'bid'}.docx`)
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '下载失败'
+  } finally {
+    downloading.value = false
+  }
+}
+</script>
+
+<template>
+  <AppDialog
+    :open="open"
+    size="xl"
+    :title="task ? `预览投标文件 · ${task.projectName}` : '预览投标文件'"
+    description="当前页只读预览，关闭后仍停留在任务列表。"
+    @update:open="emit('update:open', $event)"
+  >
+    <div v-if="task" class="flex min-h-0 flex-1 flex-col gap-3">
+      <div class="grid shrink-0 grid-cols-2 gap-x-4 gap-y-1.5 text-xs md:grid-cols-4">
+        <div class="truncate">
+          <span class="text-muted-foreground">招标方：</span>
+          <span>{{ task.tenderer || '—' }}</span>
+        </div>
+        <div>
+          <span class="text-muted-foreground">预算：</span>
+          <span class="data-num text-molybdenum font-semibold">{{ formatBudget(task.budgetYuan) }}</span>
+        </div>
+        <div>
+          <span class="text-muted-foreground">负责人：</span>
+          <span>{{ task.owner || '—' }}</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-muted-foreground">状态：</span>
+          <TenderStatusTag :status="task.status" />
+        </div>
+      </div>
+      <div
+        v-if="task.currentStep || task.status === 'pending' || task.approvalResult"
+        class="shrink-0"
+      >
+        <ApprovalSteps
+          :steps="APPROVAL_STEPS"
+          :current="approvalCurrent(task)"
+          compact
+        />
+      </div>
+      <p v-if="task.approvalComment" class="shrink-0 text-xs text-muted-foreground">
+        审批意见：{{ task.approvalComment }}
+      </p>
+
+      <div class="relative flex min-h-0 flex-1 flex-col">
+        <div
+          v-if="loading"
+          class="flex min-h-[24rem] flex-1 items-center justify-center gap-2 text-xs text-muted-foreground"
+        >
+          <Loader2 class="size-4 animate-spin" />
+          正在打开 Word 预览…
+        </div>
+        <div
+          v-else-if="error && !record?.docxFile"
+          class="flex min-h-[16rem] flex-1 items-start gap-2 rounded-md border border-sulfur/30 bg-sulfur/10 px-3 py-3 text-xs text-sulfur"
+        >
+          <TriangleAlert class="mt-0.5 size-4 shrink-0" />
+          <span>{{ error }}</span>
+        </div>
+        <TenderDocEditor
+          v-else-if="record?.docxFile"
+          :key="record.docxFile"
+          class="min-h-0 flex-1"
+          :docx-file="record.docxFile"
+          :download-name="record.downloadName || `${task.projectName || 'bid'}.docx`"
+          mode="view"
+          engine="browser"
+          :layout-tick="layoutTick"
+        />
+      </div>
+      <p v-if="error && record?.docxFile" class="shrink-0 text-[11px] text-sulfur">{{ error }}</p>
+    </div>
+
+    <template #footer>
+      <button
+        type="button"
+        class="h-8 px-3 inline-flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40"
+        :disabled="!record?.docxFile || downloading"
+        @click="onDownload"
+      >
+        <Loader2 v-if="downloading" class="size-3.5 animate-spin" />
+        <Download v-else class="size-3.5" />
+        下载 Word
+      </button>
+      <button
+        type="button"
+        class="h-8 px-3 text-xs rounded-md bg-iron text-background hover:bg-iron/90"
+        @click="emit('update:open', false)"
+      >
+        关闭
+      </button>
+    </template>
+  </AppDialog>
+</template>

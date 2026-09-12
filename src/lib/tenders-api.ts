@@ -18,6 +18,117 @@ export type PerformanceLine = {
   note: string
   ongoing: boolean
   chargerRelated?: boolean
+  includeInBid?: boolean
+}
+
+export type PerformanceRequirement = {
+  similarScope: string
+  keywords: string[]
+  minAmountYuan: number
+  minCount: number
+  requireCompleted: boolean
+  note: string
+}
+
+export type PerformanceMatchResult = {
+  passed: boolean
+  amountOk: boolean
+  similarOk: boolean
+  completedOk: boolean
+  reasons: string[]
+}
+
+const CHARGER_SCOPE = new Set(['充电桩', '充电设施', '充电机', '直流桩', '交流桩', '群充'])
+
+export function emptyPerformanceRequirement(): PerformanceRequirement {
+  return {
+    similarScope: '',
+    keywords: [],
+    minAmountYuan: 0,
+    minCount: 0,
+    requireCompleted: false,
+    note: '',
+  }
+}
+
+export function performanceRequirementActive(req?: PerformanceRequirement | null): boolean {
+  if (!req) return false
+  return (
+    (req.minAmountYuan || 0) > 0 ||
+    (req.minCount || 0) > 0 ||
+    Boolean(req.requireCompleted) ||
+    (req.keywords || []).length > 0 ||
+    Boolean((req.similarScope || '').trim())
+  )
+}
+
+export function formatPerformanceRequirement(req?: PerformanceRequirement | null): string {
+  if (!performanceRequirementActive(req) || !req) return ''
+  const parts: string[] = []
+  const scope = (req.similarScope || '').trim() || (req.keywords || []).slice(0, 3).join('、')
+  if (scope) parts.push(`同类「${scope}」`)
+  if (req.minAmountYuan > 0) parts.push(`单份≥${formatPerfAmount(req.minAmountYuan)}`)
+  if (req.minCount > 0) parts.push(`至少${req.minCount}个`)
+  if (req.requireCompleted) parts.push('须已竣工')
+  return parts.join('，')
+}
+
+export function matchPerformanceLine(
+  line: PerformanceLine,
+  req?: PerformanceRequirement | null,
+): PerformanceMatchResult {
+  if (!performanceRequirementActive(req) || !req) {
+    return { passed: true, amountOk: true, similarOk: true, completedOk: true, reasons: [] }
+  }
+  const blob = `${line.projectName || ''}${line.spec || ''}${line.summary || ''}${line.note || ''}${line.client || ''}`.replace(
+    /\s+/g,
+    '',
+  )
+  const reasons: string[] = []
+  let amountOk = true
+  let similarOk = true
+  let completedOk = true
+  if (req.minAmountYuan > 0) {
+    const amount = Number(line.amountYuan) || 0
+    if (amount <= 0) {
+      amountOk = false
+      reasons.push('金额未识别')
+    } else if (amount + 0.5 < req.minAmountYuan) {
+      amountOk = false
+      reasons.push('金额不足')
+    }
+  }
+  if ((req.keywords || []).length || (req.similarScope || '').trim()) {
+    similarOk = (req.keywords || []).some((word) => {
+      if (word && blob.includes(word)) return true
+      if (CHARGER_SCOPE.has(word) && (line.chargerRelated || /充电|直流桩|交流桩|群充/.test(blob))) return true
+      return false
+    })
+    const scope = (req.similarScope || '').replace(/\s+/g, '')
+    if (!similarOk && scope.length >= 2 && blob.includes(scope)) similarOk = true
+    if (!similarOk) reasons.push('类型不符')
+  }
+  if (req.requireCompleted && line.ongoing) {
+    completedOk = false
+    reasons.push('在建')
+  }
+  return {
+    passed: amountOk && similarOk && completedOk,
+    amountOk,
+    similarOk,
+    completedOk,
+    reasons,
+  }
+}
+
+function formatPerfAmount(amount: number): string {
+  if (amount >= 10000 && Math.abs(amount / 10000 - Math.round(amount / 10000)) < 0.005) {
+    return `${Math.round(amount / 10000)}万元`
+  }
+  if (amount >= 10000) {
+    return `${String((amount / 10000).toFixed(2)).replace(/\.?0+$/, '')}万元`
+  }
+  return `${Math.round(amount)}元`
 }
 
 export type SlotFileInfo = {
@@ -49,6 +160,7 @@ export type QuoteLineIn = {
   qty: number
   unitPrice: number
   amount: number
+  groups?: string[]
 }
 
 export type DeviationLine = {
@@ -56,6 +168,61 @@ export type DeviationLine = {
   requirement: string
   response: string
   deviation: string
+}
+
+export type OutlineKind =
+  | 'letter'
+  | 'legal_id'
+  | 'auth'
+  | 'quote'
+  | 'biz_dev'
+  | 'tech_dev'
+  | 'commitment_copy'
+  | 'scan'
+  | 'performance'
+  | 'factory'
+  | 'tech_plan'
+  | 'company'
+  | 'unknown'
+
+export type OutlineSource = 'generate' | 'copy' | 'skip'
+
+export type OutlineItem = {
+  id: string
+  title: string
+  kind: OutlineKind | string
+  source: OutlineSource | string
+  required: boolean
+  skipped: boolean
+  body?: string
+}
+
+export type DocumentFormat = {
+  specified: boolean
+  notes: string[]
+  marginLeftCm: number
+  marginRightCm: number
+  marginTopCm: number
+  marginBottomCm: number
+  fontName: string
+  bodySizePt: number
+  headingSizePt: number
+  coverTitleSizePt: number
+  coverDocSizePt: number
+  tocTitleSizePt: number
+  tocItemSizePt: number
+  coverRequired: boolean
+  coverShowProject: boolean
+  coverShowTenderNo: boolean
+  coverShowBidder: boolean
+  coverShowCopyMark: boolean
+  coverCopyMark: string
+  coverShowDate: boolean
+  coverNeedSeal: boolean
+  tocNumbering: string
+  tocNeedPageNos: boolean
+  pageNumberPos: string
+  pageNumberStart: string
 }
 
 export type BidBrief = {
@@ -72,6 +239,7 @@ export type BidBrief = {
   settlementPct: number
   warrantyPct: number
   bidDate: string
+  tenderNo: string
   bidderName: string
   bidderNature: string
   bidderAddress: string
@@ -104,14 +272,24 @@ export type BidBrief = {
   quoteSourceIncTax: number
   quoteSource: string
   quoteLines: QuoteLineIn[]
+  quoteHeaders: string[]
+  quoteRoles: string[]
   deviationLines: DeviationLine[]
+  bizDevHeaders: string[]
+  techDevHeaders: string[]
   performanceLines: PerformanceLine[]
+  performanceRequirement: PerformanceRequirement
   constructionPlan: string
   layoutPlan: string
   powerPlan: string
   omPlan: string
   schedulePlan: string
   techPlanNote: string
+  layoutMode: string
+  outlineChapter: string
+  outlineItems: OutlineItem[]
+  documentFormat: DocumentFormat
+  invitationId?: string
 }
 
 export type QualificationStatus = {
@@ -120,9 +298,26 @@ export type QualificationStatus = {
   sizeBytes: number
 }
 
+export type Chapter5TemplateStatus = {
+  source: 'custom' | 'bundled' | 'missing' | string
+  custom: boolean
+  found: boolean
+  sizeBytes: number
+  label: string
+}
+
+export type TenderDocPreview = 'browser' | 'onlyoffice' | 'yozo'
+
+export function isOnlineDocEditor(engine?: string | null): engine is 'onlyoffice' | 'yozo' {
+  const value = String(engine || '').toLowerCase()
+  return value === 'onlyoffice' || value === 'yozo'
+}
+
 export type TenderDefaults = BidBrief & {
   qualification: QualificationStatus
   slots: SlotStatus[]
+  chapter5Template?: Chapter5TemplateStatus
+  docPreview?: TenderDocPreview | string
 }
 
 export type AttachmentMatchItem = {
@@ -137,6 +332,51 @@ export type AttachmentMatch = {
   matched: AttachmentMatchItem[]
   missingFiles: AttachmentMatchItem[]
   createdItems: AttachmentMatchItem[]
+}
+
+export type QaSeverity = 'disqualify' | 'deduct' | 'suggest' | string
+
+export type QaCategory =
+  | 'outline'
+  | 'qualification'
+  | 'commercial'
+  | 'technical'
+  | 'quote'
+  | 'format'
+  | 'other'
+  | string
+
+export type QaGap = {
+  title: string
+  reason: string
+  severity: QaSeverity
+  category: QaCategory
+  source?: string
+}
+
+export type QaCoverageBucket = {
+  found: number
+  total: number
+  score: number
+}
+
+export type QaReport = {
+  recordId: string
+  docxFile?: string
+  similarityScore: number
+  ruleScore: number
+  llmScore: number | null
+  grade: 'good' | 'fair' | 'risk' | string
+  gradeLabel: string
+  summary: string
+  invitationChars: number
+  bidChars: number
+  hasInvitation: boolean
+  llmUsed: boolean
+  coverage: Record<string, QaCoverageBucket>
+  missing: QaGap[]
+  checkedAt?: number
+  stale?: boolean
 }
 
 export type GenerateResult = {
@@ -155,6 +395,27 @@ export type GenerateResult = {
   docxAvailable?: boolean
   pdfAvailable?: boolean
   attachmentMatch?: AttachmentMatch
+  status?: string
+  deadline?: string
+  projectType?: string
+  currentStep?: string
+  submittedAt?: number | null
+  decidedAt?: number | null
+  workflowLocked?: boolean
+  userId?: number
+  lastAction?: string
+  lastComment?: string
+  lastActor?: string
+  approvalLogs?: TenderApprovalLogItem[]
+}
+
+export type TenderApprovalLogItem = {
+  id: number
+  action: string
+  step: string
+  comment: string
+  username: string
+  createdAt: number
 }
 
 export type TenderRecordItem = {
@@ -173,10 +434,29 @@ export type TenderRecordItem = {
   docxAvailable: boolean
   pdfAvailable: boolean
   brief?: BidBrief
+  status?: string
+  deadline?: string
+  projectType?: string
+  currentStep?: string
+  submittedAt?: number | null
+  decidedAt?: number | null
+  workflowLocked?: boolean
+  userId?: number
+  lastAction?: string
+  lastComment?: string
+  lastActor?: string
+  approvalLogs?: TenderApprovalLogItem[]
+}
+
+export function isTenderWorkflowLocked(status?: string | null, locked?: boolean): boolean {
+  if (locked) return true
+  return Boolean(status && ['pending', 'approved', 'submitted', 'won', 'lost'].includes(status))
 }
 
 export type TenderEditorConfig = {
+  engine?: TenderDocPreview | string
   documentServerUrl: string
+  iframeUrl?: string
   config: Record<string, unknown>
 }
 
@@ -209,6 +489,23 @@ function token(): string {
 
 export async function fetchTenderDefaults(): Promise<TenderDefaults> {
   return apiRequest<TenderDefaults>('/api/v1/tenders/defaults', { token: token() })
+}
+
+export async function uploadTenderLayoutTemplate(file: File): Promise<Chapter5TemplateStatus> {
+  const form = new FormData()
+  form.append('file', file)
+  return apiRequest<Chapter5TemplateStatus>('/api/v1/tenders/layout-template', {
+    method: 'POST',
+    token: token(),
+    body: form,
+  })
+}
+
+export async function restoreTenderLayoutTemplate(): Promise<Chapter5TemplateStatus> {
+  return apiRequest<Chapter5TemplateStatus>('/api/v1/tenders/layout-template', {
+    method: 'DELETE',
+    token: token(),
+  })
 }
 
 const FILE_ID_RE = /^([a-f0-9]{10,16})\.(png|jpe?g|webp|gif|bmp|pdf)$/i
@@ -370,11 +667,21 @@ export async function fetchTenderRecords(params?: {
   q?: string
   limit?: number
   offset?: number
+  scope?: 'mine' | 'all'
+  status?: string
+  owner?: string
+  projectType?: string
+  approvalTab?: 'pending' | 'done' | 'mine'
 }): Promise<{ total: number; items: TenderRecordItem[] }> {
   const q = new URLSearchParams()
   if (params?.q) q.set('q', params.q)
   if (params?.limit != null) q.set('limit', String(params.limit))
   if (params?.offset != null) q.set('offset', String(params.offset))
+  if (params?.scope) q.set('scope', params.scope)
+  if (params?.status) q.set('status', params.status)
+  if (params?.owner) q.set('owner', params.owner)
+  if (params?.projectType) q.set('projectType', params.projectType)
+  if (params?.approvalTab) q.set('approvalTab', params.approvalTab)
   const qs = q.toString()
   return apiRequest(`/api/v1/tenders/records${qs ? `?${qs}` : ''}`, { token: token() })
 }
@@ -385,10 +692,57 @@ export async function fetchTenderRecord(recordId: string): Promise<TenderRecordI
   })
 }
 
-export async function regenerateTenderRecord(recordId: string): Promise<GenerateResult> {
+export async function inspectTenderQa(recordId: string): Promise<QaReport> {
+  return apiRequest<QaReport>(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
+export async function fetchTenderQa(recordId: string): Promise<{ report: QaReport | null }> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa`, {
+    token: token(),
+  })
+}
+
+export async function regenerateTenderRecord(
+  recordId: string,
+  brief?: BidBrief,
+): Promise<GenerateResult> {
   return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/regenerate`, {
     method: 'POST',
     token: token(),
+    body: brief,
+  })
+}
+
+export async function submitTenderRecord(recordId: string): Promise<TenderRecordItem> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/submit`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
+export async function decideTenderRecord(
+  recordId: string,
+  passed: boolean,
+  comment?: string,
+): Promise<TenderRecordItem> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/decide`, {
+    method: 'POST',
+    token: token(),
+    body: { passed, comment: comment || '' },
+  })
+}
+
+export async function markTenderRecord(
+  recordId: string,
+  status: 'submitted' | 'won' | 'lost',
+): Promise<TenderRecordItem> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/mark`, {
+    method: 'POST',
+    token: token(),
+    body: { status },
   })
 }
 
@@ -397,6 +751,18 @@ export async function deleteTenderRecord(
 ): Promise<{ deleted: boolean; id: string; removedFiles: string[] }> {
   return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}`, {
     method: 'DELETE',
+    token: token(),
+  })
+}
+
+export async function clearMineTenderRecords(): Promise<{
+  deleted: number
+  skipped: number
+  ids: string[]
+  removedFiles: string[]
+}> {
+  return apiRequest('/api/v1/tenders/records/clear-mine', {
+    method: 'POST',
     token: token(),
   })
 }
@@ -423,4 +789,8 @@ export async function downloadTenderFile(fileName: string, downloadName: string)
     token: token(),
     fallbackName: downloadName,
   })
+}
+
+export async function fetchTenderDocxBlob(fileName: string): Promise<Blob> {
+  return apiFetchBlob(`/api/v1/tenders/files/${encodeURIComponent(fileName)}`, { token: token() })
 }
