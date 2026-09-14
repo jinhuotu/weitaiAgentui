@@ -6,6 +6,7 @@ import {
   fetchTenderRecords,
   markTenderRecord,
   submitTenderRecord,
+  type ApprovalStepDef,
   type TenderRecordItem,
 } from '@/lib/tenders-api'
 import { apiTimeMs } from '@/lib/time'
@@ -47,6 +48,31 @@ export type ProjectType = (typeof PROJECT_TYPES)[number]
 
 export const APPROVAL_STEPS = ['提交申请', '部门经理审批', '总经理审批', '财务审核', '完成'] as const
 
+export const DEFAULT_APPROVAL_FLOW: ApprovalStepDef[] = [
+  { key: 'submit', name: '提交申请', kind: 'start' },
+  { key: 'review_dept', name: '部门经理审批', kind: 'review' },
+  { key: 'review_gm', name: '总经理审批', kind: 'review' },
+  { key: 'review_finance', name: '财务审核', kind: 'review' },
+  { key: 'done', name: '完成', kind: 'end' },
+]
+
+export function approvalStepLabels(steps: ApprovalStepDef[] | readonly string[] | undefined): string[] {
+  if (!steps?.length) return [...APPROVAL_STEPS]
+  if (typeof steps[0] === 'string') return [...(steps as readonly string[])]
+  return (steps as ApprovalStepDef[]).map((item) => item.name)
+}
+
+export function stepsForTask(
+  task: { approvalSteps?: ApprovalStepDef[] | null; status?: string } | null | undefined,
+  fallback?: ApprovalStepDef[] | null,
+): ApprovalStepDef[] {
+  if (task?.approvalSteps?.length) return task.approvalSteps
+  if (fallback?.length) return fallback
+  return DEFAULT_APPROVAL_FLOW
+}
+
+export type ApprovalResult = 'passed' | 'rejected' | null
+
 export const TIME_RANGES = [
   { value: 'all', label: '全部时间' },
   { value: 'week', label: '近一周' },
@@ -56,8 +82,6 @@ export const TIME_RANGES = [
 ] as const
 
 export type TimeRange = (typeof TIME_RANGES)[number]['value']
-
-export type ApprovalResult = 'passed' | 'rejected' | null
 
 export type TenderTask = {
   id: string
@@ -72,6 +96,8 @@ export type TenderTask = {
   status: TaskStatus
   createdAt: number
   currentStep: string
+  currentStepKey: string
+  approvalSteps: ApprovalStepDef[]
   initiator: string
   initiatedAt: string
   approvalResult: ApprovalResult
@@ -113,6 +139,8 @@ export function recordToTask(item: TenderRecordItem): TenderTask {
     status,
     createdAt: item.createdAt || 0,
     currentStep: item.currentStep || '',
+    currentStepKey: item.currentStepKey || item.currentStep || '',
+    approvalSteps: item.approvalSteps || [],
     initiator: item.username || '',
     initiatedAt: formatDay(item.submittedAt),
     approvalResult,
@@ -150,9 +178,14 @@ export function matchTimeRange(task: TenderTask, range: TimeRange): boolean {
   return (task.createdAt || 0) >= start
 }
 
-export function stepIndex(step: string): number {
-  const i = APPROVAL_STEPS.indexOf(step as (typeof APPROVAL_STEPS)[number])
+export function stepIndex(step: string, steps?: ApprovalStepDef[] | readonly string[]): number {
+  const labels = approvalStepLabels(steps)
+  const i = labels.indexOf(step)
   if (i >= 0) return i
+  if (steps && typeof steps[0] !== 'string') {
+    const keyed = (steps as ApprovalStepDef[]).findIndex((item) => item.key === step)
+    if (keyed >= 0) return keyed
+  }
   return 0
 }
 

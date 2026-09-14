@@ -6,6 +6,7 @@ import { getApiBaseUrl } from '@/lib/api'
 
 export type LayoutAttachment = {
   fileName: string
+  downloadName?: string
   kind?: string
   label?: string
 }
@@ -36,7 +37,7 @@ async function downloadOne(file: LayoutAttachment) {
     const a = document.createElement('a')
     const obj = URL.createObjectURL(blob)
     a.href = obj
-    a.download = name
+    a.download = file.downloadName || name.replace(/-[a-f0-9]{8}(\.(svg|dxf))$/i, '$1')
     a.rel = 'noopener'
     document.body.appendChild(a)
     a.click()

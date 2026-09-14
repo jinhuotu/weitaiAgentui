@@ -1,22 +1,33 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { Pencil, Plus, Trash2 } from 'lucide-vue-next'
 import { PageHeader, Panel } from '@/components/ui-kit'
 import AppDialog from '@/components/ui/AppDialog.vue'
 import ApprovalSteps from '@/components/tenders/ApprovalSteps.vue'
 import TenderDocPreviewDialog from '@/components/tenders/TenderDocPreviewDialog.vue'
+import { ApiError } from '@/lib/api'
 import {
-  APPROVAL_STEPS,
   formatBudget,
   stepIndex,
+  stepsForTask,
   useTenderTasks,
   type TenderTask,
 } from '@/lib/tender-tasks'
+import {
+  fetchApprovalFlow,
+  saveApprovalFlow,
+  type ApprovalReviewInput,
+  type ApprovalStepDef,
+} from '@/lib/tenders-api'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth'
 
 type TabKey = 'pending' | 'done' | 'mine'
+type DraftReview = { key: string; name: string; roleCode: string }
 
 const router = useRouter()
+const auth = useAuthStore()
 const {
   pendingApprovals,
   doneApprovals,
@@ -32,23 +43,16 @@ const preview = ref<TenderTask | null>(null)
 const current = ref<TenderTask | null>(null)
 const comment = ref('')
 const toast = ref('')
+const flowSteps = ref<ApprovalStepDef[]>([])
+const flowRoles = ref<{ code: string; name: string }[]>([])
+const editorOpen = ref(false)
+const editorSaving = ref(false)
+const editorError = ref('')
+const drafts = ref<DraftReview[]>([])
 
-const exampleTask = computed(
-  () =>
-    pendingApprovals.value[0] ||
-    doneApprovals.value[0] ||
-    myApprovals.value[0] ||
-    null,
-)
+const isSuperuser = computed(() => Boolean(auth.user?.is_superuser))
 
-const exampleIndex = computed(() => {
-  const t = exampleTask.value
-  if (!t) return 2
-  if (t.status === 'approved' || t.status === 'submitted' || t.status === 'won') {
-    return APPROVAL_STEPS.length - 1
-  }
-  return stepIndex(t.currentStep || '总经理审批')
-})
+const exampleIndex = computed(() => -1)
 
 const rows = computed(() => {
   if (tab.value === 'pending') return pendingApprovals.value
@@ -60,8 +64,88 @@ const tabTitle = computed(() =>
   tab.value === 'pending' ? '待我审批' : tab.value === 'done' ? '我已审批' : '我发起的',
 )
 
+function taskSteps(task: TenderTask | null): ApprovalStepDef[] {
+  return stepsForTask(task, flowSteps.value)
+}
+
+async function loadFlow() {
+  try {
+    const payload = await fetchApprovalFlow()
+    flowSteps.value = payload.steps || []
+    flowRoles.value = (payload.roles || []).map((item) => ({
+      code: item.code,
+      name: item.name,
+    }))
+  } catch (err) {
+    toast.value = err instanceof ApiError || err instanceof Error ? err.message : '加载审批流程失败'
+  }
+}
+
+function openEditor() {
+  const reviews = flowSteps.value.filter((item) => item.kind === 'review')
+  drafts.value = (reviews.length ? reviews : flowSteps.value.slice(1, -1)).map((item) => ({
+    key: item.key,
+    name: item.name,
+    roleCode: item.roleCode || '',
+  }))
+  if (!drafts.value.length) {
+    drafts.value = [{ key: '', name: '审批', roleCode: '' }]
+  }
+  editorError.value = ''
+  editorOpen.value = true
+}
+
+function addDraft() {
+  drafts.value.push({ key: '', name: '', roleCode: '' })
+}
+
+function removeDraft(index: number) {
+  if (drafts.value.length <= 1) return
+  drafts.value.splice(index, 1)
+}
+
+function moveDraft(index: number, delta: number) {
+  const next = index + delta
+  if (next < 0 || next >= drafts.value.length) return
+  const copy = drafts.value.slice()
+  const [item] = copy.splice(index, 1)
+  if (!item) return
+  copy.splice(next, 0, item)
+  drafts.value = copy
+}
+
+async function saveEditor() {
+  const reviews: ApprovalReviewInput[] = drafts.value
+    .map((item) => ({
+      key: item.key || undefined,
+      name: item.name.trim(),
+      roleCode: item.roleCode.trim() || null,
+    }))
+    .filter((item) => item.name)
+  if (!reviews.length) {
+    editorError.value = '至少保留一个审批环节'
+    return
+  }
+  editorSaving.value = true
+  editorError.value = ''
+  try {
+    const payload = await saveApprovalFlow(reviews)
+    flowSteps.value = payload.steps || []
+    editorOpen.value = false
+    toast.value = '审批流程已保存。新提交的任务将按新流程执行。'
+  } catch (err) {
+    editorError.value = err instanceof ApiError || err instanceof Error ? err.message : '保存失败'
+  } finally {
+    editorSaving.value = false
+  }
+  window.setTimeout(() => {
+    toast.value = ''
+  }, 2400)
+}
+
 onMounted(() => {
   void load('approval')
+  void loadFlow()
 })
 
 function openView(task: TenderTask) {
@@ -112,8 +196,15 @@ function resultLabel(task: TenderTask) {
 <template>
   <PageHeader
     title="审批流程"
-    description="处理待审批的投标任务，查看已审批记录与本人发起的申请。"
-  />
+    description="处理待自己审批的投标任务；流程环节由超级管理员配置，并绑定「用户与权限」中的角色。"
+  >
+    <template v-if="isSuperuser" #actions>
+      <button type="button" class="kb-btn-primary h-8 px-3 text-xs inline-flex items-center gap-1.5" @click="openEditor">
+        <Pencil class="size-3.5" />
+        配置流程
+      </button>
+    </template>
+  </PageHeader>
 
   <p v-if="error" class="mb-4 text-xs text-iron">{{ error }}</p>
   <p v-if="toast" class="mb-4 text-xs text-patina">{{ toast }}</p>
@@ -162,11 +253,15 @@ function resultLabel(task: TenderTask) {
     </button>
   </div>
 
-  <Panel
-    class="mb-5"
-    :title="exampleTask ? `审批流程示例 · ${exampleTask.projectName}` : '审批流程示例'"
-  >
-    <ApprovalSteps :steps="APPROVAL_STEPS" :current="exampleIndex" />
+  <Panel class="mb-5" title="当前审批流程">
+    <p class="mb-3 text-[11px] text-muted-foreground">
+      未绑定角色的环节，拥有审批菜单的用户均可处理；绑定后仅该角色与超级管理员可审。已在途任务沿用提交时的流程。
+    </p>
+    <ApprovalSteps
+      :steps="flowSteps.length ? flowSteps : ['提交申请', '部门经理审批', '总经理审批', '财务审核', '完成']"
+      :current="exampleIndex"
+      show-roles
+    />
   </Panel>
 
   <Panel :title="tabTitle" :subtitle="`共 ${rows.length} 条`" flush>
@@ -278,8 +373,13 @@ function resultLabel(task: TenderTask) {
         <div class="text-[11px] text-muted-foreground mb-1">审批流程</div>
         <ApprovalSteps
           compact
-          :steps="APPROVAL_STEPS"
-          :current="stepIndex(current.currentStep || '部门经理审批')"
+          show-roles
+          :steps="taskSteps(current)"
+          :current="
+            current.status === 'approved' || current.status === 'submitted' || current.status === 'won'
+              ? Math.max(taskSteps(current).length - 1, 0)
+              : stepIndex(current.currentStepKey || current.currentStep, taskSteps(current))
+          "
         />
       </div>
       <label class="block">
@@ -306,6 +406,87 @@ function resultLabel(task: TenderTask) {
         @click="decide(true)"
       >
         通过
+      </button>
+    </template>
+  </AppDialog>
+
+  <AppDialog
+    :open="editorOpen"
+    title="配置审批流程"
+    description="「提交申请」与「完成」为系统节点。中间审批环节可增删改顺序，并绑定用户与权限中的角色。"
+    wide
+    @update:open="(v) => !v && (editorOpen = false)"
+  >
+    <div class="space-y-3">
+      <p v-if="editorError" class="text-xs text-iron">{{ editorError }}</p>
+      <div
+        v-for="(item, index) in drafts"
+        :key="`${item.key || 'new'}-${index}`"
+        class="flex flex-wrap items-end gap-2 rounded-md border border-border px-3 py-2.5"
+      >
+        <div class="text-[11px] text-muted-foreground w-8 shrink-0 pb-2">{{ index + 1 }}</div>
+        <label class="min-w-[10rem] flex-1">
+          <div class="mb-1 text-[11px] text-muted-foreground">环节名称</div>
+          <input
+            v-model="item.name"
+            class="h-8 w-full rounded-md border border-border bg-background px-2 text-xs"
+            maxlength="16"
+            placeholder="例如：部门经理审批"
+          />
+        </label>
+        <label class="min-w-[10rem] flex-1">
+          <div class="mb-1 text-[11px] text-muted-foreground">审批角色</div>
+          <select
+            v-model="item.roleCode"
+            class="h-8 w-full rounded-md border border-border bg-background px-2 text-xs"
+          >
+            <option value="">不绑定（有审批菜单即可）</option>
+            <option v-for="role in flowRoles" :key="role.code" :value="role.code">
+              {{ role.name }}
+            </option>
+          </select>
+        </label>
+        <div class="flex items-center gap-1 pb-0.5">
+          <button type="button" class="h-8 px-2 text-[11px] rounded-md border border-border" @click="moveDraft(index, -1)">
+            上移
+          </button>
+          <button type="button" class="h-8 px-2 text-[11px] rounded-md border border-border" @click="moveDraft(index, 1)">
+            下移
+          </button>
+          <button
+            type="button"
+            class="inline-flex size-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:text-iron"
+            :disabled="drafts.length <= 1"
+            @click="removeDraft(index)"
+          >
+            <Trash2 class="size-3.5" />
+          </button>
+        </div>
+      </div>
+      <button
+        type="button"
+        class="inline-flex h-8 items-center gap-1.5 rounded-md border border-dashed border-border px-3 text-xs text-muted-foreground hover:text-foreground"
+        @click="addDraft"
+      >
+        <Plus class="size-3.5" />
+        添加审批环节
+      </button>
+    </div>
+    <template #footer>
+      <button
+        type="button"
+        class="h-8 px-3 text-xs rounded-md border border-border"
+        @click="editorOpen = false"
+      >
+        取消
+      </button>
+      <button
+        type="button"
+        class="kb-btn-primary h-8 px-3 text-xs"
+        :disabled="editorSaving"
+        @click="saveEditor"
+      >
+        {{ editorSaving ? '保存中…' : '保存流程' }}
       </button>
     </template>
   </AppDialog>

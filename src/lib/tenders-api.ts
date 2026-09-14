@@ -379,6 +379,28 @@ export type QaReport = {
   stale?: boolean
 }
 
+export type ApprovalStepDef = {
+  key: string
+  name: string
+  kind?: string
+  roleCode?: string | null
+  roleName?: string | null
+}
+
+export type ApprovalFlowPayload = {
+  code: string
+  canEdit: boolean
+  steps: ApprovalStepDef[]
+  updatedAt?: number | null
+  roles?: { id: number; code: string; name: string; description: string | null }[]
+}
+
+export type ApprovalReviewInput = {
+  key?: string | null
+  name: string
+  roleCode?: string | null
+}
+
 export type GenerateResult = {
   id?: string
   projectName?: string
@@ -399,6 +421,8 @@ export type GenerateResult = {
   deadline?: string
   projectType?: string
   currentStep?: string
+  currentStepKey?: string
+  approvalSteps?: ApprovalStepDef[] | null
   submittedAt?: number | null
   decidedAt?: number | null
   workflowLocked?: boolean
@@ -438,6 +462,8 @@ export type TenderRecordItem = {
   deadline?: string
   projectType?: string
   currentStep?: string
+  currentStepKey?: string
+  approvalSteps?: ApprovalStepDef[] | null
   submittedAt?: number | null
   decidedAt?: number | null
   workflowLocked?: boolean
@@ -684,6 +710,18 @@ export async function fetchTenderRecords(params?: {
   if (params?.approvalTab) q.set('approvalTab', params.approvalTab)
   const qs = q.toString()
   return apiRequest(`/api/v1/tenders/records${qs ? `?${qs}` : ''}`, { token: token() })
+}
+
+export async function fetchApprovalFlow(): Promise<ApprovalFlowPayload> {
+  return apiRequest('/api/v1/tenders/approval-flow', { token: token() })
+}
+
+export async function saveApprovalFlow(reviews: ApprovalReviewInput[]): Promise<ApprovalFlowPayload> {
+  return apiRequest('/api/v1/tenders/approval-flow', {
+    method: 'PUT',
+    token: token(),
+    body: { reviews },
+  })
 }
 
 export async function fetchTenderRecord(recordId: string): Promise<TenderRecordItem> {

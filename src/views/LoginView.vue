@@ -6,6 +6,11 @@ import { ApiError } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import weitaiBg from '@/assets/weitai.png'
 
+const APP_NAME = '优祺智能'
+const APP_VERSION = 'V1.23.0'
+const COMPANY_NAME = '河南优祺计算机科技有限公司'
+const COPYRIGHT_YEAR = 2026
+
 const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
@@ -107,6 +112,11 @@ async function onSubmit() {
         </form>
       </section>
     </div>
+
+    <footer class="login-footer">
+      技术支持：{{ COMPANY_NAME }}
+      ©{{ COPYRIGHT_YEAR }} {{ APP_NAME }} {{ APP_VERSION }}
+    </footer>
   </div>
 </template>
 
@@ -137,6 +147,22 @@ async function onSubmit() {
   align-items: center;
   justify-content: flex-end;
   padding: clamp(1rem, 3vw, 2.5rem);
+  padding-bottom: 3.25rem;
+}
+
+.login-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 0.65rem 1rem 0.9rem;
+  text-align: center;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: #6b7280;
+  white-space: nowrap;
 }
 
 .login-panel {
@@ -298,7 +324,7 @@ async function onSubmit() {
   .login-stage {
     justify-content: center;
     align-items: flex-end;
-    padding: 1rem 1rem 1.5rem;
+    padding: 1rem 1rem 3.75rem;
   }
 
   .login-panel {
@@ -321,6 +347,11 @@ async function onSubmit() {
 
   .login-panel {
     width: 100%;
+  }
+
+  .login-footer {
+    font-size: 0.6875rem;
+    padding-inline: 0.5rem;
   }
 }
 </style>

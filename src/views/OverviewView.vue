@@ -5,11 +5,13 @@ import { ChevronRight, Ellipsis, FileText, Loader2, X } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import { fetchTenderRecords, type TenderRecordItem } from '@/lib/tenders-api'
 import { fmtAgo } from '@/lib/time'
-import { useAuthStore } from '@/stores/auth'
-import { NAV_GROUPS, NAV_ITEM_DESC, filterNavGroups, getMoreNavItems, getPrimaryNavItems } from '@/config/nav'
+import { NAV_ITEM_DESC } from '@/config/nav'
+import { useNavDragReorder } from '@/composables/useNavDragReorder'
+import { useOrderedPrimaryNav } from '@/composables/useOrderedPrimaryNav'
 
 const router = useRouter()
-const auth = useAuthStore()
+const { items: primaryItems, moreItems: moreNavItems, commitOrder } = useOrderedPrimaryNav()
+const navDrag = useNavDragReorder(primaryItems, commitOrder)
 
 const loading = ref(true)
 const error = ref('')
@@ -23,14 +25,14 @@ const tenderError = ref('')
 const moreOpen = ref(false)
 
 const visiblePrimary = computed(() =>
-  getPrimaryNavItems(filterNavGroups(NAV_GROUPS, auth.isAdmin, auth.menus)).map((it) => ({
+  primaryItems.value.map((it) => ({
     ...it,
     desc: NAV_ITEM_DESC[it.href] || '',
   })),
 )
 
 const moreItems = computed(() =>
-  getMoreNavItems(filterNavGroups(NAV_GROUPS, auth.isAdmin, auth.menus)).map((it) => ({
+  moreNavItems.value.map((it) => ({
     ...it,
     desc: NAV_ITEM_DESC[it.href] || '',
   })),
@@ -190,24 +192,38 @@ onUnmounted(() => {
       <div class="mb-4 flex items-end justify-between gap-3">
         <div>
           <h2 class="text-[15px] font-semibold tracking-wide">常用功能</h2>
-          <p class="mt-0.5 text-[12px] text-muted-foreground">点击图标进入对应模块</p>
+          <p class="mt-0.5 text-[12px] text-muted-foreground">拖拽可调整顺序，点击进入对应模块</p>
         </div>
       </div>
 
       <div class="primary-grid">
-        <button
-          v-for="item in visiblePrimary"
+        <div
+          v-for="(item, index) in visiblePrimary"
           :key="item.href"
-          type="button"
-          class="primary-tile"
-          @click="openModule(item.href, item.label)"
+          class="primary-sort"
+          :class="navDrag.itemClass(index)"
+          draggable="true"
+          title="拖拽调整顺序"
+          @dragstart="navDrag.onDragStart(index, $event)"
+          @dragover="navDrag.onDragOver(index, $event)"
+          @dragenter="navDrag.onDragOver(index, $event)"
+          @drop="navDrag.onDrop(index, $event)"
+          @dragend="navDrag.onDragEnd"
         >
-          <span class="primary-tile__icon">
-            <component :is="item.icon" class="size-8" />
-          </span>
-          <span class="primary-tile__label">{{ item.label }}</span>
-          <span class="primary-tile__desc">{{ item.desc }}</span>
-        </button>
+          <button
+            type="button"
+            class="primary-tile"
+            draggable="false"
+            @click.capture="navDrag.onClickCapture"
+            @click="openModule(item.href, item.label)"
+          >
+            <span class="primary-tile__icon">
+              <component :is="item.icon" class="size-8" />
+            </span>
+            <span class="primary-tile__label">{{ item.label }}</span>
+            <span class="primary-tile__desc">{{ item.desc }}</span>
+          </button>
+        </div>
 
         <div v-if="moreItems.length" data-more-menu class="primary-more">
           <button
@@ -338,13 +354,15 @@ onUnmounted(() => {
 .portal-stat {
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 0.15rem;
   padding: 0.7rem 0.8rem;
   border-radius: 0.65rem;
   border: 1px solid color-mix(in srgb, var(--hairline, hsl(var(--border))) 80%, transparent);
   background: color-mix(in srgb, hsl(var(--background)) 55%, transparent);
   color: inherit;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -495,6 +513,23 @@ onUnmounted(() => {
   position: relative;
 }
 
+.primary-sort {
+  min-width: 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.primary-sort.is-dragging {
+  opacity: 0.42;
+  cursor: grabbing;
+}
+
+.primary-sort.is-over .primary-tile {
+  border-color: color-mix(in srgb, var(--accent-iron, #2563eb) 70%, hsl(var(--border)));
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent-iron, #2563eb) 10%, hsl(var(--card)));
+}
+
 .primary-tile {
   display: flex;
   flex-direction: column;
@@ -509,7 +544,8 @@ onUnmounted(() => {
   border: 1px solid var(--hairline, hsl(var(--border)));
   background: hsl(var(--card));
   color: inherit;
-  cursor: pointer;
+  cursor: inherit;
+  user-select: none;
   transition:
     border-color 0.15s ease,
     background 0.15s ease,
@@ -523,6 +559,17 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--accent-iron, #2563eb) 6%, hsl(var(--card)));
   box-shadow: 0 10px 28px color-mix(in srgb, var(--accent-iron, #2563eb) 12%, transparent);
   transform: translateY(-2px);
+}
+
+.primary-sort.is-dragging .primary-tile,
+.primary-sort.is-dragging .primary-tile:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.primary-tile--more,
+.primary-tile--more:hover {
+  cursor: pointer;
 }
 
 .primary-tile__icon {

@@ -135,7 +135,7 @@ export function flattenNavItems(groups: NavGroup[] = NAV_GROUPS): NavItem[] {
   )
 }
 
-/** 侧栏 / 工作台常显业务入口（顺序固定）；未列入的归入「更多」 */
+/** 侧栏 / 工作台常显业务入口默认顺序；未列入的归入「更多」 */
 export const PRIMARY_NAV_HREFS = [
   '/ai-chat',
   '/work-tasks',
@@ -170,6 +170,28 @@ export function getPrimaryNavItems(groups: NavGroup[]): NavItem[] {
   return PRIMARY_NAV_HREFS.map((href) => byHref.get(href)).filter(
     (it): it is NavItem => Boolean(it),
   )
+}
+
+/** 按用户保存的 href 顺序排列；未知项忽略，目录新增项追加到末尾 */
+export function applyNavOrder<T extends { href: string }>(
+  items: T[],
+  order: readonly string[] | null | undefined,
+): T[] {
+  if (!order?.length) return items
+  const byHref = new Map(items.map((it) => [it.href, it]))
+  const seen = new Set<string>()
+  const result: T[] = []
+  for (const href of order) {
+    const it = byHref.get(href)
+    if (it) {
+      result.push(it)
+      seen.add(href)
+    }
+  }
+  for (const it of items) {
+    if (!seen.has(it.href)) result.push(it)
+  }
+  return result
 }
 
 export function getMoreNavItems(groups: NavGroup[]): NavItem[] {

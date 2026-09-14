@@ -1,16 +1,32 @@
 <script setup lang="ts">
 import { Check } from 'lucide-vue-next'
+import type { ApprovalStepDef } from '@/lib/tenders-api'
 
 const props = withDefaults(
   defineProps<{
-    steps: readonly string[]
+    steps: readonly string[] | ApprovalStepDef[]
     current: number
     compact?: boolean
+    showRoles?: boolean
   }>(),
-  { compact: false },
+  { compact: false, showRoles: false },
 )
 
+function labelOf(step: string | ApprovalStepDef): string {
+  return typeof step === 'string' ? step : step.name
+}
+
+function roleOf(step: string | ApprovalStepDef): string {
+  if (typeof step === 'string') return ''
+  return step.roleName || ''
+}
+
+function keyOf(step: string | ApprovalStepDef, index: number): string {
+  return typeof step === 'string' ? `${step}-${index}` : step.key || `${step.name}-${index}`
+}
+
 function stateOf(i: number): 'done' | 'active' | 'todo' {
+  if (props.current < 0) return 'todo'
   if (i < props.current) return 'done'
   if (i === props.current) return 'active'
   return 'todo'
@@ -20,8 +36,8 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
 <template>
   <ol class="approval-steps" :class="compact ? 'approval-steps--compact' : ''">
     <li
-      v-for="(label, i) in steps"
-      :key="label"
+      v-for="(step, i) in steps"
+      :key="keyOf(step, i)"
       class="approval-step"
       :class="`approval-step--${stateOf(i)}`"
     >
@@ -36,7 +52,10 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
           :class="stateOf(i) === 'done' ? 'approval-step__line--done' : ''"
         />
       </div>
-      <div class="approval-step__label">{{ label }}</div>
+      <div class="approval-step__label">{{ labelOf(step) }}</div>
+      <div v-if="showRoles && roleOf(step)" class="approval-step__role">
+        {{ roleOf(step) }}
+      </div>
     </li>
   </ol>
 </template>
@@ -139,5 +158,13 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
 .approval-step--active .approval-step__label {
   color: hsl(var(--foreground));
   font-weight: 600;
+}
+
+.approval-step__role {
+  margin-top: 0.15rem;
+  font-size: 0.625rem;
+  line-height: 1.3;
+  color: hsl(var(--muted-foreground));
+  text-align: center;
 }
 </style>

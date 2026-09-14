@@ -2,35 +2,22 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Bot, Check, ChevronDown, Ellipsis, Plus, X } from 'lucide-vue-next'
-import {
-  NAV_GROUPS,
-  NAV_ITEM_DESC,
-  filterNavGroups,
-  getMoreNavItems,
-  getPrimaryNavItems,
-  type NavItem,
-} from '@/config/nav'
+import { NAV_ITEM_DESC, type NavItem } from '@/config/nav'
+import { useNavDragReorder } from '@/composables/useNavDragReorder'
+import { useOrderedPrimaryNav } from '@/composables/useOrderedPrimaryNav'
 import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/stores/auth'
 import { useMobileMenuStore } from '@/stores/mobile-menu'
 
 const route = useRoute()
-const auth = useAuthStore()
 const mobileMenu = useMobileMenuStore()
-
-const navGroups = computed(() =>
-  filterNavGroups(NAV_GROUPS, auth.isAdmin, auth.menus),
-)
+const { items: primaryItems, moreItems, groups: navGroups, commitOrder } = useOrderedPrimaryNav()
+const navDrag = useNavDragReorder(primaryItems, commitOrder)
 
 const overviewItem = computed(() =>
   navGroups.value
     .flatMap((g) => g.items || [])
     .find((it) => it.href === '/'),
 )
-
-const primaryItems = computed(() => getPrimaryNavItems(navGroups.value))
-
-const moreItems = computed(() => getMoreNavItems(navGroups.value))
 
 const moreOpen = ref(false)
 
@@ -136,33 +123,47 @@ onUnmounted(() => {
       <section class="shell-nav-group">
         <h2 class="shell-nav-group__title">AI 智控</h2>
         <div class="space-y-2">
-          <RouterLink
-            v-for="item in primaryItems"
+          <div
+            v-for="(item, index) in primaryItems"
             :key="item.href"
-            :to="item.href"
-            :class="
-              cn(
-                'shell-nav-card',
-                isItemActive(item, route.path) && 'shell-nav-card--active',
-              )
-            "
+            class="shell-nav-sort"
+            :class="navDrag.itemClass(index)"
+            draggable="true"
+            title="拖拽调整顺序"
+            @dragstart="navDrag.onDragStart(index, $event)"
+            @dragover="navDrag.onDragOver(index, $event)"
+            @dragenter="navDrag.onDragOver(index, $event)"
+            @drop="navDrag.onDrop(index, $event)"
+            @dragend="navDrag.onDragEnd"
           >
-            <span class="shell-nav-card__icon">
-              <component :is="item.icon" class="size-4" />
-            </span>
-            <span class="min-w-0 flex-1">
-              <span class="block truncate text-[13px] font-semibold text-slate-900">
-                {{ item.label }}
+            <RouterLink
+              :to="item.href"
+              draggable="false"
+              :class="
+                cn(
+                  'shell-nav-card',
+                  isItemActive(item, route.path) && 'shell-nav-card--active',
+                )
+              "
+              @click.capture="navDrag.onClickCapture"
+            >
+              <span class="shell-nav-card__icon">
+                <component :is="item.icon" class="size-4" />
               </span>
-              <span class="mt-0.5 block truncate text-[11px] text-slate-500">
-                {{ itemDesc(item) }}
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-[13px] font-semibold text-slate-900">
+                  {{ item.label }}
+                </span>
+                <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                  {{ itemDesc(item) }}
+                </span>
               </span>
-            </span>
-            <span class="shell-nav-card__action">
-              <Check v-if="isItemActive(item, route.path)" class="size-3.5" />
-              <Plus v-else class="size-3.5" />
-            </span>
-          </RouterLink>
+              <span class="shell-nav-card__action">
+                <Check v-if="isItemActive(item, route.path)" class="size-3.5" />
+                <Plus v-else class="size-3.5" />
+              </span>
+            </RouterLink>
+          </div>
 
           <div v-if="moreItems.length" data-sidebar-more class="shell-nav-more">
             <button
@@ -304,30 +305,44 @@ onUnmounted(() => {
           AI 智控
         </h2>
         <div class="space-y-2">
-          <RouterLink
-            v-for="item in primaryItems"
+          <div
+            v-for="(item, index) in primaryItems"
             :key="`m-${item.href}`"
-            :to="item.href"
-            :class="
-              cn(
-                'shell-nav-card',
-                isItemActive(item, route.path) && 'shell-nav-card--active',
-              )
-            "
-            @click="mobileMenu.close()"
+            class="shell-nav-sort"
+            :class="navDrag.itemClass(index)"
+            draggable="true"
+            title="拖拽调整顺序"
+            @dragstart="navDrag.onDragStart(index, $event)"
+            @dragover="navDrag.onDragOver(index, $event)"
+            @dragenter="navDrag.onDragOver(index, $event)"
+            @drop="navDrag.onDrop(index, $event)"
+            @dragend="navDrag.onDragEnd"
           >
-            <span class="shell-nav-card__icon">
-              <component :is="item.icon" class="size-4" />
-            </span>
-            <span class="min-w-0 flex-1">
-              <span class="block truncate text-[13px] font-semibold text-slate-900">
-                {{ item.label }}
+            <RouterLink
+              :to="item.href"
+              draggable="false"
+              :class="
+                cn(
+                  'shell-nav-card',
+                  isItemActive(item, route.path) && 'shell-nav-card--active',
+                )
+              "
+              @click.capture="navDrag.onClickCapture"
+              @click="mobileMenu.close()"
+            >
+              <span class="shell-nav-card__icon">
+                <component :is="item.icon" class="size-4" />
               </span>
-              <span class="mt-0.5 block truncate text-[11px] text-slate-500">
-                {{ itemDesc(item) }}
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-[13px] font-semibold text-slate-900">
+                  {{ item.label }}
+                </span>
+                <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                  {{ itemDesc(item) }}
+                </span>
               </span>
-            </span>
-          </RouterLink>
+            </RouterLink>
+          </div>
 
           <div v-if="moreItems.length" data-sidebar-more>
             <button
@@ -419,6 +434,26 @@ onUnmounted(() => {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgba(30, 58, 138, 0.62);
+}
+
+.shell-nav-sort {
+  cursor: grab;
+  user-select: none;
+}
+
+.shell-nav-sort .shell-nav-card {
+  cursor: inherit;
+}
+
+.shell-nav-sort.is-dragging {
+  opacity: 0.42;
+  cursor: grabbing;
+}
+
+.shell-nav-sort.is-over {
+  outline: 2px dashed rgba(37, 99, 235, 0.45);
+  outline-offset: 2px;
+  border-radius: 1rem;
 }
 
 .shell-nav-card {

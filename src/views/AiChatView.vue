@@ -216,6 +216,7 @@ function restoreSessionMessages(raw: ChatSessionMessage[]): Msg[] {
         .filter((a) => Boolean(a?.fileName))
         .map((a) => ({
           fileName: a.fileName,
+          downloadName: a.downloadName,
           kind: a.kind,
           label: a.label,
         })),
@@ -292,7 +293,7 @@ interface Msg {
   role: 'user' | 'assistant'
   content: string
   images?: { mimeType: string; dataUrl: string }[]
-  attachments?: { fileName: string; kind?: string; label?: string }[]
+  attachments?: { fileName: string; downloadName?: string; kind?: string; label?: string }[]
   refs?: RefChunk[]
   refsReady?: boolean
   related?: string[]
@@ -1007,10 +1008,16 @@ async function sendQuestion(text: string) {
                   }))
               : []
             const atts = Array.isArray(payload.layoutFiles)
-              ? (payload.layoutFiles as { fileName?: string; kind?: string; label?: string }[])
+              ? (payload.layoutFiles as {
+                  fileName?: string
+                  downloadName?: string
+                  kind?: string
+                  label?: string
+                }[])
                   .filter((x) => Boolean(x?.fileName))
                   .map((x) => ({
                     fileName: x.fileName as string,
+                    downloadName: x.downloadName,
                     kind: x.kind,
                     label: x.label,
                   }))

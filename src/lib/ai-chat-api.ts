@@ -46,6 +46,7 @@ export type ChatSessionMessage = {
   }[];
   attachments?: {
     fileName: string;
+    downloadName?: string;
     kind?: string;
     label?: string;
   }[];

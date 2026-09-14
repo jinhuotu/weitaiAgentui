@@ -7,9 +7,9 @@ import TenderDocEditor from '@/components/tenders/TenderDocEditor.vue'
 import TenderStatusTag from '@/components/tenders/TenderStatusTag.vue'
 import { ApiError } from '@/lib/api'
 import {
-  APPROVAL_STEPS,
   formatBudget,
   stepIndex,
+  stepsForTask,
   type TenderTask,
 } from '@/lib/tender-tasks'
 import {
@@ -33,10 +33,15 @@ const error = ref('')
 const downloading = ref(false)
 const layoutTick = ref(0)
 
-const approvalCurrent = (task: TenderTask) =>
-  task.status === 'approved' || task.status === 'submitted' || task.status === 'won'
-    ? APPROVAL_STEPS.length - 1
-    : stepIndex(task.currentStep || '提交申请')
+const approvalSteps = (task: TenderTask) => stepsForTask(task)
+
+const approvalCurrent = (task: TenderTask) => {
+  const steps = approvalSteps(task)
+  if (task.status === 'approved' || task.status === 'submitted' || task.status === 'won') {
+    return Math.max(steps.length - 1, 0)
+  }
+  return stepIndex(task.currentStepKey || task.currentStep || '提交申请', steps)
+}
 
 async function loadRecord(task: TenderTask) {
   loading.value = true
@@ -119,9 +124,10 @@ async function onDownload() {
         class="shrink-0"
       >
         <ApprovalSteps
-          :steps="APPROVAL_STEPS"
+          :steps="approvalSteps(task)"
           :current="approvalCurrent(task)"
           compact
+          show-roles
         />
       </div>
       <p v-if="task.approvalComment" class="shrink-0 text-xs text-muted-foreground">
