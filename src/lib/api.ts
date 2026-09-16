@@ -266,7 +266,14 @@ export async function apiFetchBlob(
   }
 
   if (!res.ok) {
-    throw new ApiError(friendlyMessage(res.status, res.statusText), -1, res.status)
+    let msg = res.statusText
+    try {
+      const j = (await res.json()) as { msg?: string }
+      if (j?.msg) msg = j.msg
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(friendlyMessage(res.status, msg), -1, res.status)
   }
   return res.blob()
 }

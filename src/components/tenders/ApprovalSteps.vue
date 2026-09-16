@@ -95,9 +95,9 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
   justify-content: center;
   font-size: 0.75rem;
   font-weight: 700;
-  border: 2px solid hsl(var(--border));
-  background: hsl(var(--background));
-  color: hsl(var(--muted-foreground));
+  border: 2px solid var(--border);
+  background: var(--background);
+  color: var(--muted-foreground);
   position: relative;
   z-index: 1;
   margin: 0 auto;
@@ -111,13 +111,13 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
 }
 
 .approval-step--done .approval-step__circle {
-  background: color-mix(in srgb, var(--accent-patina, #5f9e4e) 18%, hsl(var(--card)));
+  background: color-mix(in srgb, var(--accent-patina, #5f9e4e) 18%, var(--card));
   border-color: var(--accent-patina, #5f9e4e);
   color: var(--accent-patina, #5f9e4e);
 }
 
 .approval-step--active .approval-step__circle {
-  background: color-mix(in srgb, var(--accent-iron, #2563eb) 16%, hsl(var(--card)));
+  background: color-mix(in srgb, var(--accent-iron, #2563eb) 16%, var(--card));
   border-color: var(--accent-iron, #2563eb);
   color: var(--accent-iron, #2563eb);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent-iron, #2563eb) 18%, transparent);
@@ -129,7 +129,7 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
   left: calc(50% + 1.2rem);
   right: calc(-50% + 1.2rem);
   height: 2px;
-  background: hsl(var(--border));
+  background: var(--border);
   transform: translateY(-50%);
 }
 
@@ -149,14 +149,14 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
 .approval-step__label {
   margin-top: 0.45rem;
   font-size: 0.6875rem;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
   text-align: center;
   line-height: 1.3;
 }
 
 .approval-step--done .approval-step__label,
 .approval-step--active .approval-step__label {
-  color: hsl(var(--foreground));
+  color: var(--foreground);
   font-weight: 600;
 }
 
@@ -164,7 +164,7 @@ function stateOf(i: number): 'done' | 'active' | 'todo' {
   margin-top: 0.15rem;
   font-size: 0.625rem;
   line-height: 1.3;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
   text-align: center;
 }
 </style>

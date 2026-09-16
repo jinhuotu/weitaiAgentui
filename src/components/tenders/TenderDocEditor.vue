@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { renderAsync } from 'docx-preview'
-import { Loader2, RefreshCw, TriangleAlert } from 'lucide-vue-next'
+import { Loader2, RefreshCw, TriangleAlert, ZoomIn, ZoomOut } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import {
   fetchTenderDocxBlob,
   fetchTenderEditorConfig,
+  fetchTenderPreviewPdfBlob,
   type TenderDocPreview,
 } from '@/lib/tenders-api'
 
@@ -25,10 +26,15 @@ const error = ref('')
 const activeEngine = ref<TenderDocPreview>('browser')
 const editorHost = ref<HTMLElement | null>(null)
 const editorRoot = ref<HTMLElement | null>(null)
+const userZoom = ref(1)
+const MIN_ZOOM = 0.5
+const MAX_ZOOM = 2.2
+const ZOOM_STEP = 0.1
 let docEditor: { destroyEditor?: () => void } | null = null
 let resizeObserver: ResizeObserver | null = null
 let notifyingResize = false
 let bootGen = 0
+let pdfObjectUrl = ''
 
 declare global {
   interface Window {
@@ -59,19 +65,54 @@ function fitBrowserPages() {
   wrapper.style.transform = ''
   wrapper.style.marginBottom = ''
   const pages = host.querySelectorAll<HTMLElement>('section.tender-docx, section.docx')
-  pages.forEach((page) => {
-    page.style.overflow = 'hidden'
-  })
   const page = pages[0]
   if (!page) return
   const pageW = page.offsetWidth
   const avail = Math.max(host.clientWidth - 28, 240)
   if (pageW <= 0 || avail <= 0) return
-  const scale = Math.min(1, avail / pageW)
-  if (scale >= 0.995) return
+  const fit = Math.min(1, avail / pageW)
+  const scale = fit * userZoom.value
+  if (scale >= 0.995 && userZoom.value === 1) return
   wrapper.style.transformOrigin = 'top center'
   wrapper.style.transform = `scale(${scale})`
   wrapper.style.marginBottom = `${Math.round(-(1 - scale) * wrapper.scrollHeight)}px`
+}
+
+function applyPdfZoom(resetViewer = false) {
+  if (activeEngine.value !== 'pdf') return
+  const host = editorHost.value
+  const frame = host?.querySelector('iframe')
+  if (!host || !frame) return
+  const scale = userZoom.value
+  if (resetViewer && pdfObjectUrl) {
+    const hash = scale === 1 ? 'zoom=page-width' : `zoom=${Math.round(scale * 100)}`
+    frame.src = `${pdfObjectUrl}#${hash}`
+  }
+  frame.style.transformOrigin = 'top center'
+  frame.style.width = '100%'
+  frame.style.height = '100%'
+  if (scale === 1) {
+    frame.style.transform = ''
+    host.style.overflow = 'hidden'
+    return
+  }
+  frame.style.transform = `scale(${scale})`
+  host.style.overflow = 'auto'
+}
+
+function applyPreviewZoom(resetPdf = false) {
+  if (activeEngine.value === 'browser') fitBrowserPages()
+  else if (activeEngine.value === 'pdf') applyPdfZoom(resetPdf)
+}
+
+function changeZoom(next: number) {
+  userZoom.value = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(next * 10) / 10))
+  applyPreviewZoom(activeEngine.value === 'pdf')
+}
+
+function zoomFit() {
+  userZoom.value = 1
+  applyPreviewZoom(true)
 }
 
 function fillEditorFrame() {
@@ -112,6 +153,10 @@ function destroyEditor() {
     /* ignore */
   }
   docEditor = null
+  if (pdfObjectUrl) {
+    URL.revokeObjectURL(pdfObjectUrl)
+    pdfObjectUrl = ''
+  }
   const host = editorHost.value
   if (host) host.innerHTML = ''
 }
@@ -145,6 +190,31 @@ function watchHostResize(onHeightChange: (height: number) => void) {
     onHeightChange(h)
   })
   resizeObserver.observe(box)
+}
+
+async function bootPdf(host: HTMLElement, gen: number): Promise<boolean> {
+  try {
+    const blob = await fetchTenderPreviewPdfBlob(props.docxFile)
+    if (gen !== bootGen) return false
+    if (!blob || blob.size < 32) return false
+    const url = URL.createObjectURL(blob)
+    if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl)
+    pdfObjectUrl = url
+    host.innerHTML = ''
+    const frame = document.createElement('iframe')
+    frame.src = `${url}#zoom=page-width`
+    frame.title = props.downloadName || '投标文件预览'
+    host.appendChild(frame)
+    activeEngine.value = 'pdf'
+    fillEditorFrame()
+    watchHostResize(() => {
+      fillEditorFrame()
+      applyPdfZoom()
+    })
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function bootBrowser(host: HTMLElement, gen: number) {
@@ -284,6 +354,7 @@ async function boot() {
   const gen = ++bootGen
   loading.value = true
   error.value = ''
+  userZoom.value = 1
   destroyEditor()
 
   await nextTick()
@@ -300,6 +371,14 @@ async function boot() {
     } else if (hinted === 'onlyoffice') {
       activeEngine.value = 'onlyoffice'
       await bootOnlyOffice(gen)
+    } else if (props.mode !== 'edit') {
+      activeEngine.value = 'pdf'
+      const used = await bootPdf(host, gen)
+      if (gen !== bootGen) return
+      if (!used) {
+        activeEngine.value = 'browser'
+        await bootBrowser(host, gen)
+      }
     } else {
       activeEngine.value = 'browser'
       await bootBrowser(host, gen)
@@ -312,6 +391,7 @@ async function boot() {
       loading.value = false
       await nextTick()
       fillEditorFrame()
+      applyPreviewZoom()
       notifyEditorResize()
     }
   }
@@ -334,10 +414,12 @@ watch(
     await nextTick()
     fillEditorFrame()
     fitBrowserPages()
+    applyPdfZoom()
     notifyEditorResize()
     window.setTimeout(() => {
       fillEditorFrame()
       fitBrowserPages()
+      applyPdfZoom()
       notifyEditorResize()
     }, 80)
   },
@@ -349,15 +431,18 @@ watch(
     await nextTick()
     fillEditorFrame()
     fitBrowserPages()
+    applyPdfZoom()
     notifyEditorResize()
     window.setTimeout(() => {
       fillEditorFrame()
       fitBrowserPages()
+      applyPdfZoom()
       notifyEditorResize()
     }, 80)
     window.setTimeout(() => {
       fillEditorFrame()
       fitBrowserPages()
+      applyPdfZoom()
       notifyEditorResize()
     }, 400)
   },
@@ -372,16 +457,50 @@ onBeforeUnmount(() => {
 <template>
   <div ref="editorRoot" class="tender-doc-editor">
     <div
+      v-if="!loading && !error && (activeEngine === 'pdf' || activeEngine === 'browser')"
+      class="tender-doc-editor__zoom"
+    >
+      <button
+        type="button"
+        class="tender-doc-editor__zoom-btn"
+        :disabled="userZoom <= MIN_ZOOM"
+        title="缩小"
+        @click="changeZoom(userZoom - ZOOM_STEP)"
+      >
+        <ZoomOut class="size-3.5" />
+        缩小
+      </button>
+      <span class="tender-doc-editor__zoom-label">{{ Math.round(userZoom * 100) }}%</span>
+      <button
+        type="button"
+        class="tender-doc-editor__zoom-btn"
+        :disabled="userZoom >= MAX_ZOOM"
+        title="放大"
+        @click="changeZoom(userZoom + ZOOM_STEP)"
+      >
+        <ZoomIn class="size-3.5" />
+        放大
+      </button>
+      <button type="button" class="tender-doc-editor__zoom-btn" title="按页宽适应" @click="zoomFit">
+        适应
+      </button>
+    </div>
+    <div
       ref="editorHost"
       class="tender-doc-editor__host"
-      :class="{ 'tender-doc-editor__host--browser': activeEngine === 'browser' }"
+      :class="{
+        'tender-doc-editor__host--browser': activeEngine === 'browser',
+        'tender-doc-editor__host--pdf': activeEngine === 'pdf',
+      }"
     />
 
     <div v-if="loading" class="tender-doc-editor__overlay">
       <Loader2 class="size-5 animate-spin text-muted-foreground" />
       <span class="text-[12px] text-muted-foreground">
         {{
-          activeEngine === 'browser'
+          activeEngine === 'pdf'
+            ? '正在用本机 WPS 排版预览…'
+            : activeEngine === 'browser'
             ? '正在打开 Word 预览…'
             : mode === 'view'
               ? '正在打开只读预览…'
@@ -459,6 +578,11 @@ onBeforeUnmount(() => {
   background: #dfe3e8;
 }
 
+.tender-doc-editor__host--pdf {
+  overflow: hidden;
+  background: #525659;
+}
+
 .tender-doc-editor__host--browser :deep(.docx-wrapper),
 .tender-doc-editor__host--browser :deep(.tender-docx-wrapper) {
   background: transparent !important;
@@ -470,7 +594,6 @@ onBeforeUnmount(() => {
 .tender-doc-editor__host--browser :deep(.tender-docx) {
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
   margin: 0 auto 16px !important;
-  overflow: hidden !important;
   box-sizing: border-box !important;
 }
 
@@ -498,9 +621,6 @@ onBeforeUnmount(() => {
 
 .tender-doc-editor__host--browser :deep(p) {
   max-width: 100%;
-  overflow: hidden;
-  word-break: normal;
-  overflow-wrap: anywhere;
 }
 
 .tender-doc-editor__host--browser :deep(table) {
@@ -545,5 +665,46 @@ onBeforeUnmount(() => {
 
 .tender-doc-editor__retry:hover {
   background: hsl(var(--accent));
+}
+
+.tender-doc-editor__zoom {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--hairline, hsl(var(--border)));
+  background: color-mix(in srgb, var(--bg-elevated, hsl(var(--card))) 92%, transparent);
+  box-shadow: 0 1px 4px color-mix(in srgb, #000 8%, transparent);
+}
+.tender-doc-editor__zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  height: 1.6rem;
+  padding: 0 0.45rem;
+  border: 0;
+  border-radius: 0.35rem;
+  font-size: 11px;
+  color: hsl(var(--foreground));
+  background: transparent;
+  cursor: pointer;
+}
+.tender-doc-editor__zoom-btn:hover:not(:disabled) {
+  background: hsl(var(--accent));
+}
+.tender-doc-editor__zoom-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.tender-doc-editor__zoom-label {
+  min-width: 2.4rem;
+  text-align: center;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
 }
 </style>

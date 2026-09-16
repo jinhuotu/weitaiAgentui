@@ -14,6 +14,7 @@ import {
   deleteTenderLibraryItem,
   fetchTenderLibrary,
   resolveLibraryFileId,
+  reindexTenderLibrary,
   updateTenderLibraryItem,
   uploadTenderSlot,
   type SlotFileInfo,
@@ -27,6 +28,7 @@ const hint = ref('')
 const baseId = ref('')
 const slots = ref<SlotStatus[]>([])
 const uploadingKey = ref<string | null>(null)
+const reindexing = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const pendingKey = ref<string | null>(null)
 const pendingReplace = ref(true)
@@ -43,6 +45,22 @@ const removingFileId = ref<string | null>(null)
 
 const filledCount = computed(() => slots.value.filter((s) => s.fileCount > 0).length)
 
+const _CN = '一二三四五六七八九'
+
+function cnOrdinal(i: number) {
+  const n = i + 1
+  if (n < 10) return _CN[n - 1]
+  if (n === 10) return '十'
+  if (n < 20) return '十' + _CN[n - 11]
+  if (n < 100) {
+    const tens = Math.floor(n / 10)
+    const ones = n % 10
+    const head = _CN[tens - 1] + '十'
+    return ones ? head + _CN[ones - 1] : head
+  }
+  return String(n)
+}
+
 onMounted(async () => {
   if (!getAccessToken()) {
     error.value = '请先登录'
@@ -52,8 +70,8 @@ onMounted(async () => {
   await reload()
 })
 
-async function reload() {
-  loading.value = true
+async function reload(quiet = false) {
+  if (!quiet) loading.value = true
   error.value = ''
   try {
     const data = await fetchTenderLibrary()
@@ -122,7 +140,10 @@ function onDeleteOpen(open: boolean) {
 }
 
 function askDeleteFile(slot: SlotStatus, file: SlotFileInfo) {
-  if (!resolveLibraryFileId(file)) return
+  if (!resolveLibraryFileId(file)) {
+    error.value = `无法删除「${file.performance?.projectName || file.name}」，缺少文件编号`
+    return
+  }
   pendingDeleteFile.value = { slot, file }
 }
 
@@ -146,6 +167,7 @@ async function confirmDeleteFile() {
     const item = await deleteTenderLibraryFile(docId)
     applySlotUpdate(row.slot.key, item)
     pendingDeleteFile.value = null
+    await reload(true)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '删除文件失败'
   } finally {
@@ -235,18 +257,44 @@ async function onClear(slot: SlotStatus) {
     uploadingKey.value = null
   }
 }
+
+async function onReindex(force = false) {
+  if (reindexing.value) return
+  reindexing.value = true
+  error.value = ''
+  try {
+    const stats = await reindexTenderLibrary({ force })
+    hint.value = `已排队 OCR 入库 ${stats.queued} 个文件${stats.skipped ? `，跳过 ${stats.skipped}` : ''}。完成后可在「AI 智能问答」勾选「投标资料库」检索。`
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '入库排队失败'
+  } finally {
+    reindexing.value = false
+  }
+}
 </script>
 
 <template>
   <PageHeader
     title="投标资料库"
-    description="资料存放在知识库中。可新增资料项并起名，生成投标文件时按名称自动引用。"
+    description="资料存放在知识库中。上传后 OCR 入库，可在 AI 智能问答中检索；生成投标文件时按名称自动引用。"
   >
     <template #badges>
       <Tag tone="molybdenum">知识库融合</Tag>
+      <Tag>OCR 可检索</Tag>
       <Tag>生成时自动引用</Tag>
     </template>
     <template #actions>
+      <button
+        type="button"
+        class="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-border text-[12px] hover:bg-accent disabled:opacity-50"
+        :disabled="reindexing"
+        title="将已有扫描件 OCR 写入向量库，供智能问答检索"
+        @click="onReindex(false)"
+      >
+        <Loader2 v-if="reindexing" class="size-3.5 animate-spin" />
+        <Upload v-else class="size-3.5" />
+        {{ reindexing ? '入库中…' : 'OCR 入库' }}
+      </button>
       <button
         type="button"
         class="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-border text-[12px] hover:bg-accent"
@@ -270,7 +318,7 @@ async function onClear(slot: SlotStatus) {
         @click="router.push('/tenders')"
       >
         <FileText class="size-3.5" />
-        去生成投标文件
+        去 AI标书生成
       </button>
     </template>
   </PageHeader>
@@ -304,7 +352,7 @@ async function onClear(slot: SlotStatus) {
           <div class="flex flex-wrap items-start gap-3">
             <div class="min-w-0 flex-1">
               <div class="flex flex-wrap items-center gap-2 text-[13px]">
-                <span class="text-muted-foreground font-sans text-[11px]">（{{ '一二三四五六七八九十'[i] || i + 1 }}）</span>
+                <span class="text-muted-foreground font-sans text-[11px]">（{{ cnOrdinal(i) }}）</span>
                 <span class="text-foreground/90">{{ slot.title }}</span>
                 <span
                   v-if="slot.fileCount"

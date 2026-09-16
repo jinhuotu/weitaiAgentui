@@ -126,12 +126,99 @@
   --scrollbar-thumb-hover: rgba(37, 99, 235, 0.4);
   --accent-glow: rgba(37, 99, 235, 0.28);
 
+  --shell-root-a: rgba(96, 165, 250, 0.55);
+  --shell-root-b: rgba(59, 130, 246, 0.28);
+  --shell-root-base: linear-gradient(160deg, #bfdbfe 0%, #e0f2fe 42%, #eff6ff 100%);
+  --shell-window-border: rgba(255, 255, 255, 0.7);
+  --shell-window-shadow: 0 20px 50px rgba(30, 64, 175, 0.12), 0 2px 8px rgba(15, 23, 42, 0.04);
+  --shell-nav-card-bg: rgba(255, 255, 255, 0.42);
+  --shell-nav-card-border: rgba(255, 255, 255, 0.55);
+  --shell-nav-card-hover: rgba(255, 255, 255, 0.72);
+  --shell-nav-card-active: #ffffff;
+  --shell-nav-title: rgba(30, 58, 138, 0.62);
+  --shell-nav-icon-bg: linear-gradient(145deg, rgba(37, 99, 235, 0.14), rgba(14, 165, 233, 0.12));
+  --shell-nav-icon-fg: #2563eb;
+
   /* Brand accent → blue in light theme */
   --accent-iron: #2563eb;
   --accent-molybdenum: #3b82f6;
   --accent-patina: #059669;
   --accent-sulfur: #38bdf8;
   --accent-coolant: #0ea5e9;
+}
+
+/* Light — Red & White (brand) */
+:root[data-accent='red'] {
+  --background: #fdf6f6;
+  --foreground: #000000;
+  --card: #ffffff;
+  --card-foreground: #000000;
+  --popover: #ffffff;
+  --popover-foreground: #000000;
+  --primary: #c41e2a;
+  --primary-foreground: #ffffff;
+  --secondary: #fde8ea;
+  --secondary-foreground: #000000;
+  --muted: #f8ecee;
+  --muted-foreground: #5b4b4d;
+  --accent: #fde8ea;
+  --accent-foreground: #000000;
+  --border: #f0d0d3;
+  --input: #f0d0d3;
+  --ring: #c41e2a;
+
+  --chart-1: #c41e2a;
+  --chart-2: #e45c67;
+  --chart-3: #5f9e4e;
+  --chart-4: #f59e0b;
+  --chart-5: #db2777;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #000000;
+  --sidebar-primary: #c41e2a;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #fff1f2;
+  --sidebar-accent-foreground: #000000;
+  --sidebar-border: #f3d6d9;
+  --sidebar-ring: #c41e2a;
+
+  --bg-base: #fdf6f6;
+  --bg-surface: #ffffff;
+  --bg-elevated: #fff1f2;
+  --hairline: #f0d0d3;
+  --text-primary: #000000;
+  --text-secondary: #333333;
+  --text-muted: #6b7280;
+
+  --panel-surface-from: #ffffff;
+  --panel-surface-to: #fff8f8;
+  --panel-elevated: #ffffff;
+  --panel-elevated-border: #f0d0d3;
+  --body-glow-a: rgba(196, 30, 42, 0.1);
+  --body-glow-b: rgba(248, 113, 113, 0.08);
+  --body-wash: linear-gradient(180deg, rgba(253, 246, 246, 0) 0%, rgba(253, 232, 234, 0.7) 100%);
+  --scrollbar-thumb: rgba(196, 30, 42, 0.22);
+  --scrollbar-thumb-hover: rgba(196, 30, 42, 0.4);
+  --accent-glow: rgba(196, 30, 42, 0.28);
+
+  --shell-root-a: rgba(252, 165, 165, 0.55);
+  --shell-root-b: rgba(248, 113, 113, 0.28);
+  --shell-root-base: linear-gradient(160deg, #fecaca 0%, #fee2e2 42%, #fff5f5 100%);
+  --shell-window-border: rgba(255, 255, 255, 0.72);
+  --shell-window-shadow: 0 20px 50px rgba(153, 27, 27, 0.12), 0 2px 8px rgba(15, 23, 42, 0.04);
+  --shell-nav-card-bg: rgba(255, 255, 255, 0.42);
+  --shell-nav-card-border: rgba(255, 255, 255, 0.55);
+  --shell-nav-card-hover: rgba(255, 255, 255, 0.72);
+  --shell-nav-card-active: #ffffff;
+  --shell-nav-title: rgba(153, 27, 27, 0.62);
+  --shell-nav-icon-bg: linear-gradient(145deg, rgba(196, 30, 42, 0.14), rgba(248, 113, 113, 0.12));
+  --shell-nav-icon-fg: #c41e2a;
+
+  --accent-iron: #c41e2a;
+  --accent-molybdenum: #e45c67;
+  --accent-patina: #059669;
+  --accent-sulfur: #f59e0b;
+  --accent-coolant: #f87171;
 }
 
 .dark {
@@ -179,22 +266,65 @@
   --text-secondary: #8b97a8;
   --text-muted: #5a6677;
 
-  --panel-surface-from: #141a22;
-  --panel-surface-to: #11171f;
-  --panel-elevated: #1c242e;
-  --panel-elevated-border: #2f3a48;
-  --body-glow-a: rgba(74, 158, 255, 0.08);
-  --body-glow-b: rgba(255, 107, 53, 0.05);
-  --body-wash: linear-gradient(180deg, rgba(8, 19, 42, 0) 0%, rgba(6, 14, 32, 0.6) 100%);
+  --panel-surface-from: #152748;
+  --panel-surface-to: #0f1e3d;
+  --panel-elevated: #1a3058;
+  --panel-elevated-border: #274578;
+  --body-glow-a: rgba(74, 158, 255, 0.12);
+  --body-glow-b: rgba(255, 107, 53, 0.07);
+  --body-wash: linear-gradient(180deg, rgba(8, 19, 42, 0) 0%, rgba(6, 14, 32, 0.72) 100%);
   --scrollbar-thumb: rgba(139, 155, 184, 0.28);
   --scrollbar-thumb-hover: rgba(139, 155, 184, 0.5);
   --accent-glow: rgba(255, 107, 53, 0.35);
+
+  --shell-root-a: rgba(37, 99, 235, 0.22);
+  --shell-root-b: rgba(255, 107, 53, 0.1);
+  --shell-root-base: linear-gradient(160deg, #06112a 0%, #0a1836 48%, #08132a 100%);
+  --shell-window-border: rgba(74, 158, 255, 0.16);
+  --shell-window-shadow: 0 22px 56px rgba(0, 0, 0, 0.45), 0 2px 10px rgba(0, 0, 0, 0.28);
+  --shell-nav-card-bg: rgba(22, 42, 82, 0.55);
+  --shell-nav-card-border: rgba(74, 158, 255, 0.14);
+  --shell-nav-card-hover: rgba(26, 48, 88, 0.92);
+  --shell-nav-card-active: #1a3058;
+  --shell-nav-title: rgba(139, 155, 184, 0.9);
+  --shell-nav-icon-bg: linear-gradient(145deg, rgba(255, 107, 53, 0.2), rgba(74, 158, 255, 0.16));
+  --shell-nav-icon-fg: #ff8a5c;
 
   --accent-iron: #ff6b35;
   --accent-molybdenum: #4a9eff;
   --accent-patina: #7fb069;
   --accent-sulfur: #f4c430;
   --accent-coolant: #5dd3e0;
+}
+
+/* Dark — Red accent */
+.dark[data-accent='red'] {
+  --primary: #ef4444;
+  --ring: #ef4444;
+  --sidebar-primary: #ef4444;
+  --sidebar-ring: #ef4444;
+  --chart-1: #ef4444;
+  --chart-2: #fb7185;
+
+  --body-glow-a: rgba(239, 68, 68, 0.14);
+  --body-glow-b: rgba(248, 113, 113, 0.08);
+  --accent-glow: rgba(239, 68, 68, 0.35);
+  --scrollbar-thumb: rgba(239, 68, 68, 0.32);
+  --scrollbar-thumb-hover: rgba(239, 68, 68, 0.5);
+
+  --shell-root-a: rgba(239, 68, 68, 0.22);
+  --shell-root-b: rgba(248, 113, 113, 0.12);
+  --shell-root-base: linear-gradient(160deg, #2a0d12 0%, #3b1218 48%, #1a080c 100%);
+  --shell-window-border: rgba(248, 113, 113, 0.18);
+  --shell-nav-card-border: rgba(248, 113, 113, 0.16);
+  --shell-nav-card-active: #3b1a20;
+  --shell-nav-title: rgba(252, 165, 165, 0.85);
+  --shell-nav-icon-bg: linear-gradient(145deg, rgba(239, 68, 68, 0.22), rgba(248, 113, 113, 0.14));
+  --shell-nav-icon-fg: #fb7185;
+
+  --accent-iron: #ef4444;
+  --accent-molybdenum: #fb7185;
+  --accent-coolant: #fca5a5;
 }
 
 @layer base {
@@ -278,8 +408,8 @@
     );
     border: 1px solid var(--border);
     box-shadow:
-      inset 0 1px 0 color-mix(in srgb, var(--foreground) 4%, transparent),
-      0 1px 0 color-mix(in srgb, var(--background) 40%, transparent);
+      inset 0 1px 0 color-mix(in srgb, var(--foreground) 5%, transparent),
+      0 8px 24px color-mix(in srgb, #000 8%, transparent);
   }
 
   .panel-elevated {

@@ -18,6 +18,8 @@ const MODULE_LABEL: Record<string, string> = {
   users: '用户',
   roles: '角色',
   hot_configs: '热配置',
+  quotes: '报价',
+  tenders: '投标',
   mcp: 'MCP',
   models: '模型',
 }
@@ -106,7 +108,7 @@ watch([moduleFilter, opSuccessFilter, loginSuccessFilter], () => {
 <template>
   <PageHeader
     title="操作与登录日志"
-    description="记录用户 / 角色 / 热配置 / MCP / 模型的写入操作，以及登录成功与失败（含 IP）。仅保留最近 7 天，超时自动删除。"
+    description="记录用户 / 角色 / 热配置 / MCP / 模型的写入操作，以及登录成功与失败（含 IP）。超时按配置天数自动删除。"
   >
     <template #badges>
       <Tag tone="molybdenum">保留 {{ summary?.retentionDays ?? 7 }} 天</Tag>

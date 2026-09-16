@@ -50,6 +50,7 @@ function formatSize(n: number): string {
 function onRemove(file: SlotFileInfo, ev: Event) {
   ev.preventDefault()
   ev.stopPropagation()
+  close()
   emit('remove', file)
 }
 

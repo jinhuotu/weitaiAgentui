@@ -5,11 +5,7 @@ import { Loader2, Lock, UserRound } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import weitaiBg from '@/assets/weitai.png'
-
-const APP_NAME = '优祺智能'
-const APP_VERSION = 'V1.23.0'
-const COMPANY_NAME = '河南优祺计算机科技有限公司'
-const COPYRIGHT_YEAR = 2026
+import { APP_NAME, APP_VERSION, COMPANY_NAME, COPYRIGHT_YEAR } from '@/config/brand'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -28,7 +24,10 @@ async function onSubmit() {
     const next = typeof route.query.next === 'string' ? route.query.next : '/'
     await router.replace(next.startsWith('/') ? next : '/')
   } catch (err) {
-    if (err instanceof ApiError) {
+    const msg = err instanceof Error ? err.message : ''
+    if (/Failed to fetch dynamically imported module|Loading chunk|Importing a module script failed/i.test(msg)) {
+      error.value = '页面资源加载失败，请按 Ctrl+F5 强制刷新后再试'
+    } else if (err instanceof ApiError) {
       error.value =
         err.message === 'invalid username or password'
           ? '用户名或密码错误'
@@ -46,7 +45,7 @@ async function onSubmit() {
 
 <template>
   <div
-    v-if="auth.loading || auth.user"
+    v-if="(auth.loading || auth.user) && !error"
     class="flex min-h-screen items-center justify-center bg-[#f7f5f0] text-sm text-neutral-500"
   >
     {{ auth.loading ? '正在校验登录状态…' : '正在进入系统…' }}
@@ -125,7 +124,8 @@ async function onSubmit() {
   position: relative;
   min-height: 100dvh;
   width: 100%;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: #f4f1ea;
   color: #1a1a1a;
 }
@@ -166,16 +166,27 @@ async function onSubmit() {
 }
 
 .login-panel {
+  position: relative;
+  isolation: isolate;
   width: min(100%, 26rem);
   margin-right: clamp(0rem, 6vw, 7rem);
-  margin-top: clamp(4.5rem, 14vh, 9rem);
+  margin-top: clamp(1.25rem, 8vh, 9rem);
   padding: clamp(1.5rem, 3vw, 2.25rem);
   border-radius: 1rem;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: #fff;
+  border: 1px solid #d0d5de;
   box-shadow:
-    0 18px 50px rgba(20, 40, 80, 0.08),
-    0 2px 8px rgba(0, 0, 0, 0.04);
+    0 10px 28px rgba(20, 40, 80, 0.1),
+    0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.login-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.88);
   backdrop-filter: blur(8px);
 }
 
@@ -225,6 +236,10 @@ async function onSubmit() {
 
 .login-field__control {
   position: relative;
+  border-radius: 0.65rem;
+  background: #fff;
+  /* 低 DPI 大屏上 1px 浅边会被抗锯齿吃掉，用 inset 描边 */
+  box-shadow: inset 0 0 0 1.5px #9aa3b2;
 }
 
 .login-field__icon {
@@ -242,24 +257,23 @@ async function onSubmit() {
   width: 100%;
   height: 2.75rem;
   padding: 0 0.9rem 0 2.5rem;
-  border-radius: 0.65rem;
-  border: 1px solid #e5e7eb;
-  background: #fff;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
   font-size: 0.875rem;
   color: #111;
   outline: none;
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
+  appearance: none;
 }
 
 .login-field__input::placeholder {
   color: #c0c4cc;
 }
 
-.login-field__input:focus {
-  border-color: #c41e2a;
-  box-shadow: 0 0 0 3px rgba(196, 30, 42, 0.12);
+.login-field__control:focus-within {
+  box-shadow:
+    inset 0 0 0 1.5px #c41e2a,
+    0 0 0 3px rgba(196, 30, 42, 0.12);
 }
 
 .login-error {
@@ -352,6 +366,28 @@ async function onSubmit() {
   .login-footer {
     font-size: 0.6875rem;
     padding-inline: 0.5rem;
+  }
+}
+
+@media (max-resolution: 1.25dppx), (-webkit-max-device-pixel-ratio: 1.25) {
+  .login-field__control {
+    box-shadow: inset 0 0 0 2px #7d8694;
+  }
+
+  .login-field__control:focus-within {
+    box-shadow:
+      inset 0 0 0 2px #c41e2a,
+      0 0 0 3px rgba(196, 30, 42, 0.12);
+  }
+
+  .login-panel {
+    border-color: #b8c0cc;
+  }
+}
+
+@media (max-height: 800px) {
+  .login-panel {
+    margin-top: 0.5rem;
   }
 }
 </style>

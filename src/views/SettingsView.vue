@@ -17,6 +17,7 @@ import { fetchHealth } from '@/lib/health-api'
 import { applyQdrantSettings, getQdrantSettings, type QdrantSettings } from '@/lib/knowledge-api'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
+import AccentPalettePicker from '@/components/theme/AccentPalettePicker.vue'
 
 const auth = useAuthStore()
 const theme = useThemeStore()
@@ -97,19 +98,28 @@ onMounted(async () => {
 
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
     <Panel title="外观" subtitle="仅保存在本机浏览器">
-      <div class="p-4 space-y-3">
+      <div class="p-4 space-y-4">
         <p class="text-[12px] text-muted-foreground leading-relaxed">
-          浅色 / 深色主题会写入 localStorage，刷新后保持。
+          明暗模式与配色渐变（蓝白 / 红白 / 自定义主色与字体色）写入 localStorage，刷新后保持。
         </p>
-        <button
-          type="button"
-          class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-[12px] hover:bg-accent"
-          @click="theme.toggle()"
-        >
-          <Sun v-if="theme.isDark" class="size-3.5" />
-          <Moon v-else class="size-3.5" />
-          切换为{{ theme.label }}主题
-        </button>
+        <div class="space-y-2">
+          <div class="text-[11px] font-medium text-foreground">明暗</div>
+          <button
+            type="button"
+            class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-[12px] hover:bg-accent"
+            @click="theme.toggle()"
+          >
+            <Sun v-if="theme.isDark" class="size-3.5" />
+            <Moon v-else class="size-3.5" />
+            切换为{{ theme.label }}主题
+          </button>
+        </div>
+        <div class="space-y-2">
+          <div class="text-[11px] font-medium text-foreground">
+            配色渐变 · 当前 {{ theme.accentLabel }}
+          </div>
+          <AccentPalettePicker />
+        </div>
       </div>
     </Panel>
 

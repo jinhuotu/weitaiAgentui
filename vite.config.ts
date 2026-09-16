@@ -41,6 +41,10 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // Chrome 偶发 ERR_CACHE_READ_FAILURE，开发态不要把模块写进磁盘缓存
+    headers: {
+      'Cache-Control': 'no-store',
+    },
     // 允许 cpolar 等隧道域名访问（子域名会变，用前导点匹配所有子域）
     allowedHosts: ['.cpolar.top', '.cpolar.cn'],
     proxy: {

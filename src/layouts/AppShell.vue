@@ -28,7 +28,7 @@ watch(
 <template>
   <div
     v-if="auth.loading || !auth.user"
-    class="flex h-screen items-center justify-center bg-[#dbeafe] text-sm text-slate-600"
+    class="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground"
   >
     {{ auth.loading ? '正在校验登录状态…' : '正在跳转登录…' }}
   </div>
@@ -49,19 +49,14 @@ watch(
           :class="
             cn(
               'shell-main min-h-0 flex-1',
-              immersive ? 'flex flex-col overflow-hidden' : 'overflow-y-auto overscroll-contain',
+              immersive
+                ? 'flex flex-col overflow-hidden'
+                : 'flex flex-col overflow-y-auto overscroll-contain',
             )
           "
         >
           <div
-            :class="
-              cn(
-                'mx-auto w-full max-w-[1600px]',
-                immersive
-                  ? 'flex min-h-0 flex-1 flex-col p-3 sm:p-4 lg:p-5'
-                  : 'p-3 sm:p-4 lg:p-6',
-              )
-            "
+            class="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-1 flex-col p-3 sm:p-4 lg:p-5"
           >
             <RouterView />
           </div>
@@ -76,11 +71,11 @@ watch(
   display: flex;
   height: 100dvh;
   overflow: hidden;
-  color: hsl(var(--foreground));
+  color: var(--foreground);
   background:
-    radial-gradient(ellipse 80% 60% at 10% 20%, rgba(96, 165, 250, 0.55), transparent 55%),
-    radial-gradient(ellipse 70% 50% at 90% 80%, rgba(59, 130, 246, 0.28), transparent 50%),
-    linear-gradient(160deg, #bfdbfe 0%, #e0f2fe 42%, #eff6ff 100%);
+    radial-gradient(ellipse 80% 60% at 10% 20%, var(--shell-root-a), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 90% 80%, var(--shell-root-b), transparent 50%),
+    var(--shell-root-base);
 }
 
 .shell-stage {
@@ -104,11 +99,10 @@ watch(
   display: flex;
   flex-direction: column;
   border-radius: 1.15rem;
-  border: 1px solid rgba(255, 255, 255, 0.7);
-  background: color-mix(in srgb, hsl(var(--card)) 94%, white);
-  box-shadow:
-    0 20px 50px rgba(30, 64, 175, 0.12),
-    0 2px 8px rgba(15, 23, 42, 0.04);
+  border: 1px solid var(--shell-window-border);
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shell-window-shadow);
   overflow: hidden;
 }
 

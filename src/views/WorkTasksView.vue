@@ -158,7 +158,7 @@ async function onMark(task: TenderTask, status: 'submitted' | 'won' | 'lost') {
       :page="page"
       :page-size="PAGE_SIZE"
       :loading="loading"
-      empty-text="暂无工作任务。可从「投标文件」生成标书后在此跟进。"
+      empty-text="暂无工作任务。可从「AI标书生成」生成标书后在此跟进。"
       @update:page="page = $event"
       @view="openView"
       @edit="openEdit"

@@ -92,9 +92,9 @@ function emptyDocumentFormat(): DocumentFormat {
     coverShowDate: true,
     coverNeedSeal: false,
     tocNumbering: 'cn',
-    tocNeedPageNos: true,
+    tocNeedPageNos: false,
     pageNumberPos: 'bottom-center',
-    pageNumberStart: 'toc',
+    pageNumberStart: 'body',
   }
 }
 
@@ -1319,7 +1319,7 @@ async function downloadRecord(item: TenderRecordItem, kind: 'docx' | 'pdf') {
 }
 
 onMounted(async () => {
-  window.addEventListener('keydown', onPreviewFullscreenKey)
+  window.addEventListener('keydown', onPreviewFullscreenKey, true)
   if (!getAccessToken()) {
     error.value = '请先登录'
     loading.value = false
@@ -1389,7 +1389,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onPreviewFullscreenKey)
+  window.removeEventListener('keydown', onPreviewFullscreenKey, true)
   setPreviewFullscreen(false)
 })
 
@@ -1972,10 +1972,14 @@ async function onDownload(kind: 'docx' | 'pdf') {
 </script>
 
 <template>
+  <div
+    class="flex w-full flex-1 flex-col"
+    :class="currentStepIndex === 2 ? 'h-full min-h-0' : ''"
+  >
   <PageHeader
     class="tender-page-header"
     :class="{ 'tender-page-header--preview': currentStepIndex === 2 }"
-    title="投标文件"
+    title="AI标书生成"
     :description="currentStepIndex === 2 ? '' : '缺扫描件仍可生成：Word 附件区用虚线框占位，补齐后重新生成即可。公司名称、报价清单等基本信息仍需先填。'"
   >
     <template #badges>
@@ -3073,7 +3077,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
 
       <Panel
         title="法定代表人 / 授权"
-        subtitle="身份证请装订时另附，本版只填文字"
+        subtitle="法人身份证贴在身份证明页；有委托人时贴在授权委托书"
         collapsible
         :default-open="false"
       >
@@ -3269,7 +3273,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
           </span>
         </label>
         <p class="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-          证件/身份证等图片会写入「附件：资料库扫描件」（技术标之后）；合同、财税等大 PDF 仍用虚线框占位，装订时从资料库打印原件。
+          法人/委托人身份证正反面会贴在对应格式页内，不再重复出现在文末附件；合同、财税等大 PDF 仍用虚线框占位，装订时从资料库打印原件。
         </p>
       </div>
       </div>
@@ -3492,7 +3496,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
           <div class="min-w-0">
             <h2 class="text-[14px] font-semibold text-foreground">Word 在线预览</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
-              浏览器内核对内容，横线位置可能与 WPS / Word 略有差别。需要改稿请下载后用 WPS 或 Word 打开。
+              预览用本机 WPS 排出的 PDF，分页、页眉页脚与本地打开一致。未装 WPS 时回退浏览器内核。
             </p>
           </div>
           <div class="flex items-center gap-1.5 shrink-0">
@@ -3557,7 +3561,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
         </div>
 
         <TenderDocEditor
-          :key="`${result.docxFile}-view-browser`"
+          :key="`${result.docxFile}-view`"
           class="tender-preview-editor"
           :docx-file="result.docxFile"
           :download-name="result.downloadName"
@@ -3567,7 +3571,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
           engine="browser"
         />
 
-        <footer class="tender-step-footer shrink-0 pt-2">
+        <footer class="tender-step-footer tender-step-footer--preview shrink-0 pt-2">
           <button type="button" class="tender-ghost-btn" @click="onStepBack">
             <ChevronLeft class="size-3.5" />
             上一步
@@ -3760,6 +3764,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
     @update:open="onConfirmClearOpen"
     @confirm="confirmClearMineRecords"
   />
+  </div>
 </template>
 
 <style scoped>
@@ -3838,7 +3843,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
 .tender-page--preview {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - 6.75rem);
+  flex: 1 1 0;
   min-height: 0;
 }
 .tender-page-header--preview {
@@ -3860,18 +3865,18 @@ async function onDownload(kind: 'docx' | 'pdf') {
   border-radius: 0.75rem;
   border: 1px solid var(--hairline, hsl(var(--border)));
   background: var(--bg-elevated, hsl(var(--card)));
-  padding: 1rem 1.25rem 1.25rem;
+  padding: 1rem 1.25rem 1.15rem;
   box-shadow: 0 1px 2px color-mix(in srgb, #000 4%, transparent);
 }
 .tender-preview-shell--fs {
   position: fixed;
-  inset: 0;
+  inset: 0.7rem 0.85rem 0.85rem;
   z-index: 90;
-  width: 100vw;
-  height: 100dvh;
-  border-radius: 0;
-  padding: 0.75rem 1rem 1rem;
-  box-shadow: none;
+  width: auto;
+  height: auto;
+  border-radius: 0.9rem;
+  padding: 1rem 1.25rem 1.2rem;
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 16%, transparent);
 }
 .tender-preview-shell--fs :deep(.tender-doc-editor) {
   flex: 1 1 0;
@@ -3884,16 +3889,16 @@ async function onDownload(kind: 'docx' | 'pdf') {
   align-self: stretch;
   width: 100%;
 }
-.tender-preview-hints-list {
-  max-height: 7.5rem;
-  overflow-y: auto;
+.tender-step-footer--preview {
+  padding-bottom: 0.25rem;
 }
 .tender-step-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  padding-top: 0.25rem;
+  padding-top: 0.35rem;
+  padding-bottom: 0.15rem;
 }
 .tender-card {
   border-radius: 0.75rem;

@@ -195,6 +195,7 @@ export type OutlineItem = {
   required: boolean
   skipped: boolean
   body?: string
+  level?: number
 }
 
 export type DocumentFormat = {
@@ -306,7 +307,7 @@ export type Chapter5TemplateStatus = {
   label: string
 }
 
-export type TenderDocPreview = 'browser' | 'onlyoffice' | 'yozo'
+export type TenderDocPreview = 'browser' | 'onlyoffice' | 'yozo' | 'pdf'
 
 export function isOnlineDocEditor(engine?: string | null): engine is 'onlyoffice' | 'yozo' {
   const value = String(engine || '').toLowerCase()
@@ -589,6 +590,17 @@ export async function fetchTenderLibrary(): Promise<{
   return apiRequest('/api/v1/tenders/library', { token: token() })
 }
 
+/** 将资料库扫描件 OCR 向量化，供 AI 问答检索。force=true 强制重跑 */
+export async function reindexTenderLibrary(opts?: {
+  force?: boolean
+}): Promise<{ queued: number; skipped: number }> {
+  const q = opts?.force ? '?force=true' : ''
+  return apiRequest(`/api/v1/tenders/library/reindex${q}`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
 export async function createTenderLibraryItem(body: {
   title: string
   hint?: string
@@ -831,4 +843,10 @@ export async function downloadTenderFile(fileName: string, downloadName: string)
 
 export async function fetchTenderDocxBlob(fileName: string): Promise<Blob> {
   return apiFetchBlob(`/api/v1/tenders/files/${encodeURIComponent(fileName)}`, { token: token() })
+}
+
+export async function fetchTenderPreviewPdfBlob(fileName: string): Promise<Blob> {
+  return apiFetchBlob(`/api/v1/tenders/files/${encodeURIComponent(fileName)}/preview-pdf`, {
+    token: token(),
+  })
 }

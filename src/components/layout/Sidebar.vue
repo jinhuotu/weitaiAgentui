@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Bot, Check, ChevronDown, Ellipsis, Plus, X } from 'lucide-vue-next'
+import { Check, ChevronDown, Ellipsis, Plus, X } from 'lucide-vue-next'
 import { NAV_ITEM_DESC, type NavItem } from '@/config/nav'
 import { useNavDragReorder } from '@/composables/useNavDragReorder'
 import { useOrderedPrimaryNav } from '@/composables/useOrderedPrimaryNav'
 import { cn } from '@/lib/utils'
 import { useMobileMenuStore } from '@/stores/mobile-menu'
+import weitaiLogo from '@/assets/weitai-logo.jpg'
 
 const route = useRoute()
 const mobileMenu = useMobileMenuStore()
@@ -77,14 +78,14 @@ onUnmounted(() => {
   <!-- Desktop sidebar -->
   <aside class="shell-sidebar hidden lg:flex">
     <div class="shell-sidebar__brand">
-      <div
-        class="inline-flex size-9 items-center justify-center rounded-xl bg-gradient-to-br from-iron to-coolant text-white shadow-sm"
-      >
-        <Bot class="size-4" />
-      </div>
+      <img
+        :src="weitaiLogo"
+        alt="伟泰光电"
+        class="size-9 rounded-full object-cover shadow-sm ring-1 ring-black/5"
+      />
       <div class="leading-tight">
-        <div class="text-[14px] font-semibold tracking-wide text-slate-900">伟泰光电</div>
-        <div class="font-mono text-[10px] tracking-[0.16em] text-slate-500">WEITAI · v0.1</div>
+        <div class="text-[14px] font-semibold tracking-wide text-foreground">伟泰光电</div>
+        <div class="font-mono text-[10px] tracking-[0.16em] text-muted-foreground">WEITAI · v0.1</div>
       </div>
     </div>
 
@@ -105,10 +106,10 @@ onUnmounted(() => {
               <component :is="overviewItem.icon" class="size-4" />
             </span>
             <span class="min-w-0 flex-1">
-              <span class="block truncate text-[13px] font-semibold text-slate-900">
+              <span class="block truncate text-[13px] font-semibold text-foreground">
                 {{ overviewItem.label }}
               </span>
-              <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+              <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                 {{ itemDesc(overviewItem) }}
               </span>
             </span>
@@ -151,10 +152,10 @@ onUnmounted(() => {
                 <component :is="item.icon" class="size-4" />
               </span>
               <span class="min-w-0 flex-1">
-                <span class="block truncate text-[13px] font-semibold text-slate-900">
+                <span class="block truncate text-[13px] font-semibold text-foreground">
                   {{ item.label }}
                 </span>
-                <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                   {{ itemDesc(item) }}
                 </span>
               </span>
@@ -180,8 +181,8 @@ onUnmounted(() => {
                 <Ellipsis class="size-4" />
               </span>
               <span class="min-w-0 flex-1">
-                <span class="block truncate text-[13px] font-semibold text-slate-900">更多</span>
-                <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                <span class="block truncate text-[13px] font-semibold text-foreground">更多</span>
+                <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                   管理、配置与其他入口
                 </span>
               </span>
@@ -209,10 +210,10 @@ onUnmounted(() => {
                   <component :is="item.icon" class="size-4" />
                 </span>
                 <span class="min-w-0 flex-1">
-                  <span class="block truncate text-[13px] font-semibold text-slate-900">
+                  <span class="block truncate text-[13px] font-semibold text-foreground">
                     {{ item.label }}
                   </span>
-                  <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                  <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                     {{ itemDesc(item) }}
                   </span>
                 </span>
@@ -245,24 +246,24 @@ onUnmounted(() => {
   <aside
     :class="
       cn(
-        'fixed top-0 left-0 z-50 flex h-full w-[300px] max-w-[86vw] flex-col bg-[#e8f2ff]/95 shadow-2xl backdrop-blur-md transition-transform duration-200 ease-out lg:hidden',
+        'fixed top-0 left-0 z-50 flex h-full w-[300px] max-w-[86vw] flex-col bg-card/95 shadow-2xl backdrop-blur-md transition-transform duration-200 ease-out lg:hidden',
         mobileMenu.open ? 'translate-x-0' : '-translate-x-full',
       )
     "
   >
-    <div class="flex h-14 items-center gap-2 border-b border-white/50 px-4">
-      <div
-        class="inline-flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-iron to-coolant text-white"
-      >
-        <Bot class="size-4" />
-      </div>
+    <div class="flex h-14 items-center gap-2 border-b border-border px-4">
+      <img
+        :src="weitaiLogo"
+        alt="伟泰光电"
+        class="size-8 rounded-full object-cover ring-1 ring-black/5"
+      />
       <div class="flex-1 leading-tight">
-        <div class="text-[14px] font-semibold">伟泰光电</div>
-        <div class="font-mono text-[10px] tracking-[0.14em] text-slate-500">WEITAI</div>
+        <div class="text-[14px] font-semibold text-foreground">伟泰光电</div>
+        <div class="font-mono text-[10px] tracking-[0.14em] text-muted-foreground">WEITAI</div>
       </div>
       <button
         type="button"
-        class="inline-flex size-8 items-center justify-center rounded-lg text-slate-500 hover:bg-white/60"
+        class="inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent"
         @click="mobileMenu.close()"
       >
         <X class="size-4" />
@@ -271,7 +272,7 @@ onUnmounted(() => {
 
     <nav class="flex-1 space-y-5 overflow-y-auto px-3 py-4">
       <section v-if="overviewItem">
-        <h2 class="mb-2 px-1 text-[11px] font-semibold tracking-[0.14em] text-slate-500 uppercase">
+        <h2 class="mb-2 px-1 text-[11px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
           工作台
         </h2>
         <div class="space-y-2">
@@ -289,10 +290,10 @@ onUnmounted(() => {
               <component :is="overviewItem.icon" class="size-4" />
             </span>
             <span class="min-w-0 flex-1">
-              <span class="block truncate text-[13px] font-semibold text-slate-900">
+              <span class="block truncate text-[13px] font-semibold text-foreground">
                 {{ overviewItem.label }}
               </span>
-              <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+              <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                 {{ itemDesc(overviewItem) }}
               </span>
             </span>
@@ -301,7 +302,7 @@ onUnmounted(() => {
       </section>
 
       <section>
-        <h2 class="mb-2 px-1 text-[11px] font-semibold tracking-[0.14em] text-slate-500 uppercase">
+        <h2 class="mb-2 px-1 text-[11px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
           AI 智控
         </h2>
         <div class="space-y-2">
@@ -334,10 +335,10 @@ onUnmounted(() => {
                 <component :is="item.icon" class="size-4" />
               </span>
               <span class="min-w-0 flex-1">
-                <span class="block truncate text-[13px] font-semibold text-slate-900">
+                <span class="block truncate text-[13px] font-semibold text-foreground">
                   {{ item.label }}
                 </span>
-                <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                   {{ itemDesc(item) }}
                 </span>
               </span>
@@ -359,13 +360,13 @@ onUnmounted(() => {
                 <Ellipsis class="size-4" />
               </span>
               <span class="min-w-0 flex-1">
-                <span class="block truncate text-[13px] font-semibold text-slate-900">更多</span>
-                <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                <span class="block truncate text-[13px] font-semibold text-foreground">更多</span>
+                <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                   管理、配置与其他入口
                 </span>
               </span>
               <ChevronDown
-                class="size-4 shrink-0 text-slate-500 transition-transform duration-200"
+                class="size-4 shrink-0 text-muted-foreground transition-transform duration-200"
                 :class="moreOpen ? 'rotate-180' : ''"
               />
             </button>
@@ -387,10 +388,10 @@ onUnmounted(() => {
                   <component :is="item.icon" class="size-4" />
                 </span>
                 <span class="min-w-0 flex-1">
-                  <span class="block truncate text-[13px] font-semibold text-slate-900">
+                  <span class="block truncate text-[13px] font-semibold text-foreground">
                     {{ item.label }}
                   </span>
-                  <span class="mt-0.5 block truncate text-[11px] text-slate-500">
+                  <span class="mt-0.5 block truncate text-[11px] text-muted-foreground">
                     {{ itemDesc(item) }}
                   </span>
                 </span>
@@ -433,7 +434,7 @@ onUnmounted(() => {
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(30, 58, 138, 0.62);
+  color: var(--shell-nav-title);
 }
 
 .shell-nav-sort {
@@ -451,7 +452,7 @@ onUnmounted(() => {
 }
 
 .shell-nav-sort.is-over {
-  outline: 2px dashed rgba(37, 99, 235, 0.45);
+  outline: 2px dashed color-mix(in srgb, var(--accent-iron) 55%, transparent);
   outline-offset: 2px;
   border-radius: 1rem;
 }
@@ -462,9 +463,9 @@ onUnmounted(() => {
   gap: 0.7rem;
   padding: 0.7rem 0.75rem;
   border-radius: 0.95rem;
-  border: 1px solid rgba(255, 255, 255, 0.55);
-  background: rgba(255, 255, 255, 0.42);
-  box-shadow: 0 1px 2px rgba(30, 64, 175, 0.04);
+  border: 1px solid var(--shell-nav-card-border);
+  background: var(--shell-nav-card-bg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 4%, transparent);
   transition:
     background 0.15s ease,
     border-color 0.15s ease,
@@ -475,23 +476,23 @@ onUnmounted(() => {
 }
 
 .shell-nav-card:hover {
-  background: rgba(255, 255, 255, 0.72);
-  border-color: rgba(255, 255, 255, 0.9);
+  background: var(--shell-nav-card-hover);
+  border-color: color-mix(in srgb, var(--shell-nav-card-border) 40%, var(--accent-iron));
   transform: translateY(-1px);
 }
 
 .shell-nav-card--active {
-  background: #fff;
-  border-color: rgba(255, 255, 255, 0.95);
+  background: var(--shell-nav-card-active);
+  border-color: color-mix(in srgb, var(--accent-iron) 35%, var(--shell-nav-card-border));
   box-shadow:
-    0 8px 22px rgba(37, 99, 235, 0.12),
-    0 1px 3px rgba(15, 23, 42, 0.05);
+    0 8px 22px color-mix(in srgb, var(--accent-iron) 16%, transparent),
+    0 1px 3px color-mix(in srgb, var(--foreground) 6%, transparent);
 }
 
 .shell-nav-card--sub {
   margin-top: 0.35rem;
   padding: 0.6rem 0.7rem;
-  background: rgba(255, 255, 255, 0.28);
+  background: color-mix(in srgb, var(--shell-nav-card-bg) 70%, transparent);
 }
 
 .shell-nav-card__icon {
@@ -501,14 +502,14 @@ onUnmounted(() => {
   width: 2.15rem;
   height: 2.15rem;
   border-radius: 0.7rem;
-  background: linear-gradient(145deg, rgba(37, 99, 235, 0.14), rgba(14, 165, 233, 0.12));
-  color: #2563eb;
+  background: var(--shell-nav-icon-bg);
+  color: var(--shell-nav-icon-fg);
   flex-shrink: 0;
 }
 
 .shell-nav-card__icon--muted {
-  background: rgba(148, 163, 184, 0.16);
-  color: #64748b;
+  background: color-mix(in srgb, var(--muted-foreground) 16%, transparent);
+  color: var(--muted-foreground);
 }
 
 .shell-nav-card__action {
@@ -518,22 +519,22 @@ onUnmounted(() => {
   width: 1.55rem;
   height: 1.55rem;
   border-radius: 9999px;
-  border: 1px solid rgba(148, 163, 184, 0.45);
-  color: #64748b;
-  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid color-mix(in srgb, var(--muted-foreground) 35%, transparent);
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--card) 70%, transparent);
   flex-shrink: 0;
 }
 
 .shell-nav-card--active .shell-nav-card__action {
   border-color: transparent;
-  background: #2563eb;
+  background: var(--accent-iron);
   color: #fff;
 }
 
 .shell-nav-more__list {
   margin-top: 0.35rem;
   padding-left: 0.35rem;
-  border-left: 2px solid rgba(37, 99, 235, 0.12);
+  border-left: 2px solid color-mix(in srgb, var(--accent-iron) 18%, transparent);
   display: flex;
   flex-direction: column;
   gap: 0.35rem;

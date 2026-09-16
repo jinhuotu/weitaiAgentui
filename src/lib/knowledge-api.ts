@@ -5,6 +5,7 @@ export type KnowledgeBaseItem = {
   id: string;
   name: string;
   description?: string | null;
+  purpose?: 'rag' | 'asset' | string;
   status: string;
   docCount: number;
   chunkCount: number;

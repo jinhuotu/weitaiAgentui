@@ -108,7 +108,7 @@ async function confirmRemove() {
 <template>
   <PageHeader
     title="全部投标任务"
-    description="管理员视角查看全部投标任务，支持按状态、时间、负责人和项目类型筛选，以及导出与批量删除。"
+    description="查看全部投标任务，支持按状态、时间、负责人和项目类型筛选，以及导出与批量删除。"
   >
     <template #actions>
       <button
@@ -125,7 +125,7 @@ async function confirmRemove() {
   <p v-if="error" class="mb-4 text-xs text-iron">{{ error }}</p>
   <p v-if="toast" class="mb-4 text-xs text-patina">{{ toast }}</p>
 
-  <Panel title="全部投标任务（管理员视角）" :subtitle="`共 ${filtered.length} 条`" flush>
+  <Panel title="全部投标任务" :subtitle="`共 ${filtered.length} 条`" flush>
     <template #action>
       <div class="flex items-center gap-2">
         <button

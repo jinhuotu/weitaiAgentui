@@ -18,6 +18,7 @@ const MIGRATED_VIEWS: Record<string, () => Promise<{ default: Component }>> = {
   '/mcp-manage': () => import('@/views/McpManageView.vue'),
   '/knowledge': () => import('@/views/KnowledgeListView.vue'),
   '/tenders': () => import('@/views/TendersView.vue'),
+  '/quotes': () => import('@/views/QuotesView.vue'),
   '/tender-library': () => import('@/views/TenderLibraryView.vue'),
   '/work-tasks': () => import('@/views/WorkTasksView.vue'),
   '/tender-tasks': () => import('@/views/AllTenderTasksView.vue'),
@@ -109,7 +110,20 @@ router.beforeEach(async (to) => {
   return true
 })
 
+const CHUNK_LOAD_RE =
+  /Failed to fetch dynamically imported module|Unable to preload CSS|Importing a module script failed|Loading chunk|Loading CSS chunk/i
+const CHUNK_RELOAD_KEY = 'youqi-chunk-reload'
+
+router.onError((err) => {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (!CHUNK_LOAD_RE.test(msg)) return
+  if (sessionStorage.getItem(CHUNK_RELOAD_KEY)) return
+  sessionStorage.setItem(CHUNK_RELOAD_KEY, '1')
+  window.location.reload()
+})
+
 router.afterEach((to) => {
+  sessionStorage.removeItem(CHUNK_RELOAD_KEY)
   const title = (to.meta.title as string | undefined) || '优祺智能'
   document.title = `${title} · 优祺智能`
 

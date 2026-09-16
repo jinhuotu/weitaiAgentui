@@ -27,6 +27,7 @@ import {
   ImagePlus,
 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
+import weitaiLogo from '@/assets/weitai-logo.jpg'
 import {
   cancelChatSession,
   createChatSession,
@@ -590,6 +591,13 @@ onMounted(() => {
     await loadSessions()
     try {
       kbList.value = await listKnowledgeBases({ access: 'use' })
+      // 默认勾选投标资料库，便于直接问答资质/合同等内容
+      if (
+        selectedKbIds.value.length === 0 &&
+        kbList.value.some((b) => b.id === 'tenderlib01')
+      ) {
+        selectedKbIds.value = ['tenderlib01']
+      }
     } catch {
       // 未登录或接口失败时保持空列表
     }
@@ -1340,7 +1348,7 @@ function resetCurrent() {
             class="absolute right-0 top-full z-30 mt-1.5 w-64 rounded-lg border border-hairline bg-bg-elevated shadow-xl p-2"
           >
             <div class="px-1.5 pb-1.5 mb-1.5 border-b border-hairline text-[11px] text-text-muted">
-              未选 = 不检索；可多选缩小范围
+              未选 = 不检索；可多选。「投标资料库」含资质/合同 OCR 全文
             </div>
             <div
               v-if="kbList.length === 0"
@@ -1372,7 +1380,13 @@ function resetCurrent() {
                   <Check v-if="selectedKbIds.includes(b.id)" class="size-2.5" />
                 </span>
                 <span class="truncate flex-1">{{ b.name }}</span>
-                <span class="text-[10px] font-mono text-text-muted shrink-0">
+                <span
+                  v-if="b.id === 'tenderlib01' || b.purpose === 'asset'"
+                  class="text-[10px] text-text-muted shrink-0"
+                >
+                  资料库
+                </span>
+                <span v-else class="text-[10px] font-mono text-text-muted shrink-0">
                   {{ b.docCount }}资料
                 </span>
               </button>
@@ -1568,9 +1582,9 @@ function resetCurrent() {
             class="h-full flex flex-col items-center justify-center text-center py-10"
           >
             <div
-              class="size-14 rounded-xl bg-gradient-to-br from-iron via-iron/80 to-coolant flex items-center justify-center mb-4 shadow-[0_0_28px_var(--accent-glow)]"
+              class="size-14 rounded-full overflow-hidden mb-4 shadow-[0_0_28px_var(--accent-glow)] ring-1 ring-black/5"
             >
-              <BotMessageSquare class="size-7 text-white" :stroke-width="2.4" />
+              <img :src="weitaiLogo" alt="优祺智能助手" class="size-full object-cover" />
             </div>
             <div class="text-[15px] font-semibold mb-1">优祺智能助手</div>
             <div class="text-[12px] text-text-secondary max-w-md mb-5 leading-relaxed">
@@ -1633,10 +1647,8 @@ function resetCurrent() {
 
             <!-- Assistant -->
             <div v-else class="flex gap-2.5">
-              <div
-                class="size-8 rounded-md bg-iron/15 border border-iron/30 flex items-center justify-center shrink-0"
-              >
-                <BotMessageSquare class="size-4 text-iron" />
+              <div class="size-8 shrink-0 overflow-hidden rounded-full ring-1 ring-black/5">
+                <img :src="weitaiLogo" alt="助手" class="size-full object-cover" />
               </div>
               <div class="flex-1 max-w-[85%] space-y-3">
                 <div class="bg-bg-base/50 border border-hairline px-4 py-3 rounded-lg rounded-tl-sm">

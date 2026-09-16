@@ -8,6 +8,7 @@ import { fmtAgo } from '@/lib/time'
 import { NAV_ITEM_DESC } from '@/config/nav'
 import { useNavDragReorder } from '@/composables/useNavDragReorder'
 import { useOrderedPrimaryNav } from '@/composables/useOrderedPrimaryNav'
+import { APP_NAME, APP_VERSION, COMPANY_NAME, COPYRIGHT_YEAR } from '@/config/brand'
 
 const router = useRouter()
 const { items: primaryItems, moreItems: moreNavItems, commitOrder } = useOrderedPrimaryNav()
@@ -107,7 +108,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="portal mx-auto w-full max-w-5xl">
+  <div class="portal mx-auto flex w-full max-w-5xl min-h-full flex-col">
     <section class="portal-hero">
       <div class="portal-hero__glow" aria-hidden="true" />
       <div class="portal-hero__body">
@@ -153,7 +154,7 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <div v-if="loading" class="flex items-center gap-2 py-6 text-[12px] text-muted-foreground">
+          <div v-if="loading" class="flex items-center gap-2 py-3 text-[12px] text-muted-foreground">
             <Loader2 class="size-3.5 animate-spin" />
             加载中…
           </div>
@@ -163,8 +164,8 @@ onUnmounted(() => {
           >
             {{ tenderError }}
           </div>
-          <p v-else-if="!tenderRecords.length" class="py-6 text-[12px] text-muted-foreground">
-            还没有生成记录。可从「投标文件」识别邀请书后生成。
+          <p v-else-if="!tenderRecords.length" class="py-3 text-[12px] text-muted-foreground">
+            还没有生成记录。可从「AI标书生成」识别邀请书后生成。
           </p>
           <ul v-else class="portal-tenders">
             <li v-for="item in tenderRecords" :key="item.id">
@@ -188,8 +189,8 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <section class="mt-8">
-      <div class="mb-4 flex items-end justify-between gap-3">
+    <section class="portal-modules">
+      <div class="mb-2.5 flex items-end justify-between gap-3">
         <div>
           <h2 class="text-[15px] font-semibold tracking-wide">常用功能</h2>
           <p class="mt-0.5 text-[12px] text-muted-foreground">拖拽可调整顺序，点击进入对应模块</p>
@@ -218,7 +219,7 @@ onUnmounted(() => {
             @click="openModule(item.href, item.label)"
           >
             <span class="primary-tile__icon">
-              <component :is="item.icon" class="size-8" />
+              <component :is="item.icon" class="size-6" />
             </span>
             <span class="primary-tile__label">{{ item.label }}</span>
             <span class="primary-tile__desc">{{ item.desc }}</span>
@@ -233,7 +234,7 @@ onUnmounted(() => {
             @click.stop="moreOpen = !moreOpen"
           >
             <span class="primary-tile__icon primary-tile__icon--muted">
-              <Ellipsis class="size-8" />
+              <Ellipsis class="size-6" />
             </span>
             <span class="primary-tile__label">更多</span>
             <span class="primary-tile__desc">管理、配置与其他入口</span>
@@ -273,10 +274,37 @@ onUnmounted(() => {
         </div>
       </div>
     </section>
+
+    <footer class="portal-footer">
+      技术支持：{{ COMPANY_NAME }}
+      ©{{ COPYRIGHT_YEAR }} {{ APP_NAME }} {{ APP_VERSION }}
+    </footer>
   </div>
 </template>
 
 <style scoped>
+.portal {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 100%;
+}
+
+.portal-footer {
+  margin-top: auto;
+  padding: 1rem 0.5rem 0.15rem;
+  text-align: center;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: var(--muted-foreground, #6b7280);
+  white-space: nowrap;
+}
+
+.portal-modules {
+  margin-top: 1.1rem;
+}
+
 .portal-hero {
   position: relative;
   overflow: hidden;
@@ -310,8 +338,8 @@ onUnmounted(() => {
 .portal-hero__body {
   position: relative;
   display: grid;
-  gap: 1.25rem;
-  padding: clamp(1.25rem, 3vw, 2rem);
+  gap: 0.9rem;
+  padding: clamp(0.85rem, 2vw, 1.25rem);
 }
 
 @media (min-width: 900px) {
@@ -330,25 +358,25 @@ onUnmounted(() => {
 }
 
 .portal-hero__title {
-  margin: 0.4rem 0 0;
-  font-size: clamp(1.6rem, 3vw, 2rem);
+  margin: 0.25rem 0 0;
+  font-size: clamp(1.35rem, 2.4vw, 1.7rem);
   font-weight: 700;
   letter-spacing: 0.02em;
 }
 
 .portal-hero__desc {
-  margin: 0.5rem 0 0;
+  margin: 0.3rem 0 0;
   max-width: 36rem;
   font-size: 0.8125rem;
-  line-height: 1.55;
+  line-height: 1.45;
   color: hsl(var(--muted-foreground));
 }
 
 .portal-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.75rem;
-  margin-top: 1.25rem;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
 }
 
 .portal-stat {
@@ -356,8 +384,8 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.15rem;
-  padding: 0.7rem 0.8rem;
+  gap: 0.1rem;
+  padding: 0.5rem 0.65rem;
   border-radius: 0.65rem;
   border: 1px solid color-mix(in srgb, var(--hairline, hsl(var(--border))) 80%, transparent);
   background: color-mix(in srgb, hsl(var(--background)) 55%, transparent);
@@ -401,7 +429,7 @@ onUnmounted(() => {
   border-radius: 0.75rem;
   border: 1px solid var(--hairline, hsl(var(--border)));
   background: color-mix(in srgb, hsl(var(--background)) 70%, transparent);
-  padding: 0.9rem 1rem;
+  padding: 0.7rem 0.85rem;
 }
 
 .portal-runtime__head {
@@ -432,7 +460,7 @@ onUnmounted(() => {
   margin: 0;
   padding: 0;
   list-style: none;
-  max-height: 13.5rem;
+  max-height: 9.5rem;
   overflow: auto;
 }
 
@@ -494,7 +522,7 @@ onUnmounted(() => {
 .primary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  gap: 0.7rem;
 }
 
 @media (min-width: 768px) {
@@ -535,12 +563,12 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.65rem;
+  gap: 0.4rem;
   width: 100%;
-  min-height: 10.5rem;
-  padding: 1.25rem 1rem;
+  min-height: 7.75rem;
+  padding: 0.85rem 0.75rem;
   text-align: center;
-  border-radius: 1rem;
+  border-radius: 0.9rem;
   border: 1px solid var(--hairline, hsl(var(--border)));
   background: hsl(var(--card));
   color: inherit;
@@ -576,9 +604,9 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 3.75rem;
-  height: 3.75rem;
-  border-radius: 1rem;
+  width: 2.85rem;
+  height: 2.85rem;
+  border-radius: 0.85rem;
   background: color-mix(in srgb, var(--accent-iron, #2563eb) 14%, transparent);
   color: var(--accent-iron, #2563eb);
 }
@@ -667,6 +695,11 @@ onUnmounted(() => {
 @media (max-width: 520px) {
   .portal-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .portal-footer {
+    font-size: 0.6875rem;
+    white-space: normal;
   }
 }
 </style>

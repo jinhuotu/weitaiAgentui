@@ -16,6 +16,7 @@ import {
   ClipboardList,
   FolderKanban,
   BadgeCheck,
+  FileSpreadsheet,
 } from 'lucide-vue-next'
 
 export type NavItem = {
@@ -109,7 +110,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/tender-tasks', label: '全部投标任务', icon: FolderKanban },
       { href: '/approval', label: '审批流程', icon: BadgeCheck },
       { href: '/knowledge', label: '知识库', icon: LibraryBig },
-      { href: '/tenders', label: '投标文件', icon: FileText },
+      { href: '/tenders', label: 'AI标书生成', icon: FileText },
+      { href: '/quotes', label: 'AI报价', icon: FileSpreadsheet },
       { href: '/tender-library', label: '投标资料库', icon: FolderOpen },
       { href: '/scene-agents', label: '场景智能体', icon: Sparkles, adminOnly: true },
       { href: '/workflows', label: '工作流', icon: Workflow, adminOnly: true },
@@ -142,6 +144,7 @@ export const PRIMARY_NAV_HREFS = [
   '/tender-tasks',
   '/approval',
   '/tenders',
+  '/quotes',
   '/knowledge',
   '/tender-library',
 ] as const
@@ -154,6 +157,7 @@ export const NAV_ITEM_DESC: Record<string, string> = {
   '/approval': '待审、已审与我发起的申请',
   '/knowledge': '文档入库、检索与预览',
   '/tenders': '邀请书识别与文档生成',
+  '/quotes': '规划图识别与 Excel 报价单',
   '/tender-library': '企业常备资料与扫描件',
   '/scene-agents': '绑定提示词、知识库与 MCP',
   '/workflows': '编排知识检索 / LLM / 智能体',
