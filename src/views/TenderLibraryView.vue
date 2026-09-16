@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { FileText, FolderOpen, Loader2, Pencil, Plus, Trash2, Upload } from 'lucide-vue-next'
+import { ExternalLink, FileText, FolderOpen, Loader2, Pencil, Plus, Trash2, Upload } from 'lucide-vue-next'
 import { PageHeader, Panel, Tag } from '@/components/ui-kit'
 import AppAlertDialog from '@/components/ui/AppAlertDialog.vue'
 import TenderScanGallery from '@/components/tenders/TenderScanGallery.vue'
@@ -43,7 +43,46 @@ const pendingDeleteFile = ref<{ slot: SlotStatus; file: SlotFileInfo } | null>(n
 const deleting = ref(false)
 const removingFileId = ref<string | null>(null)
 
+const CREDIT_SEARCH =
+  'https://www.creditchina.gov.cn/xinyongxinxi/index.html?index=0&scenes=defaultScenario&tableName=credit_xyzx_tyshxydm&searchState=2&entityType=1,2,4,5,6,7,8&keyword='
+const DEFAULT_CREDIT_NAME = '河南伟泰光电科技有限公司'
+const LS_CREDIT_NAME = 'tender.creditChinaName'
+
+const showCredit = ref(false)
+const creditName = ref(DEFAULT_CREDIT_NAME)
+
 const filledCount = computed(() => slots.value.filter((s) => s.fileCount > 0).length)
+
+function loadCreditName() {
+  try {
+    const s = localStorage.getItem(LS_CREDIT_NAME)?.trim()
+    if (s) creditName.value = s
+  } catch {
+    /* ignore */
+  }
+}
+
+function openCreditDialog() {
+  loadCreditName()
+  showCredit.value = true
+}
+
+async function jumpCreditChina() {
+  const name = creditName.value.trim() || DEFAULT_CREDIT_NAME
+  creditName.value = name
+  try {
+    localStorage.setItem(LS_CREDIT_NAME, name)
+  } catch {
+    /* ignore */
+  }
+  try {
+    await navigator.clipboard.writeText(name)
+  } catch {
+    /* 无剪贴板权限时仍跳官网 */
+  }
+  window.open(CREDIT_SEARCH + encodeURIComponent(name), '_blank', 'noopener,noreferrer')
+  showCredit.value = false
+}
 
 const _CN = '一二三四五六七八九'
 
@@ -62,6 +101,7 @@ function cnOrdinal(i: number) {
 }
 
 onMounted(async () => {
+  loadCreditName()
   if (!getAccessToken()) {
     error.value = '请先登录'
     loading.value = false
@@ -286,6 +326,15 @@ async function onReindex(force = false) {
     <template #actions>
       <button
         type="button"
+        class="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-border text-[12px] hover:bg-accent"
+        title="打开信用中国官网查询，公司名称可改"
+        @click="openCreditDialog"
+      >
+        <ExternalLink class="size-3.5" />
+        打开信用中国
+      </button>
+      <button
+        type="button"
         class="h-8 px-3 inline-flex items-center gap-1.5 rounded-md border border-border text-[12px] hover:bg-accent disabled:opacity-50"
         :disabled="reindexing"
         title="将已有扫描件 OCR 写入向量库，供智能问答检索"
@@ -438,6 +487,47 @@ async function onReindex(force = false) {
         @change="onFileChange"
       />
     </Panel>
+  </div>
+
+  <div
+    v-if="showCredit"
+    class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+    @click.self="showCredit = false"
+  >
+    <div class="w-full max-w-md rounded-xl border border-border bg-card p-4 shadow-xl">
+      <h3 class="text-[14px] font-semibold">打开信用中国</h3>
+      <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+        会打开官网查询页并把公司名填进搜索框。若弹出验证码，需在官网完成后再点搜索、下载报告，回到本页「信用中国」资料项上传。
+      </p>
+      <label class="mt-4 block text-[12px]">
+        查询主体
+        <input
+          v-model="creditName"
+          class="kb-input mt-1"
+          placeholder="公司全称或统一社会信用代码"
+          @keydown.enter="jumpCreditChina"
+        />
+      </label>
+      <button
+        type="button"
+        class="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
+        @click="creditName = DEFAULT_CREDIT_NAME"
+      >
+        恢复默认：{{ DEFAULT_CREDIT_NAME }}
+      </button>
+      <div class="mt-4 flex justify-end gap-2">
+        <button type="button" class="h-8 px-3 rounded-md border border-border text-[12px]" @click="showCredit = false">
+          取消
+        </button>
+        <button
+          type="button"
+          class="h-8 px-3 rounded-md bg-iron text-white text-[12px]"
+          @click="jumpCreditChina"
+        >
+          打开官网
+        </button>
+      </div>
+    </div>
   </div>
 
   <div

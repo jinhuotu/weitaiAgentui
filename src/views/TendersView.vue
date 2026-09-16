@@ -58,12 +58,14 @@ import {
   type OutlineItem,
   type AttachmentMatch,
   type AttachmentMatchItem,
+  type BidVolume,
   type PerformanceLine,
   type QualificationStatus,
   type QuoteLineIn,
   type SlotFileInfo,
   type SlotStatus,
   type TenderRecordItem,
+  volumeDocx,
 } from '@/lib/tenders-api'
 import TenderDocEditor from '@/components/tenders/TenderDocEditor.vue'
 import TenderQaPanel from '@/components/tenders/TenderQaPanel.vue'
@@ -133,6 +135,7 @@ function emptyBrief(): BidBrief {
     agentName: '',
     agentIdNo: '',
     agentAuthUntil: '',
+    authNeed: '',
     trafficFeeNote: '',
     extraNote: '',
     factoryRole: '',
@@ -241,8 +244,16 @@ function setOutlineKind(item: OutlineItem, kind: string) {
 }
 
 function setOutlineSkipped(item: OutlineItem, skipped: boolean) {
+  if (item.kind === 'auth' && form.authNeed === 'required' && skipped) return
   item.skipped = skipped
   item.source = outlineSourceFor(item.kind, skipped)
+}
+
+function outlineAuthHint(item: OutlineItem) {
+  if (item.kind !== 'auth') return ''
+  if (hasAgent.value) return item.skipped ? '已填委托人，请取消跳过' : '需贴委托人身份证'
+  if (form.authNeed === 'required') return '招标书要求必须委托'
+  return '法人自签可跳过'
 }
 
 function pruneUnknownOutline(items: OutlineItem[] | undefined) {
@@ -384,7 +395,7 @@ const route = useRoute()
 const loading = ref(true)
 const generating = ref(false)
 const parsing = ref(false)
-const downloading = ref<'docx' | 'pdf' | null>(null)
+const downloading = ref<'docx' | 'tech' | 'pdf' | null>(null)
 const uploadingKey = ref<string | null>(null)
 const error = ref('')
 const qualification = ref<QualificationStatus | null>(null)
@@ -425,9 +436,9 @@ const hasParsed = ref(false)
 const slotsExpanded = ref(true)
 /** 向导当前步骤 0=上传 1=填表 2=在线预览 3=AI质检 4=下载定稿 */
 const currentStepIndex = ref(0)
-/** 填写页切换商务标 / 技术标；生成时仍写入同一份 Word */
-type BidVolume = 'business' | 'technical'
+/** 填写页切换商务标 / 技术标；生成后各出一本 Word */
 const activeVolume = ref<BidVolume>('business')
+const previewVolume = ref<BidVolume>('business')
 const volumeHint = ref('')
 const maxStepReached = ref(0)
 const previewFullscreen = ref(false)
@@ -459,6 +470,12 @@ const paySum = computed(
   () => form.prepaidPct + form.arrivalPct + form.settlementPct + form.warrantyPct,
 )
 
+const previewDoc = computed(() => {
+  const r = result.value
+  if (!r) return { file: '', name: '' }
+  return volumeDocx(r, previewVolume.value)
+})
+
 const parseRiskNoteCount = computed(
   () =>
     parseNotes.value.filter((n) => /废标|扣分|未解析|未找到|缺|失败|警告/.test(n)).length,
@@ -474,7 +491,7 @@ function isParseNoiseNote(note: string) {
 
 function isParsePrimaryNote(note: string) {
   if (isParseNoiseNote(note)) return false
-  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标/.test(
+  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标|招标书要求提供授权委托/.test(
     note,
   )
 }
@@ -600,8 +617,19 @@ function isBlank(value: unknown) {
   return !String(value ?? '').trim()
 }
 
-const agentIdRequired = computed(() => !isBlank(form.agentName))
+const agentIdRequired = computed(() => !isBlank(form.agentName) || form.authNeed === 'required')
+const agentNameRequired = computed(() => form.authNeed === 'required')
 const hasAgent = computed(() => !isBlank(form.agentName) || !isBlank(form.agentIdNo))
+
+watch(
+  () => form.agentName,
+  (name) => {
+    if (!String(name || '').trim()) return
+    for (const item of form.outlineItems) {
+      if (item.kind === 'auth' && item.skipped) setOutlineSkipped(item, false)
+    }
+  },
+)
 
 function uniqueSlotKeys(keys: string[] | undefined) {
   const out: string[] = []
@@ -644,14 +672,16 @@ const generateBlockers = computed(() => {
   const issues: string[] = []
   if (isBlank(form.projectName)) issues.push('项目名称')
   if (isBlank(form.tenderer)) issues.push('招标人')
-  if (!(Number(form.bidPriceYuan) > 0)) issues.push('投标总价')
   if (isBlank(form.bidderName)) issues.push('投标人全称')
+  if (activeVolume.value === 'technical') return issues
+  if (!(Number(form.bidPriceYuan) > 0)) issues.push('投标总价')
   if (isBlank(form.bidderAddress)) issues.push('地址')
   if (isBlank(form.foundedDate)) issues.push('成立日期')
   if (isBlank(form.bidderPhone)) issues.push('电话')
   if (isBlank(form.legalPersonName)) issues.push('法人姓名')
   if (isBlank(form.legalPersonAge)) issues.push('年龄')
   if (isBlank(form.legalPersonIdNo)) issues.push('法人身份证号')
+  if (agentNameRequired.value && isBlank(form.agentName)) issues.push('委托代理人（招标书要求授权委托）')
   if (agentIdRequired.value && isBlank(form.agentIdNo)) issues.push('代理人身份证号')
   if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
     issues.push('报价清单（请在本页上传工程量清单并点「识别清单」）')
@@ -708,17 +738,31 @@ const technicalWarnings = computed(() => {
 
 const softGenerateNotes = computed(() => {
   const notes: string[] = []
-  if (missingMaterialTitles.value.length) {
-    notes.push(`未上传资料将以虚线框占位：${missingMaterialTitles.value.join('、')}`)
+  const vol = activeVolume.value
+  const miss = missingMaterialTitles.value.filter((title) => {
+    const slot = placeholderItems.value.find((s) => (s.title || '扫描件') === title)
+    if (!slot) return vol === 'business'
+    return slotVolume(slot) === vol
+  })
+  if (miss.length) {
+    notes.push(`未上传资料将以虚线框占位：${miss.join('、')}`)
   }
-  notes.push(...technicalWarnings.value)
+  for (const w of technicalWarnings.value) {
+    const techNote = /技术偏差|实施方案|图纸/.test(w)
+    const bizNote = /类似业绩/.test(w)
+    if (vol === 'technical' && techNote) notes.push(w)
+    if (vol === 'business' && bizNote) notes.push(w)
+  }
   return notes
 })
 
 const formStepNextLabel = computed(() => {
   if (generating.value) return '正在生成…'
   if (workflowLocked.value) return '当前任务只读'
-  return result.value ? '覆盖生成并预览' : '生成并预览'
+  const volLabel = activeVolume.value === 'technical' ? '技术标' : '商务标'
+  const hasThis =
+    activeVolume.value === 'technical' ? Boolean(result.value?.techDocxFile) : Boolean(result.value?.docxFile)
+  return hasThis ? `覆盖生成${volLabel}` : `生成${volLabel}并预览`
 })
 
 const workflowLocked = computed(() =>
@@ -847,7 +891,7 @@ async function selectVolume(volume: BidVolume) {
       await nextTick()
     } else if (volume === 'technical') {
       volumeHint.value =
-        '请先上传邀请书并点「识别并继续」。技术标（偏差表、实施方案）在下一步填写；最终会生成一份同时包含商务标与技术标的 Word。'
+        '请先上传邀请书并点「识别并继续」。左上角选哪一卷，生成时就只出那一卷 Word。'
     }
     return
   }
@@ -1018,7 +1062,11 @@ function toggleRecords() {
 }
 
 async function openRecordPreview(item: TenderRecordItem) {
-  if (!item.docxAvailable || !item.docxFile) {
+  if (!item.docxFile && !item.techDocxFile) {
+    error.value = '该记录的 Word 文件已丢失，无法预览'
+    return
+  }
+  if (!item.docxAvailable && !item.techDocxAvailable) {
     error.value = '该记录的 Word 文件已丢失，无法预览'
     return
   }
@@ -1033,13 +1081,16 @@ async function openRecordPreview(item: TenderRecordItem) {
       bidPriceYuan: item.bidPriceYuan,
       legalPersonName: item.legalPersonName,
       docxFile: item.docxFile,
+      techDocxFile: item.techDocxFile,
       pdfFile: item.pdfFile,
       downloadName: item.downloadName || `${item.projectName || 'bid'}.docx`,
+      techDownloadName: item.techDownloadName,
       pdfDownloadName: item.pdfDownloadName,
       warnings: item.warnings || [],
       username: item.username,
       createdAt: item.createdAt,
       docxAvailable: item.docxAvailable,
+      techDocxAvailable: item.techDocxAvailable,
       pdfAvailable: item.pdfAvailable,
       status: item.status,
       workflowLocked: item.workflowLocked,
@@ -1047,6 +1098,12 @@ async function openRecordPreview(item: TenderRecordItem) {
       currentStep: item.currentStep,
     }
     closeRecords()
+    previewVolume.value =
+      activeVolume.value === 'technical' && item.techDocxFile
+        ? 'technical'
+        : item.docxFile
+          ? 'business'
+          : 'technical'
     setPreviewFullscreen(false)
     advanceStep(2)
     return true
@@ -1066,7 +1123,11 @@ async function openRecordFromQuery() {
   try {
     // 深链仍需详情（列表可能未加载）
     const detail = await fetchTenderRecord(id)
-    if (!detail.docxAvailable || !detail.docxFile) {
+    if (!detail.docxFile && !detail.techDocxFile) {
+      error.value = '该记录的 Word 文件已丢失，无法预览'
+      return
+    }
+    if (!detail.docxAvailable && !detail.techDocxAvailable) {
       error.value = '该记录的 Word 文件已丢失，无法预览'
       return
     }
@@ -1077,13 +1138,16 @@ async function openRecordFromQuery() {
       bidPriceYuan: detail.bidPriceYuan,
       legalPersonName: detail.legalPersonName,
       docxFile: detail.docxFile,
+      techDocxFile: detail.techDocxFile,
       pdfFile: detail.pdfFile,
       downloadName: detail.downloadName,
+      techDownloadName: detail.techDownloadName,
       pdfDownloadName: detail.pdfDownloadName,
       warnings: detail.warnings || [],
       username: detail.username,
       createdAt: detail.createdAt,
       docxAvailable: detail.docxAvailable,
+      techDocxAvailable: detail.techDocxAvailable,
       pdfAvailable: detail.pdfAvailable,
       status: detail.status,
       workflowLocked: detail.workflowLocked,
@@ -1091,6 +1155,12 @@ async function openRecordFromQuery() {
       currentStep: detail.currentStep,
     }
     closeRecords()
+    previewVolume.value =
+      activeVolume.value === 'technical' && detail.techDocxFile
+        ? 'technical'
+        : detail.docxFile
+          ? 'business'
+          : 'technical'
     setPreviewFullscreen(false)
     advanceStep(2)
     if (route.query.record) {
@@ -1214,6 +1284,8 @@ async function regenerateRecord(item: TenderRecordItem) {
   generating.value = true
   try {
     result.value = await regenerateTenderRecord(item.id)
+    previewVolume.value =
+      result.value?.techDocxFile && !result.value?.docxFile ? 'technical' : 'business'
     closeRecords()
     setPreviewFullscreen(false)
     advanceStep(2)
@@ -1299,18 +1371,26 @@ async function confirmClearMineRecords() {
   }
 }
 
-async function downloadRecord(item: TenderRecordItem, kind: 'docx' | 'pdf') {
-  const file = kind === 'docx' ? item.docxFile : item.pdfFile
-  const name = kind === 'docx' ? item.downloadName : item.pdfDownloadName
-  if (!file || !name) return
+async function downloadRecord(item: TenderRecordItem, kind: 'docx' | 'tech' | 'pdf') {
+  const picked =
+    kind === 'tech'
+      ? volumeDocx(item, 'technical')
+      : kind === 'docx'
+        ? volumeDocx(item, 'business')
+        : { file: item.pdfFile || '', name: item.pdfDownloadName || '' }
+  if (!picked.file || !picked.name) return
   if (kind === 'docx' && !item.docxAvailable) {
-    error.value = '该记录的 Word 文件已丢失'
+    error.value = '该记录的商务标 Word 已丢失'
+    return
+  }
+  if (kind === 'tech' && !item.techDocxFile) {
+    error.value = '该记录还没有技术标 Word，请重新生成'
     return
   }
   downloading.value = kind
   error.value = ''
   try {
-    await downloadTenderFile(file, name)
+    await downloadTenderFile(picked.file, picked.name)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '下载失败'
   } finally {
@@ -1378,6 +1458,10 @@ watch(previewFullscreen, (on) => {
   window.setTimeout(() => {
     previewLayoutTick.value += 1
   }, 0)
+})
+
+watch(previewVolume, () => {
+  previewLayoutTick.value += 1
 })
 
 watch(
@@ -1830,6 +1914,7 @@ async function doGenerate() {
       requiredSlotKeys: effectiveRequiredKeys.value,
       includeSlotKeys: effectiveIncludeKeys.value,
       outlineItems: pruneUnknownOutline(form.outlineItems),
+      generateVolume: activeVolume.value,
     }
     if (result.value?.id) {
       result.value = await regenerateTenderRecord(result.value.id, payload)
@@ -1839,6 +1924,7 @@ async function doGenerate() {
     if (result.value.attachmentMatch) {
       attachmentMatch.value = result.value.attachmentMatch
     }
+    previewVolume.value = activeVolume.value
     void loadRecords()
     advanceStep(2)
   } catch (e) {
@@ -1953,16 +2039,20 @@ function onStepBack() {
   }
 }
 
-async function onDownload(kind: 'docx' | 'pdf') {
+async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   const r = result.value
   if (!r) return
-  const file = kind === 'docx' ? r.docxFile : r.pdfFile
-  const name = kind === 'docx' ? r.downloadName : r.pdfDownloadName
-  if (!file || !name) return
+  const picked =
+    kind === 'tech'
+      ? volumeDocx(r, 'technical')
+      : kind === 'docx'
+        ? volumeDocx(r, 'business')
+        : { file: r.pdfFile || '', name: r.pdfDownloadName || '' }
+  if (!picked.file || !picked.name) return
   downloading.value = kind
   error.value = ''
   try {
-    await downloadTenderFile(file, name)
+    await downloadTenderFile(picked.file, picked.name)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '下载失败'
   } finally {
@@ -2132,20 +2222,31 @@ async function onDownload(kind: 'docx' | 'pdf') {
           <button
             type="button"
             class="tender-ghost-btn"
-            :disabled="!item.docxAvailable || openingRecordId === item.id"
+            :disabled="!(item.docxAvailable || item.techDocxAvailable) || openingRecordId === item.id"
             @click="openRecordPreview(item)"
           >
             <Loader2 v-if="openingRecordId === item.id" class="size-3.5 animate-spin" />
             预览
           </button>
           <button
+            v-if="item.docxFile"
             type="button"
             class="tender-ghost-btn"
             :disabled="!item.docxAvailable || downloading === 'docx'"
             @click="downloadRecord(item, 'docx')"
           >
             <Download class="size-3.5" />
-            Word
+            Word商务
+          </button>
+          <button
+            v-if="item.techDocxFile"
+            type="button"
+            class="tender-ghost-btn"
+            :disabled="item.techDocxAvailable === false || downloading === 'tech'"
+            @click="downloadRecord(item, 'tech')"
+          >
+            <Download class="size-3.5" />
+            Word技术
           </button>
           <button
             v-if="item.pdfFile"
@@ -2609,12 +2710,14 @@ async function onDownload(kind: 'docx' | 'pdf') {
                 type="checkbox"
                 class="accent-current"
                 :checked="item.skipped"
+                :disabled="item.kind === 'auth' && form.authNeed === 'required'"
+                :title="item.kind === 'auth' && form.authNeed === 'required' ? '招标书要求授权委托，不可跳过' : '跳过则不入卷'"
                 @change="setOutlineSkipped(item, ($event.target as HTMLInputElement).checked)"
               />
               跳过
             </label>
             <span class="text-[11px] text-muted-foreground whitespace-nowrap">
-              {{ outlineSourceLabel(item.source, item) }}{{ (item.body || '').trim() ? ' · 已抽原文' : '' }}
+              {{ outlineSourceLabel(item.source, item) }}{{ (item.body || '').trim() ? ' · 已抽原文' : '' }}{{ outlineAuthHint(item) ? ` · ${outlineAuthHint(item)}` : '' }}
             </span>
           </li>
         </ul>
@@ -3077,9 +3180,13 @@ async function onDownload(kind: 'docx' | 'pdf') {
 
       <Panel
         title="法定代表人 / 授权"
-        subtitle="法人身份证贴在身份证明页；有委托人时贴在授权委托书"
+        :subtitle="
+          form.authNeed === 'required'
+            ? '招标书要求授权委托，须填委托人并贴身份证'
+            : '法人身份证贴在身份证明页；有委托人时贴在授权委托书，法人自签可跳过授权委托'
+        "
         collapsible
-        :default-open="false"
+        :default-open="form.authNeed === 'required'"
       >
         <template #summary>
           {{ form.legalPersonName || '法人未填' }} · {{ form.legalPersonAge ? `${form.legalPersonAge}岁` : '年龄未填' }} ·
@@ -3107,8 +3214,17 @@ async function onDownload(kind: 'docx' | 'pdf') {
             <input v-model="form.legalPersonIdNo" class="kb-input font-sans" required aria-required="true" />
           </label>
           <label class="text-[12px] space-y-1">
-            <span class="text-muted-foreground">委托代理人</span>
-            <input v-model="form.agentName" class="kb-input font-sans" placeholder="法人自签可留空" />
+            <span class="text-muted-foreground">
+              委托代理人
+              <span v-if="agentNameRequired" class="tender-req" aria-hidden="true">*</span>
+            </span>
+            <input
+              v-model="form.agentName"
+              class="kb-input font-sans"
+              :required="agentNameRequired"
+              :aria-required="agentNameRequired"
+              :placeholder="agentNameRequired ? '招标书要求必填' : '法人自签可留空'"
+            />
           </label>
           <label class="text-[12px] space-y-1">
             <span class="text-muted-foreground">
@@ -3478,13 +3594,15 @@ async function onDownload(kind: 'docx' | 'pdf') {
         </div>
       </footer>
       <p class="mt-1 text-center text-[11px] text-muted-foreground">
-        生成一份 Word，同时写入商务标与技术标。上方切换只改变当前填写内容。
+        当前将只生成{{ activeVolume === 'technical' ? '技术标' : '商务标' }} Word。左上角切换后再生成另一本。
       </p>
       <p v-if="generating" class="mt-2 text-[11px] text-muted-foreground text-center">
         {{
-          form.attachQualifications
-            ? '正在写入扫描件与资质页（已限页加速）…'
-            : '正在生成 Word（扫描件仅占位，不嵌入大图）…'
+          activeVolume === 'technical'
+            ? '正在生成技术标 Word…'
+            : form.attachQualifications
+              ? '正在写入商务标（资质已限页加速）…'
+              : '正在生成商务标 Word…'
         }}
       </p>
     </section>
@@ -3496,11 +3614,39 @@ async function onDownload(kind: 'docx' | 'pdf') {
           <div class="min-w-0">
             <h2 class="text-[14px] font-semibold text-foreground">Word 在线预览</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
-              预览用本机 WPS 排出的 PDF，分页、页眉页脚与本地打开一致。未装 WPS 时回退浏览器内核。
+              左上角选哪一卷就生成哪一卷。预览用本机 WPS 排出的 PDF，分页与本地打开一致。
             </p>
           </div>
-          <div class="flex items-center gap-1.5 shrink-0">
+          <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+            <div
+              v-if="result.docxFile && result.techDocxFile"
+              class="tender-volume-switch"
+              role="tablist"
+              aria-label="预览商务标或技术标"
+            >
+              <button
+                type="button"
+                role="tab"
+                :aria-selected="previewVolume === 'business'"
+                class="tender-volume-btn"
+                :class="{ 'tender-volume-btn--active': previewVolume === 'business' }"
+                @click="previewVolume = 'business'"
+              >
+                商务标
+              </button>
+              <button
+                type="button"
+                role="tab"
+                :aria-selected="previewVolume === 'technical'"
+                class="tender-volume-btn"
+                :class="{ 'tender-volume-btn--active': previewVolume === 'technical' }"
+                @click="previewVolume = 'technical'"
+              >
+                技术标
+              </button>
+            </div>
             <button
+              v-if="result.docxFile"
               type="button"
               class="tender-ghost-btn"
               :disabled="downloading === 'docx'"
@@ -3508,7 +3654,18 @@ async function onDownload(kind: 'docx' | 'pdf') {
             >
               <Loader2 v-if="downloading === 'docx'" class="size-3.5 animate-spin" />
               <Download v-else class="size-3.5" />
-              下载 Word
+              商务标
+            </button>
+            <button
+              v-if="result.techDocxFile"
+              type="button"
+              class="tender-ghost-btn"
+              :disabled="downloading === 'tech'"
+              @click="onDownload('tech')"
+            >
+              <Loader2 v-if="downloading === 'tech'" class="size-3.5 animate-spin" />
+              <Download v-else class="size-3.5" />
+              技术标
             </button>
             <button
               type="button"
@@ -3561,10 +3718,10 @@ async function onDownload(kind: 'docx' | 'pdf') {
         </div>
 
         <TenderDocEditor
-          :key="`${result.docxFile}-view`"
+          :key="`${previewDoc.file}-view`"
           class="tender-preview-editor"
-          :docx-file="result.docxFile"
-          :download-name="result.downloadName"
+          :docx-file="previewDoc.file"
+          :download-name="previewDoc.name"
           :fullscreen="previewFullscreen"
           :layout-tick="previewLayoutTick"
           mode="view"
@@ -3625,7 +3782,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
         <div class="tender-card-head border-b-0 pb-0">
           <h2 class="text-[14px] font-semibold text-patina">投标文件已就绪</h2>
           <p class="text-[11px] text-muted-foreground mt-0.5">
-            一份 Word，内含商务标（资格、报价、业绩、函件）和技术标（偏差表与实施方案）。目录独占一页，页码与正文分页对齐。
+            左上角选商务标只出商务标，选技术标只出技术标。同一任务里两本可以分开生成、分别下载。
           </p>
         </div>
         <ul v-if="generateShownWarnings.length" class="mt-3 space-y-1 text-[11px] text-sulfur">
@@ -3643,6 +3800,7 @@ async function onDownload(kind: 'docx' | 'pdf') {
             去工作任务
           </button>
           <button
+            v-if="result.docxFile"
             type="button"
             class="tender-primary-btn flex-1 h-10"
             :disabled="downloading === 'docx'"
@@ -3650,7 +3808,18 @@ async function onDownload(kind: 'docx' | 'pdf') {
           >
             <Loader2 v-if="downloading === 'docx'" class="size-3.5 animate-spin" />
             <Download v-else class="size-3.5" />
-            下载 Word
+            下载商务标
+          </button>
+          <button
+            v-if="result.techDocxFile"
+            type="button"
+            class="tender-primary-btn flex-1 h-10"
+            :disabled="downloading === 'tech'"
+            @click="onDownload('tech')"
+          >
+            <Loader2 v-if="downloading === 'tech'" class="size-3.5 animate-spin" />
+            <Download v-else class="size-3.5" />
+            下载技术标
           </button>
           <button
             v-if="result.pdfFile"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { Download, Loader2 } from 'lucide-vue-next'
 import AppDialog from '@/components/ui/AppDialog.vue'
 import TenderDocEditor from '@/components/tenders/TenderDocEditor.vue'
@@ -7,6 +7,8 @@ import { ApiError } from '@/lib/api'
 import {
   downloadTenderFile,
   fetchTenderRecord,
+  volumeDocx,
+  type BidVolume,
   type TenderRecordItem,
 } from '@/lib/tenders-api'
 import type { TenderTask } from '@/lib/tender-tasks'
@@ -23,8 +25,15 @@ const emit = defineEmits<{
 const loading = ref(false)
 const error = ref('')
 const record = ref<TenderRecordItem | null>(null)
-const downloading = ref(false)
+const downloading = ref<BidVolume | null>(null)
+const previewVolume = ref<BidVolume>('business')
 const layoutTick = ref(0)
+
+const previewDoc = computed(() => {
+  const row = record.value
+  if (!row) return { file: '', name: '' }
+  return volumeDocx(row, previewVolume.value)
+})
 
 watch(
   () => [props.open, props.task?.recordId] as const,
@@ -38,6 +47,7 @@ watch(
     loading.value = true
     error.value = ''
     record.value = null
+    previewVolume.value = 'business'
     try {
       const detail = await fetchTenderRecord(id)
       if (!detail.docxAvailable || !detail.docxFile) {
@@ -59,17 +69,23 @@ watch(
   { immediate: true },
 )
 
-async function onDownload() {
+watch(previewVolume, () => {
+  layoutTick.value += 1
+})
+
+async function onDownload(volume: BidVolume) {
   const row = record.value
-  if (!row?.docxFile) return
-  downloading.value = true
+  if (!row) return
+  const doc = volumeDocx(row, volume)
+  if (!doc.file) return
+  downloading.value = volume
   error.value = ''
   try {
-    await downloadTenderFile(row.docxFile, row.downloadName || `${row.projectName || 'bid'}.docx`)
+    await downloadTenderFile(doc.file, doc.name || `${row.projectName || 'bid'}.docx`)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '下载失败'
   } finally {
-    downloading.value = false
+    downloading.value = null
   }
 }
 </script>
@@ -82,7 +98,25 @@ async function onDownload() {
     description="在当前页查看 Word，关闭后仍停留在任务列表。"
     @update:open="emit('update:open', $event)"
   >
-    <div class="flex min-h-0 flex-1 flex-col">
+    <div class="flex min-h-0 flex-1 flex-col gap-2">
+      <div v-if="record?.techDocxFile" class="flex shrink-0 items-center gap-1">
+        <button
+          type="button"
+          class="h-7 px-2.5 text-[11px] rounded-md border"
+          :class="previewVolume === 'business' ? 'border-iron bg-iron text-background' : 'border-border hover:bg-accent'"
+          @click="previewVolume = 'business'"
+        >
+          商务标
+        </button>
+        <button
+          type="button"
+          class="h-7 px-2.5 text-[11px] rounded-md border"
+          :class="previewVolume === 'technical' ? 'border-iron bg-iron text-background' : 'border-border hover:bg-accent'"
+          @click="previewVolume = 'technical'"
+        >
+          技术标
+        </button>
+      </div>
       <div
         v-if="loading"
         class="flex flex-1 items-center justify-center gap-2 text-xs text-muted-foreground"
@@ -92,11 +126,11 @@ async function onDownload() {
       </div>
       <p v-else-if="error && !record" class="text-xs text-iron">{{ error }}</p>
       <TenderDocEditor
-        v-else-if="record?.docxFile"
-        :key="record.docxFile"
+        v-else-if="previewDoc.file"
+        :key="previewDoc.file"
         class="min-h-0 flex-1"
-        :docx-file="record.docxFile"
-        :download-name="record.downloadName || `${record.projectName || 'bid'}.docx`"
+        :docx-file="previewDoc.file"
+        :download-name="previewDoc.name || `${record?.projectName || 'bid'}.docx`"
         mode="view"
         engine="browser"
         :layout-tick="layoutTick"
@@ -114,12 +148,23 @@ async function onDownload() {
       <button
         type="button"
         class="h-8 px-3 inline-flex items-center gap-1.5 text-xs rounded-md bg-iron text-background hover:bg-iron/90 disabled:opacity-40"
-        :disabled="!record?.docxFile || downloading"
-        @click="onDownload"
+        :disabled="!record?.docxFile || downloading === 'business'"
+        @click="onDownload('business')"
       >
-        <Loader2 v-if="downloading" class="size-3.5 animate-spin" />
+        <Loader2 v-if="downloading === 'business'" class="size-3.5 animate-spin" />
         <Download v-else class="size-3.5" />
-        下载 Word
+        下载商务标
+      </button>
+      <button
+        v-if="record?.techDocxFile"
+        type="button"
+        class="h-8 px-3 inline-flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40"
+        :disabled="downloading === 'technical'"
+        @click="onDownload('technical')"
+      >
+        <Loader2 v-if="downloading === 'technical'" class="size-3.5 animate-spin" />
+        <Download v-else class="size-3.5" />
+        下载技术标
       </button>
     </template>
   </AppDialog>

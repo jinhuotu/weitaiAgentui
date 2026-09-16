@@ -259,6 +259,7 @@ export type BidBrief = {
   agentName: string
   agentIdNo: string
   agentAuthUntil: string
+  authNeed?: string
   trafficFeeNote: string
   extraNote: string
   factoryRole: string
@@ -291,6 +292,7 @@ export type BidBrief = {
   outlineItems: OutlineItem[]
   documentFormat: DocumentFormat
   invitationId?: string
+  generateVolume?: 'business' | 'technical'
 }
 
 export type QualificationStatus = {
@@ -380,6 +382,30 @@ export type QaReport = {
   stale?: boolean
 }
 
+export type BidVolume = 'business' | 'technical'
+
+export function volumeDocx(
+  row: {
+    docxFile?: string
+    downloadName?: string
+    techDocxFile?: string | null
+    techDownloadName?: string | null
+    projectName?: string
+  },
+  volume: BidVolume,
+): { file: string; name: string } {
+  if (volume === 'technical' && row.techDocxFile) {
+    return {
+      file: row.techDocxFile,
+      name: row.techDownloadName || `${row.projectName || 'bid'}-技术标.docx`,
+    }
+  }
+  return {
+    file: row.docxFile || '',
+    name: row.downloadName || `${row.projectName || 'bid'}-商务标.docx`,
+  }
+}
+
 export type ApprovalStepDef = {
   key: string
   name: string
@@ -409,13 +435,16 @@ export type GenerateResult = {
   bidPriceYuan?: number
   legalPersonName?: string
   docxFile: string
+  techDocxFile?: string | null
   pdfFile: string | null
   downloadName: string
+  techDownloadName?: string | null
   pdfDownloadName: string | null
   warnings: string[]
   username?: string
   createdAt?: number
   docxAvailable?: boolean
+  techDocxAvailable?: boolean
   pdfAvailable?: boolean
   attachmentMatch?: AttachmentMatch
   status?: string
@@ -450,13 +479,16 @@ export type TenderRecordItem = {
   bidPriceYuan: number
   legalPersonName: string
   docxFile: string
+  techDocxFile?: string | null
   pdfFile: string | null
   downloadName: string
+  techDownloadName?: string | null
   pdfDownloadName: string | null
   warnings: string[]
   username: string
   createdAt: number
   docxAvailable: boolean
+  techDocxAvailable?: boolean
   pdfAvailable: boolean
   brief?: BidBrief
   status?: string
