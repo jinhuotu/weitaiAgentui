@@ -51,6 +51,9 @@ const editorError = ref('')
 const drafts = ref<DraftReview[]>([])
 
 const isSuperuser = computed(() => Boolean(auth.user?.is_superuser))
+const canQa = computed(
+  () => auth.isAdmin || (auth.menus || []).includes('/tender-qa') || (auth.menus || []).includes('/tenders'),
+)
 
 const exampleIndex = computed(() => -1)
 
@@ -159,6 +162,10 @@ function openEdit(task: TenderTask) {
 function openApprove(task: TenderTask) {
   current.value = task
   comment.value = ''
+}
+
+function goQa(task: TenderTask) {
+  void router.push({ path: '/tender-qa', query: { record: task.recordId } })
 }
 
 async function decide(passed: boolean) {
@@ -325,6 +332,14 @@ function resultLabel(task: TenderTask) {
               >
                 {{ tab === 'mine' && row.status === 'processing' ? '编辑' : '查看' }}
               </button>
+              <button
+                v-if="canQa"
+                type="button"
+                class="ml-2 text-muted-foreground hover:underline"
+                @click="goQa(row)"
+              >
+                复检
+              </button>
             </td>
           </tr>
         </tbody>
@@ -393,6 +408,14 @@ function resultLabel(task: TenderTask) {
       </label>
     </div>
     <template #footer>
+      <button
+        v-if="current && canQa"
+        type="button"
+        class="h-8 px-3 text-xs rounded-md border border-border hover:bg-accent"
+        @click="goQa(current)"
+      >
+        去复检
+      </button>
       <button
         type="button"
         class="h-8 px-3 text-xs rounded-md border border-iron/40 text-iron hover:bg-iron/10"

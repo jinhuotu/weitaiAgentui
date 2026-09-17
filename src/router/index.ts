@@ -18,6 +18,7 @@ const MIGRATED_VIEWS: Record<string, () => Promise<{ default: Component }>> = {
   '/mcp-manage': () => import('@/views/McpManageView.vue'),
   '/knowledge': () => import('@/views/KnowledgeListView.vue'),
   '/tenders': () => import('@/views/TendersView.vue'),
+  '/tender-qa': () => import('@/views/TenderQaView.vue'),
   '/quotes': () => import('@/views/QuotesView.vue'),
   '/tender-library': () => import('@/views/TenderLibraryView.vue'),
   '/work-tasks': () => import('@/views/WorkTasksView.vue'),

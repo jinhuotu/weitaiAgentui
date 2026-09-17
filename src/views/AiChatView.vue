@@ -28,6 +28,7 @@ import {
 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import weitaiLogo from '@/assets/weitai-logo.jpg'
+import { ASSISTANT_NAME } from '@/config/brand'
 import {
   cancelChatSession,
   createChatSession,
@@ -53,7 +54,9 @@ import {
 } from '@/lib/prompts-api'
 import ChatMarkdown from '@/components/ai/ChatMarkdown.vue'
 import ChatImageGallery from '@/components/ai/ChatImageGallery.vue'
+import ChatKbOriginals from '@/components/ai/ChatKbOriginals.vue'
 import LayoutFileDownloads from '@/components/ai/LayoutFileDownloads.vue'
+import type { SlotFileInfo } from '@/lib/tenders-api'
 import {
   listModelOptions,
   modelTypeLabel,
@@ -67,6 +70,8 @@ import {
 
 type Mode = ChatMode
 
+const TENDER_LIB_ID = 'tenderlib01'
+
 interface RefChunk {
   content: string
   score: number
@@ -74,6 +79,9 @@ interface RefChunk {
   kb_id?: string
   kbId?: string
   name?: string
+  file_type?: string
+  has_file?: boolean
+  preview_kind?: string
 }
 
 interface ToolCallUi {
@@ -268,7 +276,10 @@ function restoreSessionMessages(raw: ChatSessionMessage[]): Msg[] {
 
 const MAX_CHAT_IMAGES = 4
 const IMAGE_ONLY_CAPTION = '请根据图片内容作答。'
-const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,image/jpg'
+const IMAGE_ACCEPT =
+  'image/jpeg,image/png,image/webp,image/gif,image/jpg,application/pdf,.pdf,.dxf,.dwg'
+const MAX_DRAFT_BYTES = 12 * 1024 * 1024
+const DRAFT_NAME_RE = /\.(pdf|dxf|dwg)$/i
 const WF_NODE_LABEL: Record<string, string> = {
   start: '开始',
   end: '结束',
@@ -287,6 +298,7 @@ type PendingImage = {
   mimeType: string
   data: string
   preview: string
+  fileName?: string
 }
 
 interface Msg {
@@ -305,6 +317,28 @@ interface Msg {
   knowledgeBaseNames?: string[]
   useKnowledge?: boolean
   toolCalls?: ToolCallUi[]
+}
+
+function tenderOriginals(refs: RefChunk[] | undefined): SlotFileInfo[] {
+  const seen = new Set<string>()
+  const out: SlotFileInfo[] = []
+  for (const r of refs || []) {
+    const id = String(r.doc_id || '').trim()
+    const kb = String(r.kb_id || r.kbId || '').trim()
+    if (!id || seen.has(id) || kb !== TENDER_LIB_ID) continue
+    if (r.has_file === false) continue
+    const kind =
+      r.preview_kind === 'pdf' ? 'pdf' : r.preview_kind === 'file' ? 'file' : 'image'
+    seen.add(id)
+    out.push({
+      id,
+      name: r.name || '资料原件',
+      sizeBytes: 0,
+      fileType: r.file_type,
+      kind,
+    })
+  }
+  return out
 }
 
 function kbIdsFromMessages(
@@ -363,13 +397,76 @@ function loadImageElement(file: File): Promise<HTMLImageElement> {
   })
 }
 
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = String(reader.result || '')
+      const data = text.includes(',') ? text.split(',', 2)[1] : text
+      if (!data) reject(new Error('图片读取失败'))
+      else resolve(data)
+    }
+    reader.onerror = () => reject(new Error('图片读取失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function chipPreview(label: string): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = 144
+  canvas.height = 144
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+  ctx.fillStyle = '#f3efe6'
+  ctx.fillRect(0, 0, 144, 144)
+  ctx.fillStyle = '#3f3a32'
+  ctx.font = '16px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(label, 72, 76)
+  return canvas.toDataURL('image/png')
+}
+
+function draftMimeOf(file: File): string {
+  const name = (file.name || '').toLowerCase()
+  if (file.type === 'application/pdf' || name.endsWith('.pdf')) return 'application/pdf'
+  if (name.endsWith('.dxf')) return 'application/dxf'
+  if (name.endsWith('.dwg')) return 'application/acad'
+  return file.type || 'application/octet-stream'
+}
+
 async function compressImageFile(file: File): Promise<PendingImage> {
+  const name = file.name || ''
+  const isDraft = DRAFT_NAME_RE.test(name) || file.type === 'application/pdf'
+  if (isDraft) {
+    if (file.size > MAX_DRAFT_BYTES) throw new Error('草稿文件不能超过 12 MB')
+    const data = await fileToBase64(file)
+    const ext = (name.split('.').pop() || 'pdf').toUpperCase()
+    return {
+      id: genId(),
+      mimeType: draftMimeOf(file),
+      data,
+      preview: chipPreview(ext),
+      fileName: name,
+    }
+  }
   if (!file.type.startsWith('image/')) {
-    throw new Error('仅支持 jpeg / png / webp / gif')
+    throw new Error('仅支持图片、PDF、DXF、DWG')
   }
   const img = await loadImageElement(file)
-  const maxEdge = 1280
-  const scale = Math.min(1, maxEdge / Math.max(img.width, img.height, 1))
+  const maxEdge = 2048
+  const long = Math.max(img.width, img.height, 1)
+  // 场地草稿多为细线图，JPEG 会糊掉红线；小 PNG 原样传。
+  if (file.type === 'image/png' && long <= maxEdge && file.size <= 2.5 * 1024 * 1024) {
+    const data = await fileToBase64(file)
+    return {
+      id: genId(),
+      mimeType: 'image/png',
+      data,
+      preview: `data:image/png;base64,${data}`,
+    }
+  }
+  const scale = Math.min(1, maxEdge / long)
   const w = Math.max(1, Math.round(img.width * scale))
   const h = Math.max(1, Math.round(img.height * scale))
   const canvas = document.createElement('canvas')
@@ -380,18 +477,30 @@ async function compressImageFile(file: File): Promise<PendingImage> {
   ctx.fillStyle = '#fff'
   ctx.fillRect(0, 0, w, h)
   ctx.drawImage(img, 0, 0, w, h)
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.82)
+  const pngDraft = file.type === 'image/png' || file.type === 'image/webp'
+  const dataUrl = pngDraft
+    ? canvas.toDataURL('image/png')
+    : canvas.toDataURL('image/jpeg', 0.92)
   const data = dataUrl.split(',', 2)[1] || ''
   if (!data) throw new Error('图片压缩失败')
-  return { id: genId(), mimeType: 'image/jpeg', data, preview: dataUrl }
+  return {
+    id: genId(),
+    mimeType: pngDraft ? 'image/png' : 'image/jpeg',
+    data,
+    preview: dataUrl,
+  }
 }
 
-function imagePayload(img: PendingImage): { mimeType: string; data: string } {
+function imagePayload(img: PendingImage): { mimeType: string; data: string; fileName?: string } {
   const fromField = (img.data || '').trim()
   const fromPreview = img.preview.includes(',') ? img.preview.split(',', 2)[1] : ''
   const data = fromField || fromPreview
   if (!data) throw new Error('图片数据为空，请重新选择图片')
-  return { mimeType: img.mimeType || 'image/jpeg', data }
+  return {
+    mimeType: img.mimeType || 'image/jpeg',
+    data,
+    ...(img.fileName ? { fileName: img.fileName } : {}),
+  }
 }
 
 function fmtAgo(ts: number) {
@@ -591,11 +700,9 @@ onMounted(() => {
     await loadSessions()
     try {
       kbList.value = await listKnowledgeBases({ access: 'use' })
-      // 默认勾选投标资料库，便于直接问答资质/合同等内容
-      if (
-        selectedKbIds.value.length === 0 &&
-        kbList.value.some((b) => b.id === 'tenderlib01')
-      ) {
+      const allowed = new Set(kbList.value.map((b) => b.id))
+      selectedKbIds.value = selectedKbIds.value.filter((id) => allowed.has(id))
+      if (selectedKbIds.value.length === 0 && allowed.has('tenderlib01')) {
         selectedKbIds.value = ['tenderlib01']
       }
     } catch {
@@ -674,7 +781,8 @@ async function openSession(sessionId: string) {
     pendingImages.value = []
     const fromSession = (item.knowledgeBaseIds || []).filter(Boolean)
     const fromMsgs = kbIdsFromMessages(item.messages || [])
-    selectedKbIds.value = fromSession.length > 0 ? fromSession : fromMsgs
+    const picked = fromSession.length > 0 ? fromSession : fromMsgs
+    selectedKbIds.value = picked.filter((id) => kbList.value.some((b) => b.id === id))
   } catch (e) {
     toast.value = {
       type: 'err',
@@ -771,12 +879,12 @@ async function confirmDelete() {
 async function addImageFiles(files: File[] | FileList) {
   const remain = MAX_CHAT_IMAGES - pendingImages.value.length
   if (remain <= 0) {
-    toast.value = { type: 'err', msg: `最多上传 ${MAX_CHAT_IMAGES} 张图片` }
+    toast.value = { type: 'err', msg: `最多上传 ${MAX_CHAT_IMAGES} 个附件` }
     return
   }
   const picked = [...files].slice(0, remain)
   if ([...files].length > remain) {
-    toast.value = { type: 'err', msg: `最多上传 ${MAX_CHAT_IMAGES} 张图片，已忽略多余文件` }
+    toast.value = { type: 'err', msg: `最多上传 ${MAX_CHAT_IMAGES} 个附件，已忽略多余文件` }
   }
   try {
     const next: PendingImage[] = []
@@ -785,7 +893,7 @@ async function addImageFiles(files: File[] | FileList) {
     }
     pendingImages.value = [...pendingImages.value, ...next]
   } catch (e) {
-    toast.value = { type: 'err', msg: e instanceof Error ? e.message : '图片处理失败' }
+    toast.value = { type: 'err', msg: e instanceof Error ? e.message : '附件处理失败' }
   }
 }
 
@@ -805,7 +913,12 @@ function removePendingImage(id: string) {
 }
 
 function onComposerPaste(e: ClipboardEvent) {
-  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'))
+  const files = [...(e.clipboardData?.files || [])].filter(
+    (f) =>
+      f.type.startsWith('image/') ||
+      f.type === 'application/pdf' ||
+      DRAFT_NAME_RE.test(f.name || ''),
+  )
   if (files.length === 0) return
   e.preventDefault()
   void addImageFiles(files)
@@ -1584,9 +1697,9 @@ function resetCurrent() {
             <div
               class="size-14 rounded-full overflow-hidden mb-4 shadow-[0_0_28px_var(--accent-glow)] ring-1 ring-black/5"
             >
-              <img :src="weitaiLogo" alt="优祺智能助手" class="size-full object-cover" />
+              <img :src="weitaiLogo" :alt="ASSISTANT_NAME" class="size-full object-cover" />
             </div>
-            <div class="text-[15px] font-semibold mb-1">优祺智能助手</div>
+            <div class="text-[15px] font-semibold mb-1">{{ ASSISTANT_NAME }}</div>
             <div class="text-[12px] text-text-secondary max-w-md mb-5 leading-relaxed">
               <template v-if="usePrompt">
                 已选提示词「{{ selectedPromptName }}」。
@@ -1801,6 +1914,9 @@ function resetCurrent() {
                       filename-prefix="充电站平面布置图"
                     />
                   </div>
+                  <div v-if="tenderOriginals(m.refs).length" class="mb-2">
+                    <ChatKbOriginals :files="tenderOriginals(m.refs)" />
+                  </div>
                   <LayoutFileDownloads
                     v-if="m.attachments && m.attachments.length"
                     :files="m.attachments"
@@ -1911,7 +2027,7 @@ function resetCurrent() {
               type="button"
               class="self-stretch px-2.5 rounded-md border border-hairline text-text-secondary hover:text-iron hover:border-iron/50 disabled:opacity-40"
               :disabled="sending || pendingImages.length >= MAX_CHAT_IMAGES"
-              title="上传图片，模型将结合图片内容作答"
+              title="上传场地草稿（图片 / PDF / DXF / DWG）"
               @click="openImagePicker"
             >
               <ImagePlus class="size-4" />
@@ -1921,7 +2037,7 @@ function resetCurrent() {
               rows="2"
               :placeholder="
                 pendingImages.length
-                  ? '已附图：可补充问题，或不填直接发送让模型看图作答'
+                  ? '已附图：可补充问题，或不填直接发送；PDF/CAD 会按草稿读图'
                   : mode === 'deep'
                     ? '深度推理模式：适合复杂工艺诊断、对标分析、合规论证...'
                     : '快速回答模式：参数查询、操作要点、术语解释...'

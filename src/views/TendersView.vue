@@ -8,6 +8,7 @@ import {
   ChevronUp,
   Download,
   GripVertical,
+  FileSpreadsheet,
   FileUp,
   FolderOpen,
   History,
@@ -22,10 +23,13 @@ import {
 } from 'lucide-vue-next'
 import { PageHeader, Panel } from '@/components/ui-kit'
 import AppAlertDialog from '@/components/ui/AppAlertDialog.vue'
+import AppDialog from '@/components/ui/AppDialog.vue'
 import { fmtSize, KB_UPLOAD_MAX_BYTES } from '@/lib/read-file-smart'
 import { ApiError } from '@/lib/api'
 import { getAccessToken } from '@/lib/auth'
+import { useAuthStore } from '@/stores/auth'
 import { listKnowledgeBases, type KnowledgeBaseItem } from '@/lib/knowledge-api'
+import { fetchQuoteRecords, type QuoteRecordItem } from '@/lib/quotes-api'
 import {
   clearMineTenderRecords,
   clearTenderSlot,
@@ -87,9 +91,9 @@ function emptyDocumentFormat(): DocumentFormat {
     tocItemSizePt: 12,
     coverRequired: true,
     coverShowProject: true,
-    coverShowTenderNo: false,
+    coverShowTenderNo: true,
     coverShowBidder: true,
-    coverShowCopyMark: false,
+    coverShowCopyMark: true,
     coverCopyMark: '正本',
     coverShowDate: true,
     coverNeedSeal: false,
@@ -392,6 +396,10 @@ function absorbLibraryPerformance(files: SlotFileInfo[]) {
 
 const router = useRouter()
 const route = useRoute()
+const auth = useAuthStore()
+const canEditLibrary = computed(
+  () => auth.isAdmin || (auth.menus || []).includes('/tender-library'),
+)
 const loading = ref(true)
 const generating = ref(false)
 const parsing = ref(false)
@@ -406,6 +414,13 @@ const result = ref<GenerateResult | null>(null)
 const form = reactive<BidBrief>(emptyBrief())
 const inviteFile = ref<File | null>(null)
 const quoteFile = ref<File | null>(null)
+const quoteRecordIds = ref<string[]>([])
+const quoteRecordItems = ref<QuoteRecordItem[]>([])
+const quotePickerOpen = ref(false)
+const quotePickerLoading = ref(false)
+const quotePickerRows = ref<QuoteRecordItem[]>([])
+const quotePickerQuery = ref('')
+const quotePickerDraft = ref<string[]>([])
 const kbList = ref<KnowledgeBaseItem[]>([])
 const selectedKbIds = ref<string[]>([])
 const parseNotes = ref<string[]>([])
@@ -421,7 +436,7 @@ const catalogSlots = ref<SlotStatus[]>([])
 const techDrawingSlot = ref<SlotStatus>({
   key: 'tech_drawings',
   title: '实施方案图纸',
-  hint: '本项目平面图、系统图或施工图。换标请覆盖，不要用其他项目图纸。',
+  hint: '本标平面图、系统图或施工图。换一份邀请书需重新上传，不要用其他项目图纸。',
   fileCount: 0,
   files: [],
 })
@@ -684,7 +699,7 @@ const generateBlockers = computed(() => {
   if (agentNameRequired.value && isBlank(form.agentName)) issues.push('委托代理人（招标书要求授权委托）')
   if (agentIdRequired.value && isBlank(form.agentIdNo)) issues.push('代理人身份证号')
   if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
-    issues.push('报价清单（请在本页上传工程量清单并点「识别清单」）')
+    issues.push('报价清单（上传 Excel/Word，或从 AI 报价记录勾选后识别）')
   }
   return issues
 })
@@ -704,6 +719,16 @@ const generateButtonTooltip = computed(() => {
 const HIGH_DISQUALIFY_KEYS = new Set(['id_legal', 'id_agent', 'bond', 'seal', 'finance', 'credit'])
 const TECHNICAL_SLOT_KEYS = new Set(['product', 'tech_drawings'])
 const TECH_DRAWING_KEY = 'tech_drawings'
+
+function blankTechDrawings(): SlotStatus {
+  return {
+    key: TECH_DRAWING_KEY,
+    title: '实施方案图纸',
+    hint: '本标平面图、系统图或施工图。换一份邀请书需重新上传，不要用其他项目图纸。',
+    fileCount: 0,
+    files: [],
+  }
+}
 
 function slotVolume(slot: SlotStatus): 'business' | 'technical' {
   if (TECHNICAL_SLOT_KEYS.has(slot.key)) return 'technical'
@@ -919,6 +944,7 @@ function onPickFile(ev: Event) {
     result.value = null
     qaReport.value = null
     form.invitationId = ''
+    techDrawingSlot.value = blankTechDrawings()
   }
   inviteFile.value = file
 }
@@ -936,6 +962,7 @@ function onInviteDrop(ev: DragEvent) {
       result.value = null
       qaReport.value = null
       form.invitationId = ''
+      techDrawingSlot.value = blankTechDrawings()
     }
     inviteFile.value = file
   }
@@ -1176,14 +1203,22 @@ async function openRecordFromQuery() {
 }
 
 async function refreshTechDrawings() {
+  const invitationId = String(form.invitationId || '').trim()
+  if (!invitationId) {
+    techDrawingSlot.value = blankTechDrawings()
+    return
+  }
   try {
-    const slots = await fetchTenderSlots([
-      {
-        key: TECH_DRAWING_KEY,
-        title: techDrawingSlot.value.title,
-        hint: techDrawingSlot.value.hint,
-      },
-    ])
+    const slots = await fetchTenderSlots(
+      [
+        {
+          key: TECH_DRAWING_KEY,
+          title: techDrawingSlot.value.title,
+          hint: techDrawingSlot.value.hint,
+        },
+      ],
+      invitationId,
+    )
     const row = slots.find((s) => s.key === TECH_DRAWING_KEY)
     if (row) {
       techDrawingSlot.value = {
@@ -1192,6 +1227,8 @@ async function refreshTechDrawings() {
         title: row.title || techDrawingSlot.value.title,
         hint: row.hint || techDrawingSlot.value.hint,
       }
+    } else {
+      techDrawingSlot.value = blankTechDrawings()
     }
   } catch {
     /* 图纸槽位读取失败不打断表单 */
@@ -1437,7 +1474,6 @@ onMounted(async () => {
     if (form.includeCommitment == null) form.includeCommitment = true
     form.techPlanNote = hydrateTechPlanNote(form)
     void loadRecords()
-    void refreshTechDrawings()
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载默认值失败'
   } finally {
@@ -1492,6 +1528,93 @@ function onPickQuote(ev: Event) {
     hasParsed.value = false
   }
   quoteFile.value = file
+  if (file) {
+    quoteRecordIds.value = []
+    quoteRecordItems.value = []
+  }
+}
+
+const quoteSourceLabel = computed(() => {
+  if (quoteFile.value) return quoteFile.value.name
+  if (quoteRecordItems.value.length === 1) {
+    return `报价记录：${quoteRecordItems.value[0]!.projectName || '未命名'}`
+  }
+  if (quoteRecordItems.value.length > 1) {
+    return `已选 ${quoteRecordItems.value.length} 条报价记录`
+  }
+  return ''
+})
+
+const hasQuoteSource = computed(
+  () => Boolean(quoteFile.value) || quoteRecordIds.value.length > 0,
+)
+
+const quotePanelTitle = computed(() => {
+  if (form.quoteLines.some((row) => String(row.name || '').trim())) return '报价清单（已识别）'
+  if (hasQuoteSource.value) return '报价清单（待识别）'
+  return '报价清单（待上传）'
+})
+
+const quotePanelReady = computed(() =>
+  form.quoteLines.some((row) => String(row.name || '').trim()),
+)
+
+async function openQuotePicker() {
+  quotePickerOpen.value = true
+  quotePickerDraft.value = [...quoteRecordIds.value]
+  quotePickerQuery.value = ''
+  await loadQuotePicker()
+}
+
+async function loadQuotePicker() {
+  quotePickerLoading.value = true
+  try {
+    const data = await fetchQuoteRecords({
+      q: quotePickerQuery.value.trim() || undefined,
+      limit: 50,
+    })
+    quotePickerRows.value = data.items || []
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载报价记录失败'
+  } finally {
+    quotePickerLoading.value = false
+  }
+}
+
+function toggleQuotePickerId(id: string) {
+  const cur = quotePickerDraft.value
+  quotePickerDraft.value = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]
+}
+
+function confirmQuotePicker() {
+  const picked = quotePickerRows.value.filter((r) => quotePickerDraft.value.includes(r.id))
+  // 勾选项可能不在当前页搜索结果里，保留已选但未出现在本页的项
+  const keep = quoteRecordItems.value.filter(
+    (r) => quotePickerDraft.value.includes(r.id) && !picked.some((p) => p.id === r.id),
+  )
+  quoteRecordItems.value = [...keep, ...picked]
+  quoteRecordIds.value = [...quotePickerDraft.value]
+  if (quoteRecordIds.value.length) {
+    quoteFile.value = null
+    if (quoteInput.value) quoteInput.value.value = ''
+    hasParsed.value = false
+  }
+  quotePickerOpen.value = false
+}
+
+function clearQuoteSource() {
+  quoteFile.value = null
+  quoteRecordIds.value = []
+  quoteRecordItems.value = []
+  if (quoteInput.value) quoteInput.value.value = ''
+  hasParsed.value = false
+}
+
+function formatQuotePickTime(ms: number) {
+  if (!ms) return '—'
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 async function reparseQuoteFromForm() {
@@ -1499,8 +1622,8 @@ async function reparseQuoteFromForm() {
     error.value = '邀请书文件已失效，请返回上一步重新上传邀请书与报价清单'
     return
   }
-  if (!quoteFile.value) {
-    error.value = '请先选择报价清单 Excel / Word'
+  if (!hasQuoteSource.value) {
+    error.value = '请先上传报价清单，或从 AI 报价记录勾选'
     return
   }
   error.value = ''
@@ -1508,7 +1631,7 @@ async function reparseQuoteFromForm() {
   if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
     error.value =
       error.value ||
-      '未能从清单解析出报价行。请确认 Excel 含「名称/设备/功能模块」与数量或单价列，或返回上一步更换文件后重试'
+      '未能解析出报价行。请确认 Excel 含名称/数量列，或换一条报价记录后重试'
   }
 }
 
@@ -1725,6 +1848,7 @@ async function onParseInvitation() {
       kbIds: selectedKbIds.value,
       current: { ...form },
       quoteFile: quoteFile.value,
+      quoteRecordIds: quoteRecordIds.value,
     })
     mergeBriefIntoForm(data.brief)
     form.techPlanNote = hydrateTechPlanNote(form)
@@ -1766,6 +1890,7 @@ async function onParseInvitation() {
     }
     hasParsed.value = true
     volumeHint.value = ''
+    techDrawingSlot.value = blankTechDrawings()
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '识别邀请书失败'
   } finally {
@@ -1776,6 +1901,10 @@ async function onParseInvitation() {
 function pickSlotFile(slot: SlotStatus, replace: boolean) {
   if (!slot.key) {
     error.value = '该项缺少 key，无法上传'
+    return
+  }
+  if (slot.key === TECH_DRAWING_KEY && !String(form.invitationId || '').trim()) {
+    error.value = '请先识别邀请书，再上传本项目图纸'
     return
   }
   pendingSlotKey.value = slot.key
@@ -1798,6 +1927,7 @@ async function onSlotFileChange(ev: Event) {
     for (let i = 0; i < files.length; i++) {
       const data = await uploadTenderSlot(key, files[i], {
         replace: replace && i === 0,
+        invitationId: key === TECH_DRAWING_KEY ? String(form.invitationId || '').trim() : undefined,
       })
       last = {
         key,
@@ -1824,6 +1954,11 @@ function onDrawingsDrop(ev: DragEvent) {
   dragOverDrawings.value = false
   const files = Array.from(ev.dataTransfer?.files || [])
   if (!files.length) return
+  const invitationId = String(form.invitationId || '').trim()
+  if (!invitationId) {
+    error.value = '请先识别邀请书，再上传本项目图纸'
+    return
+  }
   void (async () => {
     pendingSlotKey.value = TECH_DRAWING_KEY
     pendingSlotReplace.value = !techDrawingSlot.value.fileCount
@@ -1834,6 +1969,7 @@ function onDrawingsDrop(ev: DragEvent) {
       for (let i = 0; i < files.length; i++) {
         const data = await uploadTenderSlot(TECH_DRAWING_KEY, files[i], {
           replace: !techDrawingSlot.value.fileCount && i === 0,
+          invitationId,
         })
         last = {
           key: TECH_DRAWING_KEY,
@@ -1858,7 +1994,10 @@ async function onClearSlot(slot: SlotStatus) {
   error.value = ''
   uploadingKey.value = slot.key
   try {
-    await clearTenderSlot(slot.key)
+    await clearTenderSlot(slot.key, {
+      invitationId:
+        slot.key === TECH_DRAWING_KEY ? String(form.invitationId || '').trim() : undefined,
+    })
     mergeSlotStatus({
       key: slot.key,
       title: slot.title,
@@ -1889,7 +2028,8 @@ async function onUploadStepNext() {
   error.value = ''
   // 已识别过但仍无报价行、或刚换了清单时，必须再跑一遍解析
   const hasQuoteRows = form.quoteLines.some((row) => String(row.name || '').trim())
-  const needParse = !hasParsed.value || (Boolean(quoteFile.value) && !hasQuoteRows)
+  const needParse =
+    !hasParsed.value || (hasQuoteSource.value && !hasQuoteRows)
   if (needParse) {
     await onParseInvitation()
     if (!hasParsed.value) return
@@ -1936,7 +2076,7 @@ async function doGenerate() {
 
 async function loadSavedQa(recordId: string) {
   try {
-    const data = await fetchTenderQa(recordId)
+    const data = await fetchTenderQa(recordId, { volume: previewVolume.value })
     qaReport.value = data.report || null
   } catch {
     qaReport.value = null
@@ -1952,7 +2092,7 @@ async function runTenderQa() {
   qaLoading.value = true
   qaError.value = ''
   try {
-    qaReport.value = await inspectTenderQa(id)
+    qaReport.value = await inspectTenderQa(id, { volume: previewVolume.value })
   } catch (e) {
     qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '质检失败'
   } finally {
@@ -1961,7 +2101,13 @@ async function runTenderQa() {
 }
 
 watch(
-  () => [result.value?.id, result.value?.docxFile] as const,
+  () =>
+    [
+      result.value?.id,
+      result.value?.docxFile,
+      result.value?.techDocxFile,
+      previewVolume.value,
+    ] as const,
   ([id]) => {
     qaError.value = ''
     qaReport.value = null
@@ -2274,7 +2420,13 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   <div
     v-else
     class="tender-page mx-auto"
-    :class="currentStepIndex === 2 ? 'tender-page--preview max-w-[1600px]' : 'max-w-3xl'"
+    :class="
+      currentStepIndex === 2
+        ? 'tender-page--preview max-w-[1600px]'
+        : currentStepIndex >= 3
+          ? 'max-w-6xl'
+          : 'max-w-3xl'
+    "
   >
     <nav
       class="tender-steps"
@@ -2307,7 +2459,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             >
               {{ i < activeWorkflowIndex ? '✓' : i + 1 }}
             </span>
-            <span class="text-[11px] font-medium hidden md:inline">{{ step.label }}</span>
+            <span class="text-[12px] font-medium hidden md:inline whitespace-nowrap">{{ step.label }}</span>
           </button>
           <span
             v-if="i < workflowSteps.length - 1"
@@ -2352,7 +2504,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <div class="min-w-0">
               <h2 class="text-[14px] font-semibold text-foreground">甲方邀请书</h2>
               <p class="text-[11px] text-muted-foreground mt-0.5">
-                支持 PDF、Word、图片；请同时上传报价清单 Excel（生成必填）
+                支持 PDF、Word、图片；报价清单可上传 Excel，或勾选「AI报价生成」记录
               </p>
             </div>
           </div>
@@ -2376,14 +2528,29 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           </p>
         </button>
 
-        <div v-if="inviteFile" class="mt-3 flex flex-wrap items-center gap-2">
-          <button type="button" class="tender-ghost-btn" @click="quoteInput?.click()">
-            <Upload class="size-3.5" />
-            报价清单（生成必填）
-          </button>
-          <span class="text-[11px] text-muted-foreground truncate max-w-[240px]">
-            {{ quoteFile ? quoteFile.name : 'Excel / Word，点「识别并继续」一并解析' }}
-          </span>
+        <div v-if="inviteFile" class="mt-3 space-y-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" class="tender-ghost-btn" @click="quoteInput?.click()">
+              <Upload class="size-3.5" />
+              上传清单
+            </button>
+            <button type="button" class="tender-ghost-btn" @click="openQuotePicker">
+              <FileSpreadsheet class="size-3.5" />
+              从报价记录选
+            </button>
+            <button
+              v-if="hasQuoteSource"
+              type="button"
+              class="tender-ghost-btn text-sulfur"
+              @click="clearQuoteSource"
+            >
+              清除
+            </button>
+          </div>
+          <p class="text-[11px] text-muted-foreground truncate">
+            <template v-if="quoteSourceLabel">已选：{{ quoteSourceLabel }}</template>
+            <template v-else>报价清单（生成必填）：本地 Excel/Word，或勾选一条/多条 AI 报价记录</template>
+          </p>
         </div>
 
         <div v-if="kbList.length" class="mt-4 pt-4 border-t border-border/60">
@@ -2754,6 +2921,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           </li>
         </ul>
         <button
+          v-if="canEditLibrary"
           type="button"
           class="mt-2 text-[11px] text-foreground underline underline-offset-2"
           @click="router.push('/tender-library')"
@@ -2876,7 +3044,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 若总价与清单含税不同，生成时只折算单价。
               </template>
               <template v-else>
-                尚未解析到工程量。请在下方上传报价清单 Excel/Word 并点「识别清单」，没有报价清单不能生成。
+                尚未解析到工程量。请在下方上传 Excel/Word 或勾选报价记录并点「识别清单」，没有报价清单不能生成。
               </template>
             </span>
           </label>
@@ -2931,15 +3099,21 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
         <div
           class="mt-4 rounded-md border border-border/70 px-3 py-2.5 space-y-2"
-          :class="form.quoteLines.length ? 'bg-accent/20' : 'bg-sulfur/5 border-sulfur/25'"
+          :class="
+            quotePanelReady
+              ? 'bg-accent/20'
+              : hasQuoteSource
+                ? 'bg-accent/10'
+                : 'bg-sulfur/5 border-sulfur/25'
+          "
         >
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="min-w-0">
               <p class="text-[12px] font-medium text-foreground">
-                {{ form.quoteLines.length ? '报价清单（只读预览）' : '报价清单（待上传）' }}
+                {{ quotePanelTitle }}
               </p>
               <p class="mt-0.5 text-[11px] text-muted-foreground leading-relaxed">
-                <template v-if="form.quoteLines.length">
+                <template v-if="quotePanelReady">
                   生成 Word 时按招标书表头写入报价表
                   <span v-if="form.quoteHeaders.length">（{{ form.quoteHeaders.join(' / ') }}）</span>
                   <template v-else>；充电桩类标仍用设备/技术参数列。</template>
@@ -2948,8 +3122,11 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                   </span>
                   <span v-else-if="quoteHasSpecColumn" class="text-sulfur">未解析到技术参数列，请确认清单含规格/参数列后重新识别。</span>
                 </template>
+                <template v-else-if="hasQuoteSource">
+                  已关联来源，点右侧「识别清单」写入表单。需保留本页会话中的邀请书文件。
+                </template>
                 <template v-else>
-                  选择工程量 Excel/Word 后点「识别清单」。需保留本页会话中的邀请书文件。
+                  上传工程量 Excel/Word，或从 AI 报价记录勾选后点「识别清单」。需保留本页会话中的邀请书文件。
                 </template>
               </p>
             </div>
@@ -2958,11 +3135,21 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 <Upload class="size-3.5" />
                 {{ quoteFile ? '更换清单' : '上传清单' }}
               </button>
+              <button type="button" class="tender-ghost-btn" @click="openQuotePicker">
+                <FileSpreadsheet class="size-3.5" />
+                {{ quoteRecordIds.length ? `记录 ${quoteRecordIds.length}` : '报价记录' }}
+              </button>
               <button
                 type="button"
                 class="tender-ghost-btn"
-                :disabled="parsing || !quoteFile || !inviteFile"
-                :title="!inviteFile ? '请返回上一步重新上传邀请书' : !quoteFile ? '请先选择清单文件' : ''"
+                :disabled="parsing || !hasQuoteSource || !inviteFile"
+                :title="
+                  !inviteFile
+                    ? '请返回上一步重新上传邀请书'
+                    : !hasQuoteSource
+                      ? '请先上传清单或勾选报价记录'
+                      : ''
+                "
                 @click="reparseQuoteFromForm"
               >
                 <Loader2 v-if="parsing" class="size-3.5 animate-spin" />
@@ -2971,8 +3158,8 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               </button>
             </div>
           </div>
-          <p v-if="quoteFile" class="text-[11px] text-muted-foreground truncate">
-            已选文件：{{ quoteFile.name }}
+          <p v-if="quoteSourceLabel" class="text-[11px] text-muted-foreground truncate">
+            已选：{{ quoteSourceLabel }}
           </p>
           <p v-else-if="!inviteFile" class="text-[11px] text-sulfur">
             邀请书文件已失效，请点「上一步」重新上传邀请书与清单。
@@ -3252,6 +3439,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           <p class="text-[11px] text-muted-foreground leading-relaxed">
             未上传的商务标 / 技术资料会在 Word 里用虚线框占位，不阻止生成。补齐扫描件后可重新生成。
             <button
+              v-if="canEditLibrary"
               type="button"
               class="text-foreground underline underline-offset-2 ml-0.5"
               @click="router.push('/tender-library')"
@@ -3265,7 +3453,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           v-if="!form.quoteLines.length"
           class="text-[12px] p-2.5 rounded-md bg-sulfur/10 border border-sulfur/30 text-sulfur"
         >
-          还没有报价清单。请在上方「报价与承诺」上传工程量 Excel 并点「识别清单」，否则不能生成。
+          还没有报价清单。请在上方「报价与承诺」上传工程量 Excel 或勾选报价记录并点「识别清单」，否则不能生成。
         </p>
 
         <div class="mt-3 rounded-lg border border-border/60 overflow-hidden">
@@ -3313,32 +3501,34 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 </div>
               </div>
               <div class="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent disabled:opacity-50"
-                  :disabled="uploadingKey === slot.key || !slot.key"
-                  @click="pickSlotFile(slot, true)"
-                >
-                  {{ uploadingKey === slot.key ? '…' : slot.fileCount ? '覆盖' : '本标补充' }}
-                </button>
-                <button
-                  v-if="slot.fileCount"
-                  type="button"
-                  class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent disabled:opacity-50"
-                  :disabled="uploadingKey === slot.key || !slot.key"
-                  @click="pickSlotFile(slot, false)"
-                >
-                  追加
-                </button>
-                <button
-                  v-if="slot.fileCount"
-                  type="button"
-                  class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent disabled:opacity-50"
-                  :disabled="uploadingKey === slot.key"
-                  @click="onClearSlot(slot)"
-                >
-                  清除
-                </button>
+                <template v-if="canEditLibrary">
+                  <button
+                    type="button"
+                    class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent disabled:opacity-50"
+                    :disabled="uploadingKey === slot.key || !slot.key"
+                    @click="pickSlotFile(slot, true)"
+                  >
+                    {{ uploadingKey === slot.key ? '…' : slot.fileCount ? '覆盖' : '本标补充' }}
+                  </button>
+                  <button
+                    v-if="slot.fileCount"
+                    type="button"
+                    class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent disabled:opacity-50"
+                    :disabled="uploadingKey === slot.key || !slot.key"
+                    @click="pickSlotFile(slot, false)"
+                  >
+                    追加
+                  </button>
+                  <button
+                    v-if="slot.fileCount"
+                    type="button"
+                    class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent disabled:opacity-50"
+                    :disabled="uploadingKey === slot.key"
+                    @click="onClearSlot(slot)"
+                  >
+                    清除
+                  </button>
+                </template>
                 <button
                   v-if="!isRequiredSlot(slot.key)"
                   type="button"
@@ -3480,7 +3670,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         </div>
       </Panel>
 
-      <Panel title="充电站实施方案" subtitle="写入技术标：本项目图纸 + 文字说明。不要编造桩数，不要用其他项目图纸">
+      <Panel title="充电站实施方案" subtitle="写入技术标：本标图纸 + 文字说明。换一份邀请书请重新上传，不要用其他项目图纸">
         <div class="space-y-3">
           <div class="space-y-1.5">
             <span class="text-[12px] text-muted-foreground">上传图纸</span>
@@ -3502,14 +3692,14 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                     ? '正在上传…'
                     : techDrawingSlot.fileCount
                       ? `${techDrawingSlot.fileCount} 张图纸`
-                      : '点击或拖拽上传平面图 / 系统图'
+                      : '点击或拖拽上传本标平面图 / 系统图'
                 }}
               </p>
               <p class="text-[11px] text-muted-foreground mt-1">
                 {{
                   techDrawingSlot.fileCount
                     ? slotFileLabel(techDrawingSlot) || '点击可继续追加'
-                    : 'PDF / PNG / JPG，换标请覆盖'
+                    : 'PDF / PNG / JPG，仅用于本次技术标，不进投标资料库'
                 }}
               </p>
             </div>
@@ -3752,6 +3942,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     <section v-else-if="currentStepIndex === 3 && result" class="tender-step-panel space-y-4">
       <TenderQaPanel
         page
+        :title="previewVolume === 'technical' ? 'AI 质检 · 技术标' : 'AI 质检 · 商务标'"
         :report="qaReport"
         :loading="qaLoading"
         :error="qaError"
@@ -3900,6 +4091,81 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     </section>
   </div>
 
+  <AppDialog
+    :open="quotePickerOpen"
+    size="wide"
+    title="从 AI 报价记录选择"
+    description="可勾选一条或多条；多条会合并成一张清单。与本地上传二选一。"
+    @update:open="(open) => { quotePickerOpen = open }"
+  >
+    <div class="space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <input
+          v-model="quotePickerQuery"
+          class="h-8 min-w-[200px] flex-1 rounded-md border border-border bg-background px-2 text-[12px]"
+          placeholder="搜索项目 / 价目库"
+          @keydown.enter.prevent="loadQuotePicker"
+        />
+        <button
+          type="button"
+          class="tender-ghost-btn"
+          :disabled="quotePickerLoading"
+          @click="loadQuotePicker"
+        >
+          <Loader2 v-if="quotePickerLoading" class="size-3.5 animate-spin" />
+          查询
+        </button>
+      </div>
+      <div
+        v-if="quotePickerLoading && !quotePickerRows.length"
+        class="py-6 text-center text-[12px] text-muted-foreground"
+      >
+        加载中…
+      </div>
+      <p
+        v-else-if="!quotePickerRows.length"
+        class="py-6 text-center text-[12px] text-muted-foreground"
+      >
+        暂无报价记录。请先到「AI报价生成」生成并下载 Excel。
+      </p>
+      <ul v-else class="max-h-[50vh] divide-y divide-border overflow-y-auto rounded-md border border-border">
+        <li v-for="row in quotePickerRows" :key="row.id">
+          <label class="flex cursor-pointer items-start gap-2.5 px-3 py-2.5 hover:bg-accent/40">
+            <input
+              type="checkbox"
+              class="mt-1"
+              :checked="quotePickerDraft.includes(row.id)"
+              @change="toggleQuotePickerId(row.id)"
+            />
+            <span class="min-w-0 flex-1">
+              <span class="block text-[13px] font-medium truncate">{{ row.projectName || '未命名项目' }}</span>
+              <span class="mt-0.5 block text-[11px] text-muted-foreground">
+                {{ row.lineCount }} 项 ·
+                {{ row.totalExTax.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }} 元
+                <template v-if="row.baseName"> · {{ row.baseName }}</template>
+                · {{ formatQuotePickTime(row.createdAt) }}
+              </span>
+            </span>
+          </label>
+        </li>
+      </ul>
+      <p v-if="quotePickerDraft.length" class="text-[11px] text-muted-foreground">
+        已勾选 {{ quotePickerDraft.length }} 条
+      </p>
+    </div>
+    <template #footer>
+      <button type="button" class="tender-ghost-btn" @click="quotePickerOpen = false">取消</button>
+      <button
+        type="button"
+        class="tender-primary-btn"
+        :disabled="!quotePickerDraft.length"
+        @click="confirmQuotePicker"
+      >
+        确认引用
+      </button>
+    </template>
+  </AppDialog>
+
   <AppAlertDialog
     :open="confirmGenerateOpen"
     :title="confirmGenerateTitle"
@@ -3938,7 +4204,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
 <style scoped>
 .tender-steps {
-  padding: 0.75rem 1rem;
+  padding: 0.9rem 1.35rem;
   border-radius: 0.75rem;
   border: 1px solid var(--hairline, hsl(var(--border)));
   background: color-mix(in srgb, var(--bg-elevated, hsl(var(--card))) 88%, transparent);
@@ -3975,7 +4241,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   height: 2px;
   border-radius: 1px;
   background: var(--hairline, hsl(var(--border)));
-  min-width: 1rem;
+  min-width: 1.5rem;
 }
 .tender-step-line--done {
   background: color-mix(in srgb, var(--accent-patina, #3d8b7a) 55%, var(--hairline, hsl(var(--border))));

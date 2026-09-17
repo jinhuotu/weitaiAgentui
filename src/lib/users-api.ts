@@ -6,6 +6,7 @@ export type RoleItem = {
   code: string;
   name: string;
   description: string | null;
+  menus: string[];
   userCount: number;
   createdAt: number;
   updatedAt: number;
@@ -61,11 +62,13 @@ function requireToken(): string {
 export type CreateRoleBody = {
   name: string;
   description?: string;
+  menus?: string[];
 };
 
 export type UpdateRoleBody = {
   name?: string;
   description?: string | null;
+  menus?: string[];
 };
 
 export async function listRoles(): Promise<RoleItem[]> {

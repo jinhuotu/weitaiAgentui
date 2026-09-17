@@ -363,9 +363,12 @@ export type QaCoverageBucket = {
   score: number
 }
 
+export type BidVolume = 'business' | 'technical'
+
 export type QaReport = {
   recordId: string
   docxFile?: string
+  volume?: BidVolume | string
   similarityScore: number
   ruleScore: number
   llmScore: number | null
@@ -380,9 +383,9 @@ export type QaReport = {
   missing: QaGap[]
   checkedAt?: number
   stale?: boolean
+  source?: 'generated' | 'upload' | string
+  uploadName?: string | null
 }
-
-export type BidVolume = 'business' | 'technical'
 
 export function volumeDocx(
   row: {
@@ -505,6 +508,10 @@ export type TenderRecordItem = {
   lastComment?: string
   lastActor?: string
   approvalLogs?: TenderApprovalLogItem[]
+  qaScore?: number | null
+  qaGrade?: string | null
+  qaSource?: string | null
+  qaCheckedAt?: number | null
 }
 
 export function isTenderWorkflowLocked(status?: string | null, locked?: boolean): boolean {
@@ -663,12 +670,15 @@ export async function deleteTenderLibraryItem(key: string): Promise<{ key: strin
   })
 }
 
-export async function fetchTenderSlots(extras?: PlaceholderItem[]): Promise<SlotStatus[]> {
-  const q =
-    extras && extras.length
-      ? `?extras=${encodeURIComponent(JSON.stringify(extras))}`
-      : ''
-  const data = await apiRequest<{ slots: SlotStatus[] }>(`/api/v1/tenders/slots${q}`, {
+export async function fetchTenderSlots(
+  extras?: PlaceholderItem[],
+  invitationId?: string,
+): Promise<SlotStatus[]> {
+  const q = new URLSearchParams()
+  if (extras && extras.length) q.set('extras', JSON.stringify(extras))
+  if (invitationId) q.set('invitationId', invitationId)
+  const suffix = q.toString() ? `?${q.toString()}` : ''
+  const data = await apiRequest<{ slots: SlotStatus[] }>(`/api/v1/tenders/slots${suffix}`, {
     token: token(),
   })
   return data.slots || []
@@ -677,11 +687,12 @@ export async function fetchTenderSlots(extras?: PlaceholderItem[]): Promise<Slot
 export async function uploadTenderSlot(
   key: string,
   file: File,
-  options: { replace?: boolean } = {},
+  options: { replace?: boolean; invitationId?: string } = {},
 ): Promise<SlotStatus & { fileName: string }> {
   const form = new FormData()
   form.append('file', file)
   form.append('replace', options.replace === false ? 'false' : 'true')
+  if (options.invitationId) form.append('invitationId', options.invitationId)
   return apiRequest(`/api/v1/tenders/slots/${encodeURIComponent(key)}`, {
     method: 'POST',
     token: token(),
@@ -689,8 +700,14 @@ export async function uploadTenderSlot(
   })
 }
 
-export async function clearTenderSlot(key: string): Promise<SlotStatus> {
-  return apiRequest(`/api/v1/tenders/slots/${encodeURIComponent(key)}`, {
+export async function clearTenderSlot(
+  key: string,
+  options: { invitationId?: string } = {},
+): Promise<SlotStatus> {
+  const q = options.invitationId
+    ? `?invitationId=${encodeURIComponent(options.invitationId)}`
+    : ''
+  return apiRequest(`/api/v1/tenders/slots/${encodeURIComponent(key)}${q}`, {
     method: 'DELETE',
     token: token(),
   })
@@ -705,12 +722,20 @@ export async function deleteTenderLibraryFile(docId: string): Promise<SlotStatus
 
 export async function parseTenderInvitation(
   file: File,
-  options: { kbIds?: string[]; current?: BidBrief; quoteFile?: File | null } = {},
+  options: {
+    kbIds?: string[]
+    current?: BidBrief
+    quoteFile?: File | null
+    quoteRecordIds?: string[]
+  } = {},
 ): Promise<ParseInvitationResult> {
   const form = new FormData()
   form.append('file', file)
   if (options.quoteFile) {
     form.append('quoteFile', options.quoteFile)
+  }
+  if (options.quoteRecordIds?.length) {
+    form.append('quoteRecordIds', JSON.stringify(options.quoteRecordIds))
   }
   if (options.kbIds?.length) {
     form.append('kbIds', JSON.stringify(options.kbIds))
@@ -774,15 +799,50 @@ export async function fetchTenderRecord(recordId: string): Promise<TenderRecordI
   })
 }
 
-export async function inspectTenderQa(recordId: string): Promise<QaReport> {
-  return apiRequest<QaReport>(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa`, {
-    method: 'POST',
-    token: token(),
-  })
+export async function inspectTenderQa(
+  recordId: string,
+  opts?: { volume?: 'business' | 'technical' },
+): Promise<QaReport> {
+  const q = new URLSearchParams()
+  if (opts?.volume) q.set('volume', opts.volume)
+  const qs = q.toString()
+  return apiRequest<QaReport>(
+    `/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa${qs ? `?${qs}` : ''}`,
+    {
+      method: 'POST',
+      token: token(),
+    },
+  )
 }
 
-export async function fetchTenderQa(recordId: string): Promise<{ report: QaReport | null }> {
-  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa`, {
+export async function inspectTenderQaUpload(
+  recordId: string,
+  file: File,
+  opts?: { volume?: 'business' | 'technical' },
+): Promise<QaReport> {
+  const form = new FormData()
+  form.append('file', file)
+  const q = new URLSearchParams()
+  if (opts?.volume) q.set('volume', opts.volume)
+  const qs = q.toString()
+  return apiRequest<QaReport>(
+    `/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa-upload${qs ? `?${qs}` : ''}`,
+    {
+      method: 'POST',
+      token: token(),
+      body: form,
+    },
+  )
+}
+
+export async function fetchTenderQa(
+  recordId: string,
+  opts?: { volume?: 'business' | 'technical' },
+): Promise<{ report: QaReport | null }> {
+  const q = new URLSearchParams()
+  if (opts?.volume) q.set('volume', opts.volume)
+  const qs = q.toString()
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa${qs ? `?${qs}` : ''}`, {
     token: token(),
   })
 }

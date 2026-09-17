@@ -13,6 +13,7 @@ import {
   Users,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
+import { assignableNavGroups } from '@/config/nav'
 import { Panel, PageHeader, KpiCard, Tag } from '@/components/ui-kit'
 import { ApiError } from '@/lib/api'
 import {
@@ -49,6 +50,7 @@ type FormState = {
 type RoleFormState = {
   name: string
   description: string
+  menus: string[]
 }
 
 const emptyForm = (): FormState => ({
@@ -67,9 +69,11 @@ const emptyForm = (): FormState => ({
 const emptyRoleForm = (): RoleFormState => ({
   name: '',
   description: '',
+  menus: ['/', '/ai-chat'],
 })
 
 const PROTECTED_ROLE_CODES = new Set(['admin'])
+const MENU_GROUPS = assignableNavGroups()
 
 function roleTone(
   name: string,
@@ -166,8 +170,8 @@ const modalDescription = computed(() => {
   if (mode.value === 'password')
     return `为「${editing.value ? displayNameOf(editing.value) : ''}」设置新密码。`
   if (mode.value === 'roleCreate')
-    return '填写名称与权限说明即可，系统编码由后端自动生成。'
-  return '可修改角色名称与权限说明；系统编码由后端管理，不支持修改。'
+    return '勾选该角色能进的页面；日志与系统管理只给管理员。'
+  return '可改名称、说明和菜单；系统编码不可改，日志仍只给管理员。'
 })
 
 const isRoleMode = computed(
@@ -294,6 +298,9 @@ function openRoleEdit(item: RoleItem) {
   roleForm.value = {
     name: item.name,
     description: item.description || '',
+    menus: PROTECTED_ROLE_CODES.has(item.code)
+      ? MENU_GROUPS.flatMap((g) => g.items.map((it) => it.href))
+      : [...(item.menus || [])].filter(Boolean),
   }
   formError.value = null
   modalOpen.value = true
@@ -304,6 +311,24 @@ function toggleRole(code: string) {
   form.value.roleCodes = has
     ? form.value.roleCodes.filter((c) => c !== code)
     : [...form.value.roleCodes, code]
+}
+
+function roleMenusLocked() {
+  return Boolean(editingRole.value && PROTECTED_ROLE_CODES.has(editingRole.value.code))
+}
+
+function toggleMenu(href: string) {
+  if (href === '/' || roleMenusLocked()) return
+  const has = roleForm.value.menus.includes(href)
+  roleForm.value.menus = has
+    ? roleForm.value.menus.filter((h) => h !== href)
+    : [...roleForm.value.menus, href]
+}
+
+function menuCountLabel(r: RoleItem) {
+  if (PROTECTED_ROLE_CODES.has(r.code)) return '全部菜单'
+  const n = (r.menus || []).filter((h) => h && h !== '/logs').length
+  return `${n} 个菜单`
 }
 
 function onModalOpen(v: boolean) {
@@ -376,6 +401,7 @@ async function submit() {
       await createRole({
         name: roleForm.value.name.trim(),
         description: roleForm.value.description.trim() || undefined,
+        menus: roleForm.value.menus,
       })
       toast.value = { type: 'ok', msg: '已创建角色' }
     } else if (mode.value === 'roleEdit' && editingRole.value) {
@@ -387,6 +413,9 @@ async function submit() {
       await updateRole(editingRole.value.id, {
         name: roleForm.value.name.trim(),
         description: roleForm.value.description.trim() || null,
+        menus: PROTECTED_ROLE_CODES.has(editingRole.value.code)
+          ? undefined
+          : roleForm.value.menus,
       })
       toast.value = { type: 'ok', msg: '已保存角色' }
     }
@@ -586,6 +615,9 @@ function onDeleteUserOpen(v: boolean) {
           <div class="text-[10px] text-muted-foreground mt-1 line-clamp-2">
             {{ r.description || '—' }}
           </div>
+          <div class="text-[10px] text-muted-foreground/80 mt-1">
+            {{ menuCountLabel(r) }}
+          </div>
           <div
             v-if="PROTECTED_ROLE_CODES.has(r.code)"
             class="text-[10px] text-muted-foreground/70 mt-1.5"
@@ -737,6 +769,7 @@ function onDeleteUserOpen(v: boolean) {
       :open="modalOpen"
       :title="modalTitle"
       :description="modalDescription"
+      :wide="isRoleMode"
       @update:open="onModalOpen"
     >
       <div class="space-y-3">
@@ -757,6 +790,37 @@ function onDeleteUserOpen(v: boolean) {
               placeholder="如：运营 + 决策视图"
             />
           </label>
+          <div class="block">
+            <div class="text-[11px] text-text-secondary mb-1.5">可访问菜单</div>
+            <p
+              v-if="roleMenusLocked()"
+              class="mb-2 text-[11px] text-text-muted"
+            >
+              管理员固定全部菜单，日志仅管理员可见，此处不可改。
+            </p>
+            <div class="max-h-[42vh] space-y-3 overflow-y-auto pr-1">
+              <div v-for="g in MENU_GROUPS" :key="g.title">
+                <div class="mb-1.5 text-[10px] text-muted-foreground">{{ g.title }}</div>
+                <div class="flex flex-wrap gap-1.5">
+                  <button
+                    v-for="it in g.items"
+                    :key="it.href"
+                    type="button"
+                    :disabled="it.href === '/' || roleMenusLocked()"
+                    :class="[
+                      'px-2.5 py-1 rounded-md text-[11px] border transition-colors disabled:opacity-70',
+                      roleForm.menus.includes(it.href)
+                        ? 'border-iron bg-iron/10 text-iron'
+                        : 'border-hairline text-text-secondary hover:text-text-primary',
+                    ]"
+                    @click="toggleMenu(it.href)"
+                  >
+                    {{ it.label }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </template>
 
         <template v-if="mode === 'create' || mode === 'edit'">

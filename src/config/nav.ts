@@ -17,6 +17,7 @@ import {
   FolderKanban,
   BadgeCheck,
   FileSpreadsheet,
+  FileSearch,
 } from 'lucide-vue-next'
 
 export type NavItem = {
@@ -47,7 +48,7 @@ function canSeeNavItem(
 ): boolean {
   if (it.adminOnly && !admin) return false
   if (admin) return true
-  if (!menus || menus.length === 0) return true
+  if (!menus || menus.length === 0) return it.href === '/'
   return menus.includes(it.href)
 }
 
@@ -91,7 +92,7 @@ export function canAccessPath(
 
   const exact = flattenNavItems().find((it) => it.href === path)
   if (exact) return canSeeNavItem(exact, admin, menus)
-  if (!menus || menus.length === 0) return true
+  if (!menus || menus.length === 0) return path === '/'
   return menus.some((m) => m !== '/' && (path === m || path.startsWith(`${m}/`)))
 }
 
@@ -111,7 +112,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/approval', label: '审批流程', icon: BadgeCheck },
       { href: '/knowledge', label: '知识库', icon: LibraryBig },
       { href: '/tenders', label: 'AI标书生成', icon: FileText },
-      { href: '/quotes', label: 'AI报价', icon: FileSpreadsheet },
+      { href: '/tender-qa', label: 'AI标书复检', icon: FileSearch },
+      { href: '/quotes', label: 'AI报价生成', icon: FileSpreadsheet },
       { href: '/tender-library', label: '投标资料库', icon: FolderOpen },
       { href: '/scene-agents', label: '场景智能体', icon: Sparkles, adminOnly: true },
       { href: '/workflows', label: '工作流', icon: Workflow, adminOnly: true },
@@ -137,6 +139,18 @@ export function flattenNavItems(groups: NavGroup[] = NAV_GROUPS): NavItem[] {
   )
 }
 
+export function assignableNavGroups(groups: NavGroup[] = NAV_GROUPS): {
+  title: string
+  items: NavItem[]
+}[] {
+  return groups
+    .map((g) => ({
+      title: g.title,
+      items: (g.items || []).filter((it) => !it.adminOnly),
+    }))
+    .filter((g) => g.items.length > 0)
+}
+
 /** 侧栏 / 工作台常显业务入口默认顺序；未列入的归入「更多」 */
 export const PRIMARY_NAV_HREFS = [
   '/ai-chat',
@@ -144,6 +158,7 @@ export const PRIMARY_NAV_HREFS = [
   '/tender-tasks',
   '/approval',
   '/tenders',
+  '/tender-qa',
   '/quotes',
   '/knowledge',
   '/tender-library',
@@ -157,6 +172,7 @@ export const NAV_ITEM_DESC: Record<string, string> = {
   '/approval': '待审、已审与我发起的申请',
   '/knowledge': '文档入库、检索与预览',
   '/tenders': '邀请书识别与文档生成',
+  '/tender-qa': '对照邀请书复检生成稿或上传终稿',
   '/quotes': '规划图识别与 Excel 报价单',
   '/tender-library': '企业常备资料与扫描件',
   '/scene-agents': '绑定提示词、知识库与 MCP',

@@ -30,6 +30,9 @@ export type ChatSessionMessage = {
     kb_id?: string;
     kbId?: string;
     name?: string;
+    file_type?: string;
+    has_file?: boolean;
+    preview_kind?: string;
   }[];
   knowledgeBaseIds?: string[];
   useKnowledge?: boolean;
@@ -172,8 +175,8 @@ export async function streamChat(
     agentId?: string | null;
     /** 指定模型配置 id；未传则用快速/深度默认绑定 */
     modelId?: string | null;
-    /** 本轮附图（jpeg/png/webp/gif，Base64，不含 data: 前缀） */
-    images?: { mimeType: string; data: string }[];
+    /** 本轮附图（jpeg/png/webp/gif/pdf/dxf/dwg，Base64，不含 data: 前缀） */
+    images?: { mimeType: string; data: string; fileName?: string }[];
   },
   handlers: StreamHandlers,
   signal?: AbortSignal
@@ -185,7 +188,11 @@ export async function streamChat(
   const modelId = (input.modelId || '').trim() || undefined;
   const images = (input.images || [])
     .filter((img) => img?.data)
-    .map((img) => ({ mimeType: img.mimeType || 'image/jpeg', data: img.data }));
+    .map((img) => ({
+      mimeType: img.mimeType || 'image/jpeg',
+      data: img.data,
+      ...(img.fileName ? { fileName: img.fileName } : {}),
+    }));
   const res = await fetch(`${getApiBaseUrl()}/api/v1/ai/chat`, {
     method: 'POST',
     headers: {

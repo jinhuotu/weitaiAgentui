@@ -26,12 +26,32 @@ export type QuoteRecognizeResult = {
 }
 
 export type QuoteGenerateResult = {
+  id?: string
   xlsxFile: string
   downloadName: string
   totalExTax: number
   totalIncTax: number
   unmatched: number
   lineCount: number
+}
+
+export type QuoteRecordItem = {
+  id: string
+  projectName: string
+  note: string
+  baseId: string
+  baseName: string
+  taxRate: number
+  totalExTax: number
+  totalIncTax: number
+  unmatched: number
+  lineCount: number
+  xlsxFile: string
+  downloadName: string
+  xlsxAvailable: boolean
+  username: string
+  createdAt: number
+  lines?: QuoteLine[]
 }
 
 function token() {
@@ -84,6 +104,8 @@ export async function generateQuote(body: {
   projectName: string
   note?: string
   taxRate?: number
+  baseId?: string
+  baseName?: string
   lines: QuoteLine[]
 }): Promise<QuoteGenerateResult> {
   return apiRequest<QuoteGenerateResult>('/api/v1/quotes/generate', {
@@ -98,5 +120,45 @@ export async function downloadQuoteFile(fileName: string, downloadName: string):
   await apiDownload(`/api/v1/quotes/files/${encodeURIComponent(fileName)}?${q}`, {
     token: token(),
     fallbackName: downloadName,
+  })
+}
+
+export async function fetchQuoteRecords(params?: {
+  q?: string
+  limit?: number
+  offset?: number
+}): Promise<{ total: number; items: QuoteRecordItem[] }> {
+  const q = new URLSearchParams()
+  if (params?.q) q.set('q', params.q)
+  if (params?.limit) q.set('limit', String(params.limit))
+  if (params?.offset) q.set('offset', String(params.offset))
+  const suffix = q.toString() ? `?${q.toString()}` : ''
+  return apiRequest(`/api/v1/quotes/records${suffix}`, { token: token() })
+}
+
+export async function fetchQuoteRecord(recordId: string): Promise<QuoteRecordItem> {
+  return apiRequest(`/api/v1/quotes/records/${encodeURIComponent(recordId)}`, {
+    token: token(),
+  })
+}
+
+export async function exportQuoteRecord(recordId: string): Promise<QuoteRecordItem> {
+  return apiRequest(`/api/v1/quotes/records/${encodeURIComponent(recordId)}/export`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
+export async function deleteQuoteRecord(recordId: string): Promise<{ deleted: boolean; id: string }> {
+  return apiRequest(`/api/v1/quotes/records/${encodeURIComponent(recordId)}`, {
+    method: 'DELETE',
+    token: token(),
+  })
+}
+
+export async function clearMineQuoteRecords(): Promise<{ deleted: number; ids: string[] }> {
+  return apiRequest('/api/v1/quotes/records/clear-mine', {
+    method: 'POST',
+    token: token(),
   })
 }
