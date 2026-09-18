@@ -25,6 +25,7 @@ import {
   BookOpenText,
   Bot,
   ImagePlus,
+  Film,
 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import weitaiLogo from '@/assets/weitai-logo.jpg'
@@ -55,8 +56,14 @@ import {
 import ChatMarkdown from '@/components/ai/ChatMarkdown.vue'
 import ChatImageGallery from '@/components/ai/ChatImageGallery.vue'
 import ChatKbOriginals from '@/components/ai/ChatKbOriginals.vue'
+import ChatKbVideos from '@/components/ai/ChatKbVideos.vue'
 import LayoutFileDownloads from '@/components/ai/LayoutFileDownloads.vue'
 import type { SlotFileInfo } from '@/lib/tenders-api'
+import {
+  collectKbVideoHits,
+  fmtKbVideoRange,
+  isKbVideoRef,
+} from '@/lib/kb-video-contract'
 import {
   listModelOptions,
   modelTypeLabel,
@@ -79,9 +86,13 @@ interface RefChunk {
   kb_id?: string
   kbId?: string
   name?: string
+  chunk_index?: number
   file_type?: string
   has_file?: boolean
   preview_kind?: string
+  kind?: string
+  startMs?: number
+  endMs?: number
 }
 
 interface ToolCallUi {
@@ -327,6 +338,8 @@ function tenderOriginals(refs: RefChunk[] | undefined): SlotFileInfo[] {
     const kb = String(r.kb_id || r.kbId || '').trim()
     if (!id || seen.has(id) || kb !== TENDER_LIB_ID) continue
     if (r.has_file === false) continue
+    // 视频走阶段 5 播放器，不塞进投标原件缩略图条
+    if (isKbVideoRef(r)) continue
     const kind =
       r.preview_kind === 'pdf' ? 'pdf' : r.preview_kind === 'file' ? 'file' : 'image'
     seen.add(id)
@@ -339,6 +352,14 @@ function tenderOriginals(refs: RefChunk[] | undefined): SlotFileInfo[] {
     })
   }
   return out
+}
+
+function refTimeLabel(r: RefChunk): string {
+  return fmtKbVideoRange(r.startMs, r.endMs)
+}
+
+function kbVideos(refs: RefChunk[] | undefined) {
+  return collectKbVideoHits(refs)
 }
 
 function kbIdsFromMessages(
@@ -1788,7 +1809,7 @@ function resetCurrent() {
                       v-else-if="m.useKnowledge && (m.refsReady || !m.loading) && !(m.refs && m.refs.length)"
                       class="text-[10px] text-iron font-mono"
                     >
-                      · 未命中
+                      · 知识库未检索到
                     </span>
                     <span v-if="m.useKnowledge === false" class="text-[10px] text-text-muted">
                       · 未用知识库
@@ -1917,6 +1938,11 @@ function resetCurrent() {
                   <div v-if="tenderOriginals(m.refs).length" class="mb-2">
                     <ChatKbOriginals :files="tenderOriginals(m.refs)" />
                   </div>
+                  <template v-for="vids in [kbVideos(m.refs)]" :key="`vid-${m.id}`">
+                    <div v-if="vids.length" class="mb-2">
+                      <ChatKbVideos :videos="vids" />
+                    </div>
+                  </template>
                   <LayoutFileDownloads
                     v-if="m.attachments && m.attachments.length"
                     :files="m.attachments"
@@ -1945,8 +1971,20 @@ function resetCurrent() {
                       class="px-2.5 py-1.5 rounded bg-bg-base/40 border border-hairline"
                     >
                       <div class="flex justify-between gap-2 text-[10px] text-text-muted font-mono mb-0.5">
-                        <span class="truncate min-w-0" :title="r.name || undefined">
+                        <span class="truncate min-w-0 inline-flex items-center gap-1" :title="r.name || undefined">
+                          <Film
+                            v-if="isKbVideoRef(r)"
+                            class="size-3 shrink-0 text-iron"
+                          />
                           #{{ i + 1 }}{{ r.name ? ` · ${r.name}` : '' }}
+                          <span
+                            v-if="isKbVideoRef(r)"
+                            class="shrink-0 rounded px-1 py-px text-[9px] bg-iron/10 text-iron border border-iron/20"
+                          >视频</span>
+                          <span
+                            v-if="refTimeLabel(r)"
+                            class="shrink-0 text-text-muted"
+                          >{{ refTimeLabel(r) }}</span>
                         </span>
                         <span class="text-molybdenum shrink-0">
                           相似度 {{ (r.score ?? 0).toFixed(3) }}
@@ -1965,7 +2003,7 @@ function resetCurrent() {
                   class="text-[11.5px] text-iron flex items-center gap-1.5"
                 >
                   <Quote class="size-3.5" />
-                  未命中
+                  当前未从知识库中检索出您想要的信息
                 </div>
 
                 <div

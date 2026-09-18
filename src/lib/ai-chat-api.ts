@@ -30,9 +30,14 @@ export type ChatSessionMessage = {
     kb_id?: string;
     kbId?: string;
     name?: string;
+    chunk_index?: number;
     file_type?: string;
     has_file?: boolean;
+    /** pdf | image | file | video | "" */
     preview_kind?: string;
+    kind?: string;
+    startMs?: number;
+    endMs?: number;
   }[];
   knowledgeBaseIds?: string[];
   useKnowledge?: boolean;

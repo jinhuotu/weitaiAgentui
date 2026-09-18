@@ -22,7 +22,7 @@ export type KbDocItem = {
   baseId?: string | null;
   name: string;
   source: 'file' | 'url' | 'text' | string;
-  kind?: 'doc' | 'drawing' | '3d' | string;
+  kind?: 'doc' | 'drawing' | '3d' | 'video' | string;
   parentId?: string | null;
   parentName?: string | null;
   fileType?: string;
@@ -60,6 +60,12 @@ export type SearchChunk = {
   name?: string;
   chunk_index?: number;
   tags?: string[];
+  file_type?: string;
+  has_file?: boolean;
+  /** pdf | image | file | video | "" */
+  preview_kind?: string;
+  startMs?: number;
+  endMs?: number;
 };
 
 function requireToken(): string {
@@ -285,6 +291,21 @@ export async function downloadKnowledgeDocument(
     `/api/v1/knowledge/documents/${encodeURIComponent(docId)}/download?baseId=${encodeURIComponent(baseId)}`,
     { token: requireToken(), fallbackName: fallbackName || 'document' }
   );
+}
+
+/** 知识库原件流式地址（Range）；供 <video src>，默认带 access_token */
+export function knowledgeDocumentFilePath(
+  baseId: string,
+  docId: string,
+  opts?: { withToken?: boolean },
+): string {
+  const q = new URLSearchParams()
+  q.set('baseId', baseId)
+  if (opts?.withToken !== false) {
+    const t = getAccessToken()
+    if (t) q.set('access_token', t)
+  }
+  return `/api/v1/knowledge/documents/${encodeURIComponent(docId)}/file?${q.toString()}`
 }
 
 export async function createTextDocument(input: {

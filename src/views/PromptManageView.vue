@@ -274,7 +274,7 @@ function preview(content: string | undefined) {
     <AppDialog
       :open="modalOpen"
       :title="editing ? '编辑提示词' : '新增提示词'"
-      description="内容将作为对话 system 提示词基座；对话页未选择时不会传给大模型。"
+      description="这段文字是对话的 system 基座。检索结果和「【知识库检索结果】未检索到匹配片段」等标记由程序按本轮情况追加，怎么回答写在这里。"
       @update:open="onModalOpen"
     >
       <div class="space-y-3">
@@ -293,6 +293,9 @@ function preview(content: string | undefined) {
             class="kb-input min-h-[220px] resize-y font-sans leading-relaxed"
             placeholder="输入系统提示词全文…"
           />
+          <p class="mt-1 text-[10.5px] leading-relaxed text-text-muted">
+            代码只会追加本轮标记，例如「知识库参考片段」「未检索到匹配片段」「本次附带用户上传图片 / 资料库原件」。未命中时怎么措辞，请写在本提示词第 3 条。
+          </p>
         </label>
         <label class="block">
           <div class="text-[11px] text-text-secondary mb-1">备注</div>

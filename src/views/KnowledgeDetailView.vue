@@ -24,6 +24,7 @@ import {
   Link2,
   Paperclip,
   Shield,
+  Film,
 } from 'lucide-vue-next'
 import { ApiError } from '@/lib/api'
 import {
@@ -46,6 +47,15 @@ import {
   type KnowledgeBaseItem,
 } from '@/lib/knowledge-api'
 import { fileExt, fmtSize, KB_UPLOAD_MAX_BYTES, validateKbUploadFile } from '@/lib/read-file-smart'
+import {
+  isKbVideoDoc,
+  isKbVideoRef,
+  fmtKbVideoRange,
+  kbVideoFilePath,
+  KB_VIDEO_SUMMARY_ASR,
+  KB_VIDEO_SUMMARY_EMBED,
+  KB_VIDEO_UPLOAD_MAX_BYTES_DEFAULT,
+} from '@/lib/kb-video-contract'
 import { fmtAgo } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth'
 import KbAclDialog from '@/components/knowledge/KbAclDialog.vue'
@@ -87,6 +97,12 @@ const FILE_TYPE_GROUPS: {
     color: 'text-sulfur',
     icon: FileImage,
   },
+  {
+    label: '视频',
+    exts: ['.mp4', '.webm'],
+    color: 'text-iron',
+    icon: Film,
+  },
 ]
 
 const ACCEPT_LIST = FILE_TYPE_GROUPS.flatMap((g) => g.exts).join(',')
@@ -103,6 +119,7 @@ function iconForType(type?: string): IconComp {
     return ['xls', 'xlsx', 'csv'].includes(t) ? FileSpreadsheet : FileText
   }
   if (['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'].includes(t)) return FileImage
+  if (['mp4', 'webm'].includes(t)) return Film
   return FileIcon
 }
 
@@ -114,6 +131,7 @@ function colorForType(type?: string) {
   if (['xls', 'xlsx', 'csv'].includes(t)) return 'text-patina'
   if (['json', 'xml', 'yaml', 'yml', 'txt', 'md'].includes(t)) return 'text-text-secondary'
   if (['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'].includes(t)) return 'text-sulfur'
+  if (['mp4', 'webm'].includes(t)) return 'text-iron'
   return 'text-text-secondary'
 }
 
@@ -121,6 +139,19 @@ function fmtIngestToast(docName: string, item: KbDocItem) {
   if (item.kind === 'drawing') {
     const linked = item.parentId ? '' : '；未挂靠案例，检索时不会附图'
     return `${docName} 已保存为图纸附件（不 OCR、不进向量）${linked}`
+  }
+  if (isKbVideoDoc(item)) {
+    if (item.status === 'parsing') {
+      return `${docName} 已提交，排队语音转写中`
+    }
+    if (item.status === 'failed') {
+      return `${docName} 语音转写失败`
+    }
+    const chunks = item.chunks ?? 0
+    if (chunks > 0) {
+      return `${docName} 转写完成：${(item.charCount ?? 0).toLocaleString()} 字符 · 切成 ${chunks} 块，可检索`
+    }
+    return `${docName} 已保存视频原片（待转写）`
   }
   if (item.duplicate) {
     return `${docName} 已在库中（${item.name}），未重复入库`
@@ -146,9 +177,21 @@ function fmtIngestToast(docName: string, item: KbDocItem) {
 }
 
 function statusLabel(it: KbItem) {
-  if (it.status === 'parsing') return '解析中'
+  if (it.status === 'parsing') {
+    if (isKbVideoDoc(it)) {
+      const s = (it.summary || '').trim()
+      if (s === KB_VIDEO_SUMMARY_EMBED || s.includes('写入检索')) return '向量化中'
+      if (s === KB_VIDEO_SUMMARY_ASR || s.includes('语音转写')) return '转写中'
+      return '转写中'
+    }
+    return '解析中'
+  }
   if (it.status === 'failed') return '失败'
   if (it.kind === 'drawing') return '附件'
+  if (isKbVideoDoc(it)) {
+    if ((it.chunks ?? 0) > 0) return '已就绪'
+    return '待转写'
+  }
   if (it.reviewStatus === 'rejected') return '已驳回'
   if (isSkipRag(it)) return '不检索'
   if ((it.chunks ?? 0) === 0) return '入库中'
@@ -227,13 +270,30 @@ const caseDocs = computed(() =>
 const urlForm = ref({ url: '', title: '', tags: '' })
 const textForm = ref({ title: '', content: '', tags: '' })
 const probe = ref('')
-const probeRes = ref<{ content: string; score: number; name?: string }[] | null>(null)
+const probeRes = ref<
+  {
+    content: string
+    score: number
+    name?: string
+    preview_kind?: string
+    file_type?: string
+    kind?: string
+    startMs?: number
+    endMs?: number
+  }[] | null
+>(null)
 const probeLoading = ref(false)
 const textPreview = ref<{
   item: KbItem
   content: string
-  chunks: Array<{ chunkIndex: number; content: string }>
+  chunks: Array<{
+    chunkIndex: number
+    content: string
+    startMs?: number
+    endMs?: number
+  }>
   truncated: boolean
+  playUrl?: string
 } | null>(null)
 const previewLoadingId = ref<string | null>(null)
 const deletingId = ref<string | null>(null)
@@ -260,6 +320,7 @@ const parsingCount = computed(
       (it) =>
         it.status === 'parsing' ||
         (it.kind !== 'drawing' &&
+          !isKbVideoDoc(it) &&
           it.status === 'ready' &&
           it.reviewStatus !== 'rejected' &&
           !isSkipRag(it) &&
@@ -890,16 +951,48 @@ async function downloadDoc(doc: KbItem) {
 
 async function openDocPreview(doc: KbItem) {
   if (!baseId.value) return
+  const video = isKbVideoDoc(doc)
+  const playUrl =
+    video && (doc.fileKey || doc.source === 'file')
+      ? kbVideoFilePath(doc.id, { baseId: baseId.value, withToken: true })
+      : undefined
+  if (video && doc.status === 'parsing' && !playUrl) {
+    toast.value = {
+      type: 'ok',
+      msg: '视频正在转写，请稍后再预览',
+    }
+    return
+  }
   previewLoadingId.value = doc.id
   try {
     const data = await getKnowledgeDocumentPreview(baseId.value, doc.id)
+    const content = data.content || ''
+    const chunks = data.chunks || []
+    if (video && !content.trim() && !chunks.length && !playUrl) {
+      toast.value = {
+        type: 'ok',
+        msg: '暂无转写正文，请点「下载」查看原片；转写完成后可预览',
+      }
+      return
+    }
     textPreview.value = {
       item: data.item,
-      content: data.content || '',
-      chunks: data.chunks || [],
+      content,
+      chunks,
       truncated: Boolean(data.truncated),
+      playUrl,
     }
   } catch (e) {
+    if (video && playUrl) {
+      textPreview.value = {
+        item: doc,
+        content: '',
+        chunks: [],
+        truncated: false,
+        playUrl,
+      }
+      return
+    }
     toast.value = {
       type: 'err',
       msg: e instanceof Error ? e.message : '预览加载失败',
@@ -1013,7 +1106,9 @@ async function openDocPreview(doc: KbItem) {
                 </button>
               </div>
               <div class="text-[11px] text-text-secondary max-w-xl">
-                手册、产品说明、认证规范可上传并检索。文件名含「投标文件」「投标函」或正文为其他公司投标书的，会保留原件但不向量化，检索自动跳过。充电站平面图请到「文本粘贴」。单文件最大 {{ fmtSize(KB_UPLOAD_MAX_BYTES) }}。
+                手册、产品说明、认证规范可上传并检索。也可上传 mp4 / webm，后台语音转写后入库检索。文件名含「投标文件」「投标函」或正文为其他公司投标书的，会保留原件但不向量化，检索自动跳过。充电站平面图请到「文本粘贴」。文档最大
+                {{ fmtSize(KB_UPLOAD_MAX_BYTES) }}，视频最大
+                {{ fmtSize(KB_VIDEO_UPLOAD_MAX_BYTES_DEFAULT) }}。
               </div>
               <input
                 ref="fileRef"
@@ -1285,8 +1380,23 @@ async function openDocPreview(doc: KbItem) {
             class="border border-hairline rounded-md px-3 py-2 bg-bg-base/40"
           >
             <div class="flex justify-between gap-2 text-[10px] text-text-muted font-mono mb-1">
-              <span class="truncate min-w-0" :title="c.name || undefined">
+              <span
+                class="truncate min-w-0 inline-flex items-center gap-1"
+                :title="c.name || undefined"
+              >
+                <Film
+                  v-if="isKbVideoRef(c)"
+                  class="size-3 shrink-0 text-iron"
+                />
                 #{{ i + 1 }}{{ c.name ? ` · ${c.name}` : '' }}
+                <span
+                  v-if="isKbVideoRef(c)"
+                  class="shrink-0 rounded px-1 py-px text-[9px] bg-iron/10 text-iron border border-iron/20"
+                >视频</span>
+                <span
+                  v-if="fmtKbVideoRange(c.startMs, c.endMs)"
+                  class="shrink-0 text-text-muted"
+                >{{ fmtKbVideoRange(c.startMs, c.endMs) }}</span>
               </span>
               <span class="text-molybdenum shrink-0">相似度 {{ (c.score ?? 0).toFixed(4) }}</span>
             </div>
@@ -1469,9 +1579,11 @@ async function openDocPreview(doc: KbItem) {
                     {{
                       it.kind === 'drawing'
                         ? '图纸附件'
-                        : it.source === 'file'
-                          ? (it.fileType || 'FILE').toUpperCase()
-                          : it.source.toUpperCase()
+                        : isKbVideoDoc(it)
+                          ? '视频'
+                          : it.source === 'file'
+                            ? (it.fileType || 'FILE').toUpperCase()
+                            : it.source.toUpperCase()
                     }}
                   </span>
                 </td>
@@ -1483,21 +1595,47 @@ async function openDocPreview(doc: KbItem) {
                 <td
                   class="px-2 py-2.5 text-right font-mono text-text-secondary whitespace-nowrap align-middle"
                 >
-                  {{ it.kind === 'drawing' ? '—' : it.charCount ? it.charCount.toLocaleString() : '—' }}
+                  {{
+                    it.kind === 'drawing'
+                      ? '—'
+                      : isKbVideoDoc(it) && !(it.chunks ?? 0)
+                        ? '—'
+                        : it.charCount
+                          ? it.charCount.toLocaleString()
+                          : '—'
+                  }}
                 </td>
                 <td
                   class="px-2 py-2.5 text-right font-mono text-molybdenum whitespace-nowrap align-middle"
                   :title="
                     it.kind === 'drawing'
                       ? '图纸附件不进向量'
-                      : isSkipRag(it)
-                        ? '判定为投标书/他司材料，未写入检索'
-                      : it.chunks != null
-                        ? `已切成 ${it.chunks} 块向量片段`
-                        : undefined
+                      : isKbVideoDoc(it)
+                        ? (it.chunks ?? 0) > 0
+                          ? '已按转写文本切块入库'
+                          : '视频转写后可检索'
+                        : isSkipRag(it)
+                          ? '判定为投标书/他司材料，未写入检索'
+                          : it.chunks != null
+                            ? `已切成 ${it.chunks} 块向量片段`
+                            : undefined
                   "
                 >
-                  {{ it.kind === 'drawing' ? '附件' : isSkipRag(it) ? '不检索' : it.chunks != null ? `${it.chunks} 块` : '—' }}
+                  {{
+                    it.kind === 'drawing'
+                      ? '附件'
+                      : isKbVideoDoc(it)
+                        ? (it.chunks ?? 0) > 0
+                          ? `${it.chunks} 块`
+                          : it.status === 'parsing'
+                            ? '转写中'
+                            : '待转写'
+                        : isSkipRag(it)
+                          ? '不检索'
+                          : it.chunks != null
+                            ? `${it.chunks} 块`
+                            : '—'
+                  }}
                 </td>
                 <td class="px-2 py-2.5 align-middle">
                   <div class="flex flex-wrap gap-1">
@@ -1529,9 +1667,14 @@ async function openDocPreview(doc: KbItem) {
                       it.status === 'failed' || it.reviewStatus === 'rejected'
                         ? 'text-iron'
                         : it.status === 'parsing' ||
-                            (it.kind !== 'drawing' && !isSkipRag(it) && (it.chunks ?? 0) === 0)
+                            (it.kind !== 'drawing' &&
+                              !isKbVideoDoc(it) &&
+                              !isSkipRag(it) &&
+                              (it.chunks ?? 0) === 0)
                           ? 'text-sulfur'
-                          : 'text-patina'
+                          : isKbVideoDoc(it) && !(it.chunks ?? 0)
+                            ? 'text-sulfur'
+                            : 'text-patina'
                     "
                     :title="it.errorMsg || undefined"
                   >
@@ -1539,12 +1682,17 @@ async function openDocPreview(doc: KbItem) {
                       v-if="
                         it.status === 'parsing' ||
                         (it.kind !== 'drawing' &&
+                          !isKbVideoDoc(it) &&
                           it.status === 'ready' &&
                           it.reviewStatus !== 'rejected' &&
                           !isSkipRag(it) &&
                           (it.chunks ?? 0) === 0)
                       "
                       class="size-3.5 animate-spin"
+                    />
+                    <Film
+                      v-else-if="isKbVideoDoc(it) && it.status === 'ready' && !(it.chunks ?? 0)"
+                      class="size-3.5"
                     />
                     <XCircle
                       v-else-if="it.status === 'failed' || it.reviewStatus === 'rejected'"
@@ -1571,7 +1719,7 @@ async function openDocPreview(doc: KbItem) {
                     type="button"
                     :disabled="previewLoadingId === it.id"
                     class="ml-0.5 inline-flex items-center gap-1 px-2 py-1 rounded text-[10.5px] text-text-secondary hover:text-molybdenum hover:bg-molybdenum/10 transition-colors whitespace-nowrap"
-                    title="预览入库文本内容"
+                    :title="isKbVideoDoc(it) ? '预览视频与转写正文' : '预览入库文本内容'"
                     @click="openDocPreview(it)"
                   >
                     <Loader2
@@ -1745,7 +1893,14 @@ async function openDocPreview(doc: KbItem) {
           class="flex items-center justify-between px-5 py-3 border-b border-hairline shrink-0"
         >
           <div class="flex items-center gap-2.5 min-w-0">
-            <FileText class="size-5 text-molybdenum shrink-0" />
+            <Film
+              v-if="textPreview.playUrl"
+              class="size-5 text-iron shrink-0"
+            />
+            <FileText
+              v-else
+              class="size-5 text-molybdenum shrink-0"
+            />
             <div class="min-w-0">
               <div class="text-[13.5px] text-text-primary font-medium truncate">
                 {{ textPreview.item.name }}
@@ -1765,6 +1920,7 @@ async function openDocPreview(doc: KbItem) {
                     : `${textPreview.item.charCount?.toLocaleString?.() ?? textPreview.item.charCount} 字`
                 }}
                 {{ textPreview.truncated ? ' · 仅摘要' : '' }}
+                {{ textPreview.playUrl && !textPreview.content ? ' · 可先播原片' : '' }}
               </div>
             </div>
           </div>
@@ -1792,7 +1948,18 @@ async function openDocPreview(doc: KbItem) {
             </button>
           </div>
         </div>
-        <div class="px-5 py-4 overflow-y-auto flex-1 min-h-0">
+        <div class="px-5 py-4 overflow-y-auto flex-1 min-h-0 space-y-4">
+          <div
+            v-if="textPreview.playUrl"
+            class="overflow-hidden rounded-md border border-hairline bg-bg-base"
+          >
+            <video
+              class="max-h-[42vh] w-full bg-black"
+              controls
+              preload="metadata"
+              :src="textPreview.playUrl"
+            />
+          </div>
           <template v-if="textPreview.content">
             <div v-if="textPreview.chunks.length > 1" class="space-y-3">
               <div
@@ -1802,6 +1969,12 @@ async function openDocPreview(doc: KbItem) {
               >
                 <div class="text-[10px] font-mono text-text-muted mb-1.5">
                   切块 #{{ c.chunkIndex + 1 }}
+                  <span
+                    v-if="fmtKbVideoRange(c.startMs, c.endMs)"
+                    class="ml-1.5"
+                  >
+                    {{ fmtKbVideoRange(c.startMs, c.endMs) }}
+                  </span>
                 </div>
                 <div
                   class="text-[12.5px] leading-relaxed text-text-primary whitespace-pre-wrap"
@@ -1817,8 +1990,17 @@ async function openDocPreview(doc: KbItem) {
               {{ textPreview.content }}
             </div>
           </template>
-          <div v-else class="py-16 text-center text-[12px] text-text-secondary">
+          <div
+            v-else-if="!textPreview.playUrl"
+            class="py-16 text-center text-[12px] text-text-secondary"
+          >
             暂无可用正文（可能入库失败或向量库中无切块）。
+          </div>
+          <div
+            v-else
+            class="py-2 text-center text-[12px] text-text-secondary"
+          >
+            转写正文尚未就绪，可先播放原片。
           </div>
         </div>
       </div>
