@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Check, ChevronDown, Ellipsis, Plus, X } from 'lucide-vue-next'
-import { NAV_ITEM_DESC, type NavItem } from '@/config/nav'
+import { NAV_ITEM_DESC, isQuotePath, type NavItem } from '@/config/nav'
 import { useNavDragReorder } from '@/composables/useNavDragReorder'
 import { useOrderedPrimaryNav } from '@/composables/useOrderedPrimaryNav'
 import { cn } from '@/lib/utils'
@@ -26,7 +26,9 @@ const navRef = ref<HTMLElement | null>(null)
 const savedScroll = ref(0)
 
 function isItemActive(item: NavItem, pathname: string) {
-  return item.href === '/' ? pathname === '/' : pathname.startsWith(item.href)
+  if (item.href === '/') return pathname === '/'
+  if (isQuotePath(item.href)) return isQuotePath(pathname)
+  return pathname.startsWith(item.href)
 }
 
 function itemDesc(item: NavItem) {

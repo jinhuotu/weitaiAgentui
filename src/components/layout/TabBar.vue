@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { X } from 'lucide-vue-next'
+import { isQuotePath } from '@/config/nav'
 import { cn } from '@/lib/utils'
 import { useTabsStore } from '@/stores/tabs'
 
@@ -16,6 +17,11 @@ const tabWidthClass = computed(() => {
   if (n > 7) return 'min-w-[116px] max-w-[168px]'
   return 'min-w-[120px] max-w-[200px]'
 })
+
+function isTabActive(href: string) {
+  if (isQuotePath(href) && isQuotePath(route.path)) return true
+  return href === route.path
+}
 
 function onClose(href: string) {
   const next = tabsStore.closeTab(href, route.path)
@@ -33,14 +39,14 @@ function onClose(href: string) {
           cn(
             'group relative flex h-7 shrink-0 items-center gap-1.5 rounded-t-md px-2.5 text-[12px] transition-colors',
             tabWidthClass,
-            tab.href === route.path
+            isTabActive(tab.href)
               ? 'border-t border-x border-iron/50 bg-background text-foreground'
               : 'text-muted-foreground hover:bg-background/40 hover:text-foreground',
           )
         "
       >
         <span
-          v-if="tab.href === route.path"
+          v-if="isTabActive(tab.href)"
           class="absolute top-0 right-0 left-0 h-[2px] rounded-b bg-iron"
         />
         <RouterLink
@@ -57,7 +63,7 @@ function onClose(href: string) {
               'inline-flex size-4 items-center justify-center rounded-sm transition-colors',
               'text-muted-foreground/70 hover:bg-foreground/10 hover:text-foreground',
               'opacity-0 group-hover:opacity-100',
-              tab.href === route.path && 'opacity-60 hover:opacity-100',
+              isTabActive(tab.href) && 'opacity-60 hover:opacity-100',
             )
           "
           :aria-label="`关闭 ${tab.label}`"

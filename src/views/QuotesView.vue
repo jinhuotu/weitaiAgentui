@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   Eye,
   FileSpreadsheet,
@@ -20,6 +20,8 @@ import { ApiError } from '@/lib/api'
 import { listKnowledgeBases, type KnowledgeBaseItem } from '@/lib/knowledge-api'
 import {
   clearMineQuoteRecords,
+  costQuote,
+  defaultRates,
   deleteQuoteRecord,
   downloadQuoteFile,
   emptyQuoteLine,
@@ -28,29 +30,70 @@ import {
   fetchQuoteRecords,
   generateQuote,
   lineAmount,
+  parseBoqQuote,
+  PURPOSE_META,
+  purposeFromPath,
   recognizeQuote,
+  type QuoteCostSummary,
   type QuoteLine,
+  type QuotePurpose,
+  type QuoteRates,
   type QuoteRecordItem,
+  type QuoteScheme,
+  type QuoteVerifyReport,
+  verifyQuote,
 } from '@/lib/quotes-api'
 
 const KB_STORE = 'weitai.quoteKbId'
 const MAX_MAPS = 20
 const router = useRouter()
+const route = useRoute()
+
+const purpose = computed<QuotePurpose>(() => purposeFromPath(route.path))
+const meta = computed(() => PURPOSE_META[purpose.value])
+
+const PURPOSE_TABS: { id: QuotePurpose; label: string }[] = [
+  { id: 'cost', label: '造价' },
+  { id: 'quote', label: '报价' },
+  { id: 'budget', label: '预算' },
+]
+
+function switchPurpose(id: QuotePurpose) {
+  const href = PURPOSE_META[id].href
+  if (href === route.path) return
+  void router.push(href)
+}
 
 const projectName = ref('')
 const note = ref('')
+const location = ref('')
+const durationDays = ref<number | null>(null)
+const bidCeiling = ref<number | null>(null)
+const competition = ref<'conservative' | 'balanced' | 'aggressive'>('balanced')
+const targetMargin = ref<number | null>(null)
+const rates = ref<QuoteRates>(defaultRates())
+
 type MapPreview = { url: string; name: string; kind: 'image' | 'pdf' }
 
 const files = ref<File[]>([])
 const previews = ref<MapPreview[]>([])
 const peek = ref<number | null>(null)
+const boqFile = ref<File | null>(null)
 const lines = ref<QuoteLine[]>([])
 const warnings = ref<string[]>([])
+const verifyReport = ref<QuoteVerifyReport | null>(null)
+const costSummary = ref<QuoteCostSummary | null>(null)
+const schemes = ref<QuoteScheme[]>([])
+const instruction = ref('')
 const recognizing = ref(false)
+const parsingBoq = ref(false)
+const verifying = ref(false)
+const costing = ref(false)
 const generating = ref(false)
 const err = ref('')
 const hint = ref('')
 const mapInput = ref<HTMLInputElement | null>(null)
+const boqInput = ref<HTMLInputElement | null>(null)
 const showRecords = ref(false)
 const recordsLoading = ref(false)
 const records = ref<QuoteRecordItem[]>([])
@@ -71,7 +114,9 @@ const kbList = ref<KnowledgeBaseItem[]>([])
 const kbId = ref('')
 const kbLoading = ref(false)
 
-const unmatched = computed(() => lines.value.filter((r) => r.name && !(Number(r.unitPrice) > 0)).length)
+const unmatched = computed(() =>
+  lines.value.filter((r) => r.name && !(Number(r.unitPrice) > 0 || Number(r.costPrice) > 0)).length,
+)
 const total = computed(() => lines.value.reduce((s, r) => s + lineAmount(r), 0))
 const selectedKb = computed(() => kbList.value.find((b) => b.id === kbId.value) || null)
 
@@ -79,8 +124,14 @@ const SOURCE: Record<string, string> = {
   vision: '读图',
   rule: '规则',
   catalog: '价目',
+  boq: '工程量',
   manual: '人工',
 }
+
+watch(purpose, () => {
+  showRecords.value = false
+  void loadRecords(true)
+})
 
 function isPdfFile(f: File) {
   return f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')
@@ -152,8 +203,27 @@ function onPickMaps(ev: Event) {
   files.value = picked
 }
 
+function onPickBoq(ev: Event) {
+  const el = ev.target as HTMLInputElement
+  const f = el.files?.[0] || null
+  el.value = ''
+  boqFile.value = f
+}
+
 function onQtyPrice(row: QuoteLine) {
+  if (!(Number(row.sellPrice) > 0) && Number(row.unitPrice) > 0) row.sellPrice = row.unitPrice
+  if (!(Number(row.costPrice) > 0) && Number(row.unitPrice) > 0) row.costPrice = row.unitPrice
   row.amount = lineAmount(row)
+}
+
+function normalizeLines(rows: QuoteLine[]) {
+  return rows.map((r) => {
+    const row = { ...emptyQuoteLine(), ...r }
+    if (!(Number(row.sellPrice) > 0) && Number(row.unitPrice) > 0) row.sellPrice = row.unitPrice
+    if (!(Number(row.costPrice) > 0) && Number(row.unitPrice) > 0) row.costPrice = row.unitPrice
+    row.amount = lineAmount(row)
+    return row
+  })
 }
 
 async function onRecognize() {
@@ -174,17 +244,100 @@ async function onRecognize() {
       baseId: kbId.value,
       note: note.value,
       projectName: projectName.value,
+      purpose: purpose.value,
+      location: location.value,
+      durationDays: durationDays.value,
     })
     if (data.projectName && !projectName.value) projectName.value = data.projectName
-    lines.value = (data.lines || []).map((r) => ({ ...emptyQuoteLine(), ...r, amount: lineAmount(r) }))
+    lines.value = normalizeLines(data.lines || [])
     warnings.value = data.warnings || []
+    verifyReport.value = data.verify || null
+    costSummary.value = null
+    schemes.value = []
+    instruction.value = ''
     hint.value = data.unmatched
-      ? `已识别 ${data.lines.length} 项，其中 ${data.unmatched} 项未匹配到价目。请改单价，或到知识库上传含「名称/单价」的 Excel。`
+      ? `已识别 ${data.lines.length} 项，其中 ${data.unmatched} 项未匹配到价目。`
       : `已识别 ${data.lines.length} 项`
   } catch (e) {
     err.value = e instanceof ApiError || e instanceof Error ? e.message : '识别失败'
   } finally {
     recognizing.value = false
+  }
+}
+
+async function onParseBoq() {
+  err.value = ''
+  hint.value = ''
+  if (!kbId.value) {
+    err.value = '请先选择知识库'
+    return
+  }
+  if (!boqFile.value) {
+    err.value = '请先选择工程量 Excel'
+    return
+  }
+  parsingBoq.value = true
+  try {
+    const data = await parseBoqQuote({
+      file: boqFile.value,
+      baseId: kbId.value,
+      purpose: purpose.value,
+      projectName: projectName.value,
+      location: location.value,
+      durationDays: durationDays.value,
+    })
+    lines.value = normalizeLines(data.lines || [])
+    warnings.value = data.warnings || []
+    verifyReport.value = data.verify || null
+    costSummary.value = null
+    schemes.value = []
+    instruction.value = ''
+    hint.value = `已解析工程量 ${data.lines.length} 项`
+  } catch (e) {
+    err.value = e instanceof ApiError || e instanceof Error ? e.message : '解析工程量失败'
+  } finally {
+    parsingBoq.value = false
+  }
+}
+
+async function onVerify(applyFixes = false) {
+  err.value = ''
+  verifying.value = true
+  try {
+    const data = await verifyQuote({
+      lines: lines.value.filter((r) => r.name.trim()),
+      applyFixes,
+    })
+    verifyReport.value = data.verify
+    if (applyFixes && data.lines) {
+      lines.value = normalizeLines(data.lines)
+    }
+    hint.value = data.verify.ok
+      ? `核算通过（${data.verify.warnCount} 条提示）`
+      : `核算发现 ${data.verify.errorCount} 个错误、${data.verify.warnCount} 条提示`
+  } catch (e) {
+    err.value = e instanceof ApiError || e instanceof Error ? e.message : '核算失败'
+  } finally {
+    verifying.value = false
+  }
+}
+
+async function onCost() {
+  err.value = ''
+  costing.value = true
+  try {
+    const data = await costQuote({
+      lines: lines.value.filter((r) => r.name.trim()),
+      rates: rates.value,
+    })
+    lines.value = normalizeLines(data.lines || [])
+    costSummary.value = data.costSummary
+    verifyReport.value = data.verify
+    hint.value = `造价测算完成，成本不含税 ${money(data.costSummary.costExTax)} 元`
+  } catch (e) {
+    err.value = e instanceof ApiError || e instanceof Error ? e.message : '造价测算失败'
+  } finally {
+    costing.value = false
   }
 }
 
@@ -206,21 +359,33 @@ async function onGenerate() {
   hint.value = ''
   const rows = lines.value.filter((r) => r.name.trim())
   if (!rows.length) {
-    err.value = '请先识别规划图，或手工补一行报价'
+    err.value = '请先识别规划图或解析工程量，或手工补一行'
     return
   }
   generating.value = true
   try {
     const data = await generateQuote({
+      purpose: purpose.value,
       projectName: projectName.value,
       note: note.value,
-      taxRate: 0.13,
+      location: location.value,
+      durationDays: durationDays.value,
+      bidCeiling: purpose.value === 'quote' ? bidCeiling.value : null,
+      competition: competition.value,
+      targetMargin: purpose.value === 'quote' ? targetMargin.value : null,
+      taxRate: rates.value.taxRate,
       baseId: kbId.value,
       baseName: selectedKb.value?.name || '',
+      rates: rates.value,
+      applyVerifyFixes: true,
       lines: rows.map((r) => ({ ...r, amount: lineAmount(r) })),
     })
     await downloadQuoteFile(data.xlsxFile, data.downloadName)
-    hint.value = `已下载 ${data.downloadName}，不含税合计 ${data.totalExTax.toLocaleString('zh-CN', { maximumFractionDigits: 2 })} 元`
+    if (data.costSummary) costSummary.value = data.costSummary
+    if (data.verify) verifyReport.value = data.verify
+    if (data.schemes) schemes.value = data.schemes
+    if (data.instruction) instruction.value = data.instruction
+    hint.value = `已下载 ${data.downloadName}，不含税合计 ${money(data.totalExTax)} 元`
     void loadRecords()
   } catch (e) {
     err.value = e instanceof ApiError || e instanceof Error ? e.message : '生成失败'
@@ -243,14 +408,23 @@ function money(n: number) {
 function applyDetail(detail: QuoteRecordItem) {
   projectName.value = detail.projectName || ''
   note.value = detail.note || ''
+  location.value = detail.location || ''
+  durationDays.value = detail.durationDays ?? null
+  bidCeiling.value = detail.bidCeiling ?? null
+  competition.value = (detail.competition as typeof competition.value) || 'balanced'
+  targetMargin.value = detail.targetMargin ?? null
+  if (detail.rates) rates.value = { ...defaultRates(), ...detail.rates }
   if (detail.baseId && kbList.value.some((b) => b.id === detail.baseId)) {
     kbId.value = detail.baseId
   }
-  lines.value = (detail.lines || []).map((r) => ({ ...emptyQuoteLine(), ...r, amount: lineAmount(r) }))
+  lines.value = normalizeLines(detail.lines || [])
+  verifyReport.value = detail.verify || null
+  schemes.value = detail.schemes || []
+  instruction.value = detail.instruction || ''
   warnings.value = []
   showRecords.value = false
   previewOpen.value = false
-  hint.value = `已载入「${detail.projectName || '未命名项目'}」共 ${lines.value.length} 行，可改完再生成`
+  hint.value = `已载入「${detail.projectName || '未命名项目'}」共 ${lines.value.length} 行`
 }
 
 async function loadRecords(silent = false) {
@@ -258,13 +432,14 @@ async function loadRecords(silent = false) {
   try {
     const data = await fetchQuoteRecords({
       q: recordsQuery.value.trim() || undefined,
+      purpose: purpose.value,
       limit: 50,
     })
     records.value = data.items || []
     recordsTotal.value = data.total || 0
   } catch (e) {
     if (!silent) {
-      err.value = e instanceof ApiError || e instanceof Error ? e.message : '加载报价记录失败'
+      err.value = e instanceof ApiError || e instanceof Error ? e.message : '加载记录失败'
     }
   } finally {
     recordsLoading.value = false
@@ -358,7 +533,7 @@ async function confirmDelete() {
 async function confirmClear() {
   clearingRecords.value = true
   try {
-    await clearMineQuoteRecords()
+    await clearMineQuoteRecords(purpose.value)
     confirmClearOpen.value = false
     await loadRecords()
   } catch (e) {
@@ -371,10 +546,7 @@ async function confirmClear() {
 
 <template>
   <div class="px-5 lg:px-8 py-6 max-w-6xl mx-auto">
-    <PageHeader
-      title="AI报价生成"
-      description="选一个已有知识库读取价目，再上传场地规划图识别工程量，核对后导出 Excel。单价只从库里的价目表匹配，不会由模型编造。"
-    >
+    <PageHeader :title="meta.title" :description="meta.desc">
       <template #actions>
         <button
           type="button"
@@ -387,11 +559,30 @@ async function confirmClear() {
           @click="toggleRecords"
         >
           <History class="size-3.5" />
-          我的报价记录
+          我的记录
           <span v-if="recordsTotal" class="font-mono text-[11px]">{{ recordsTotal }}</span>
         </button>
       </template>
     </PageHeader>
+
+    <div class="mb-4 flex gap-1 border-b border-border">
+      <button
+        v-for="t in PURPOSE_TABS"
+        :key="t.id"
+        type="button"
+        role="tab"
+        :aria-selected="purpose === t.id"
+        :class="[
+          'px-4 py-2 -mb-px text-[12px] border-b-2 transition-colors',
+          purpose === t.id
+            ? 'border-iron text-foreground'
+            : 'border-transparent text-muted-foreground hover:text-foreground',
+        ]"
+        @click="switchPurpose(t.id)"
+      >
+        {{ t.label }}
+      </button>
+    </div>
 
     <p v-if="err" class="mb-3 flex items-start gap-1.5 text-[12px] text-sulfur">
       <TriangleAlert class="size-3.5 shrink-0 mt-0.5" />
@@ -402,10 +593,8 @@ async function confirmClear() {
     <section v-if="showRecords" class="rounded-xl border border-border bg-card px-4 py-4">
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div class="min-w-0">
-          <h2 class="text-[14px] font-semibold">我的报价记录</h2>
-          <p class="text-[11px] text-muted-foreground mt-0.5">
-            点项目名或「预览」看当时的报价单，不会改当前表单。要改再「载入明细」。
-          </p>
+          <h2 class="text-[14px] font-semibold">我的{{ meta.title.replace('AI', '') }}记录</h2>
+          <p class="text-[11px] text-muted-foreground mt-0.5">仅显示当前入口类型的记录。</p>
         </div>
         <div class="flex shrink-0 items-center gap-2">
           <button
@@ -423,7 +612,7 @@ async function confirmClear() {
             class="inline-flex h-8 items-center rounded-md border border-border px-2.5 text-[12px] hover:bg-accent"
             @click="showRecords = false"
           >
-            返回报价
+            返回
           </button>
         </div>
       </div>
@@ -432,13 +621,13 @@ async function confirmClear() {
           v-model="recordsQuery"
           class="h-8 min-w-[220px] rounded-md border border-border bg-background px-2 text-[12px]"
           placeholder="搜索项目 / 价目库"
-          @keydown.enter.prevent="loadRecords"
+          @keydown.enter.prevent="() => loadRecords()"
         />
         <button
           type="button"
           class="inline-flex h-8 items-center gap-1 rounded-md border border-border px-2.5 text-[12px] hover:bg-accent disabled:opacity-50"
           :disabled="recordsLoading"
-          @click="loadRecords"
+          @click="() => loadRecords()"
         >
           <Loader2 v-if="recordsLoading" class="size-3.5 animate-spin" />
           查询
@@ -451,7 +640,7 @@ async function confirmClear() {
         <Loader2 class="inline size-4 animate-spin mr-2" />加载记录…
       </div>
       <p v-else-if="!records.length" class="mt-4 text-[12px] text-muted-foreground text-center py-6">
-        暂无记录。核对明细后点「生成并下载 Excel」会出现在这里。
+        暂无记录。
       </p>
       <ul v-else class="mt-3 divide-y divide-border/70">
         <li
@@ -464,17 +653,14 @@ async function confirmClear() {
               type="button"
               class="text-[13px] font-medium truncate text-left hover:underline disabled:opacity-50"
               :disabled="previewingId === item.id"
-              :title="`预览 ${item.projectName || '未命名项目'}`"
               @click="previewRecord(item)"
             >
               {{ item.projectName || '未命名项目' }}
             </button>
             <div class="mt-0.5 text-[11px] text-muted-foreground">
-              {{ item.lineCount }} 项
-              · {{ money(item.totalExTax) }} 元
+              {{ item.lineCount }} 项 · {{ money(item.totalExTax) }} 元
               <span v-if="item.baseName"> · {{ item.baseName }}</span>
               · {{ formatRecordTime(item.createdAt) }}
-              <span v-if="!item.xlsxAvailable" class="text-sulfur ml-1">文件缺失</span>
             </div>
           </div>
           <div class="flex shrink-0 items-center gap-1.5 flex-wrap">
@@ -484,8 +670,7 @@ async function confirmClear() {
               :disabled="previewingId === item.id"
               @click="previewRecord(item)"
             >
-              <Loader2 v-if="previewingId === item.id" class="size-3.5 animate-spin" />
-              <Eye v-else class="size-3.5" />
+              <Eye class="size-3.5" />
               预览
             </button>
             <button
@@ -494,7 +679,6 @@ async function confirmClear() {
               :disabled="loadingRecordId === item.id"
               @click="loadRecordLines(item)"
             >
-              <Loader2 v-if="loadingRecordId === item.id" class="size-3.5 animate-spin" />
               载入明细
             </button>
             <button
@@ -503,9 +687,8 @@ async function confirmClear() {
               :disabled="downloadingId === item.id"
               @click="downloadRecord(item)"
             >
-              <Loader2 v-if="downloadingId === item.id" class="size-3.5 animate-spin" />
-              <FileSpreadsheet v-else class="size-3.5" />
-              下载 Excel
+              <FileSpreadsheet class="size-3.5" />
+              下载
             </button>
             <button
               type="button"
@@ -513,7 +696,6 @@ async function confirmClear() {
               :disabled="deletingId === item.id"
               @click="askDelete(item)"
             >
-              <Loader2 v-if="deletingId === item.id" class="size-3.5 animate-spin" />
               删除
             </button>
           </div>
@@ -522,7 +704,7 @@ async function confirmClear() {
     </section>
 
     <div v-else class="space-y-4">
-      <Panel title="知识库" subtitle="对价只读所选库中的 Excel（需有名称、单价列）。资料请到「知识库」里维护。">
+      <Panel title="知识库" subtitle="对价只读所选库中的 Excel（名称 + 单价/成本价/指导售价）。">
         <div class="flex flex-wrap items-center gap-2">
           <select
             v-model="kbId"
@@ -542,35 +724,83 @@ async function confirmClear() {
           >
             去维护资料
           </button>
-          <span v-if="selectedKb" class="text-[11px] text-muted-foreground">
-            已选「{{ selectedKb.name }}」
-          </span>
         </div>
-        <p v-if="!kbLoading && !kbList.length" class="mt-2 text-[11px] text-sulfur">
-          没有可用知识库。请先到「知识库」新建并上传价目 Excel，且账号要有该库的使用权限。
-        </p>
       </Panel>
 
-      <Panel title="场地规划图" subtitle="支持图片 / PDF，可一次选多张。可写一句桩型或规模说明。">
+      <Panel title="项目参数" subtitle="地点、工期会写入编制说明；报价入口还可填限价与竞争档位。">
+        <div class="grid gap-3 md:grid-cols-2">
+          <label class="block text-[12px]">
+            <span class="text-muted-foreground">项目名称</span>
+            <input
+              v-model="projectName"
+              class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
+              placeholder="可选"
+            />
+          </label>
+          <label class="block text-[12px]">
+            <span class="text-muted-foreground">补充说明</span>
+            <input
+              v-model="note"
+              class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
+              placeholder="例如：直流 160kW，要雨棚"
+            />
+          </label>
+          <label class="block text-[12px]">
+            <span class="text-muted-foreground">地点</span>
+            <input
+              v-model="location"
+              class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
+              placeholder="省市 / 场站"
+            />
+          </label>
+          <label class="block text-[12px]">
+            <span class="text-muted-foreground">工期（天）</span>
+            <input
+              v-model.number="durationDays"
+              type="number"
+              min="0"
+              class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
+            />
+          </label>
+          <template v-if="purpose === 'quote'">
+            <label class="block text-[12px]">
+              <span class="text-muted-foreground">招标限价（不含税）</span>
+              <input
+                v-model.number="bidCeiling"
+                type="number"
+                min="0"
+                class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
+              />
+            </label>
+            <label class="block text-[12px]">
+              <span class="text-muted-foreground">竞争档位</span>
+              <select
+                v-model="competition"
+                class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
+              >
+                <option value="conservative">保守</option>
+                <option value="balanced">均衡</option>
+                <option value="aggressive">进取</option>
+              </select>
+            </label>
+            <label class="block text-[12px]">
+              <span class="text-muted-foreground">目标毛利率（0~1）</span>
+              <input
+                v-model.number="targetMargin"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
+                placeholder="默认跟档位"
+              />
+            </label>
+          </template>
+        </div>
+      </Panel>
+
+      <Panel title="文档解析" subtitle="规划图读图，或上传工程量 Excel（名称+数量/单价）。">
         <div class="space-y-3">
-          <div class="grid gap-3 md:grid-cols-2">
-            <label class="block text-[12px]">
-              <span class="text-muted-foreground">项目名称</span>
-              <input
-                v-model="projectName"
-                class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
-                placeholder="可选，读图也可带回"
-              />
-            </label>
-            <label class="block text-[12px]">
-              <span class="text-muted-foreground">补充说明</span>
-              <input
-                v-model="note"
-                class="mt-1 w-full h-8 rounded-md border border-border bg-background px-2 text-[12px]"
-                placeholder="例如：直流 160kW，要雨棚"
-              />
-            </label>
-          </div>
           <input
             ref="mapInput"
             type="file"
@@ -578,6 +808,13 @@ async function confirmClear() {
             accept="image/*,.pdf"
             multiple
             @change="onPickMaps"
+          />
+          <input
+            ref="boqInput"
+            type="file"
+            class="hidden"
+            accept=".xlsx,.xlsm,.csv"
+            @change="onPickBoq"
           />
           <div class="flex flex-wrap items-center gap-2">
             <button
@@ -598,7 +835,29 @@ async function confirmClear() {
               {{ recognizing ? '正在读图并对价…' : '识别工程量' }}
             </button>
             <span class="text-[11px] text-muted-foreground">
-              {{ files.length ? `已选 ${files.length} 个文件` : '未选择文件' }}
+              {{ files.length ? `已选 ${files.length} 个文件` : '未选择规划图' }}
+            </span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-[12px] hover:bg-accent"
+              @click="boqInput?.click()"
+            >
+              <Upload class="size-3.5" />
+              选择工程量 Excel
+            </button>
+            <button
+              type="button"
+              class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
+              :disabled="parsingBoq || !boqFile || !kbId"
+              @click="onParseBoq"
+            >
+              <Loader2 v-if="parsingBoq" class="size-3.5 animate-spin" />
+              解析工程量
+            </button>
+            <span class="text-[11px] text-muted-foreground">
+              {{ boqFile ? boqFile.name : '未选择工程量文件' }}
             </span>
           </div>
           <div v-if="previews.length" class="flex flex-wrap gap-2">
@@ -607,7 +866,6 @@ async function confirmClear() {
               :key="p.url"
               type="button"
               class="group relative rounded-md border border-border overflow-hidden bg-muted/30 text-left"
-              :title="`点击预览 ${p.name}`"
               @click="peek = i"
             >
               <img
@@ -621,7 +879,7 @@ async function confirmClear() {
                 class="h-44 w-40 px-2 flex flex-col items-center justify-center gap-1 text-[12px] text-muted-foreground"
               >
                 <span class="rounded border border-border px-1.5 py-0.5 text-[10px]">PDF</span>
-                <span class="truncate max-w-[9rem]" :title="p.name">{{ p.name }}</span>
+                <span class="truncate max-w-[9rem]">{{ p.name }}</span>
               </div>
               <span
                 class="absolute right-1 top-1 size-7 rounded-md bg-black/55 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100"
@@ -633,7 +891,92 @@ async function confirmClear() {
         </div>
       </Panel>
 
-      <Panel title="报价明细" subtitle="核对数量和单价后再导出。未匹配到价目的行单价为空。">
+      <Panel title="费率" subtitle="造价/预算/报价共用；生成时写入汇总表。">
+        <div class="grid gap-2 sm:grid-cols-3 md:grid-cols-4 text-[12px]">
+          <label>
+            <span class="text-muted-foreground">人工费系数</span>
+            <input v-model.number="rates.laborCoef" type="number" min="0" step="0.01" class="mt-1 w-full h-8 rounded-md border border-border px-2 bg-background" />
+          </label>
+          <label>
+            <span class="text-muted-foreground">措施费率</span>
+            <input v-model.number="rates.measureRate" type="number" min="0" max="1" step="0.01" class="mt-1 w-full h-8 rounded-md border border-border px-2 bg-background" />
+          </label>
+          <label>
+            <span class="text-muted-foreground">管理费率</span>
+            <input v-model.number="rates.manageRate" type="number" min="0" max="1" step="0.01" class="mt-1 w-full h-8 rounded-md border border-border px-2 bg-background" />
+          </label>
+          <label>
+            <span class="text-muted-foreground">利润率</span>
+            <input v-model.number="rates.profitRate" type="number" min="0" max="1" step="0.01" class="mt-1 w-full h-8 rounded-md border border-border px-2 bg-background" />
+          </label>
+          <label>
+            <span class="text-muted-foreground">税率</span>
+            <input v-model.number="rates.taxRate" type="number" min="0" max="1" step="0.01" class="mt-1 w-full h-8 rounded-md border border-border px-2 bg-background" />
+          </label>
+          <label>
+            <span class="text-muted-foreground">预算系数</span>
+            <input v-model.number="rates.budgetCoef" type="number" min="0" step="0.01" class="mt-1 w-full h-8 rounded-md border border-border px-2 bg-background" />
+          </label>
+          <label>
+            <span class="text-muted-foreground">不可预见费率</span>
+            <input v-model.number="rates.contingencyRate" type="number" min="0" max="1" step="0.01" class="mt-1 w-full h-8 rounded-md border border-border px-2 bg-background" />
+          </label>
+          <div class="flex items-end">
+            <button
+              type="button"
+              class="inline-flex h-8 items-center gap-1 rounded-md border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
+              :disabled="costing || !lines.length"
+              @click="onCost"
+            >
+              <Loader2 v-if="costing" class="size-3.5 animate-spin" />
+              试算造价
+            </button>
+          </div>
+        </div>
+        <div v-if="costSummary" class="mt-3 grid gap-1 text-[11px] text-muted-foreground sm:grid-cols-3">
+          <span>材料 {{ money(costSummary.materialCost) }}</span>
+          <span>造价不含税 {{ money(costSummary.costExTax) }}</span>
+          <span>预算不含税 {{ money(costSummary.budgetExTax) }}</span>
+          <span>报价不含税 {{ money(costSummary.quoteExTax) }}</span>
+        </div>
+      </Panel>
+
+      <Panel title="核算报告" subtitle="检查空数量、合价偏差、重名与功率冲突。">
+        <div class="flex flex-wrap gap-2 mb-2">
+          <button
+            type="button"
+            class="inline-flex h-8 items-center gap-1 rounded-md border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
+            :disabled="verifying || !lines.length"
+            @click="onVerify(false)"
+          >
+            <Loader2 v-if="verifying" class="size-3.5 animate-spin" />
+            重新核算
+          </button>
+          <button
+            type="button"
+            class="inline-flex h-8 items-center gap-1 rounded-md border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
+            :disabled="verifying || !lines.length"
+            @click="onVerify(true)"
+          >
+            应用合价修正
+          </button>
+        </div>
+        <p v-if="!verifyReport" class="text-[12px] text-muted-foreground">识别或解析后会自动核算。</p>
+        <ul v-else-if="verifyReport.issues.length" class="space-y-1">
+          <li
+            v-for="(it, i) in verifyReport.issues"
+            :key="i"
+            class="text-[11px] flex gap-1"
+            :class="it.level === 'error' ? 'text-sulfur' : 'text-muted-foreground'"
+          >
+            <TriangleAlert class="size-3.5 shrink-0 mt-0.5" />
+            {{ it.message }}
+          </li>
+        </ul>
+        <p v-else class="text-[12px] text-muted-foreground">暂无异常。</p>
+      </Panel>
+
+      <Panel title="明细" subtitle="核对数量、成本价与售价后再导出。">
         <template #action>
           <button
             type="button"
@@ -655,12 +998,13 @@ async function confirmClear() {
             <thead>
               <tr class="text-left text-muted-foreground border-b border-border">
                 <th class="py-1.5 pr-2 font-medium w-8">#</th>
-                <th class="py-1.5 pr-2 font-medium min-w-[140px]">名称</th>
-                <th class="py-1.5 pr-2 font-medium min-w-[140px]">规格</th>
-                <th class="py-1.5 pr-2 font-medium w-14">单位</th>
-                <th class="py-1.5 pr-2 font-medium w-16">数量</th>
-                <th class="py-1.5 pr-2 font-medium w-28">不含税单价</th>
-                <th class="py-1.5 pr-2 font-medium w-24">合价</th>
+                <th class="py-1.5 pr-2 font-medium min-w-[120px]">名称</th>
+                <th class="py-1.5 pr-2 font-medium min-w-[120px]">规格</th>
+                <th class="py-1.5 pr-2 font-medium w-12">单位</th>
+                <th class="py-1.5 pr-2 font-medium w-14">数量</th>
+                <th class="py-1.5 pr-2 font-medium w-24">成本价</th>
+                <th class="py-1.5 pr-2 font-medium w-24">售价</th>
+                <th class="py-1.5 pr-2 font-medium w-20">合价</th>
                 <th class="py-1.5 pr-2 font-medium w-14">来源</th>
                 <th class="py-1.5 w-8" />
               </tr>
@@ -674,8 +1018,8 @@ async function confirmClear() {
                 <td class="py-1 pr-2 align-top">
                   <textarea
                     v-model="row.spec"
-                    rows="3"
-                    class="w-full min-h-[4.5rem] rounded border border-border px-1.5 py-1 bg-background text-[11px] leading-snug"
+                    rows="2"
+                    class="w-full min-h-[3rem] rounded border border-border px-1.5 py-1 bg-background text-[11px]"
                   />
                 </td>
                 <td class="py-1 pr-2">
@@ -692,19 +1036,27 @@ async function confirmClear() {
                 </td>
                 <td class="py-1 pr-2">
                   <input
-                    v-model.number="row.unitPrice"
+                    v-model.number="row.costPrice"
                     type="number"
                     min="0"
                     class="w-full h-7 rounded border border-border px-1.5 bg-background"
-                    :class="row.name && !(row.unitPrice > 0) ? 'border-sulfur/50' : ''"
                     @input="onQtyPrice(row)"
+                  />
+                </td>
+                <td class="py-1 pr-2">
+                  <input
+                    v-model.number="row.sellPrice"
+                    type="number"
+                    min="0"
+                    class="w-full h-7 rounded border border-border px-1.5 bg-background"
+                    @input="row.unitPrice = row.sellPrice; onQtyPrice(row)"
                   />
                 </td>
                 <td class="py-1 pr-2 tabular-nums">
                   {{ lineAmount(row).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}
                 </td>
                 <td class="py-1 pr-2">
-                  <Tag :tone="row.source === 'catalog' ? 'patina' : row.unitPrice > 0 ? 'default' : 'sulfur'">
+                  <Tag :tone="row.source === 'catalog' ? 'patina' : 'default'">
                     {{ SOURCE[row.source] || row.source || '人工' }}
                   </Tag>
                 </td>
@@ -715,8 +1067,8 @@ async function confirmClear() {
                 </td>
               </tr>
               <tr v-if="!lines.length">
-                <td colspan="9" class="py-8 text-center text-muted-foreground">
-                  识别后会出现明细。也可点「增行」手工填写。
+                <td colspan="10" class="py-8 text-center text-muted-foreground">
+                  识别或解析后会出现明细，也可增行手工填写。
                 </td>
               </tr>
             </tbody>
@@ -726,10 +1078,8 @@ async function confirmClear() {
           <p class="text-[12px] text-muted-foreground">
             {{ lines.length }} 项
             <span v-if="unmatched"> · {{ unmatched }} 项待核价</span>
-            · 不含税合计
-            <span class="text-foreground font-medium">
-              {{ total.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}
-            </span>
+            · 明细合计
+            <span class="text-foreground font-medium">{{ money(total) }}</span>
             元
           </p>
           <button
@@ -740,9 +1090,33 @@ async function confirmClear() {
           >
             <Loader2 v-if="generating" class="size-3.5 animate-spin" />
             <FileSpreadsheet v-else class="size-3.5" />
-            生成并下载 Excel
+            {{ meta.exportLabel }}
           </button>
         </footer>
+      </Panel>
+
+      <Panel v-if="purpose === 'quote' && (schemes.length || instruction)" title="报价方案" subtitle="生成后展示多方案与编制说明。">
+        <ul v-if="schemes.length" class="space-y-2 mb-3">
+          <li
+            v-for="(s, i) in schemes"
+            :key="i"
+            class="rounded-md border border-border px-3 py-2 text-[12px]"
+            :class="s.recommended ? 'border-iron bg-iron/5' : ''"
+          >
+            <div class="font-medium">
+              {{ s.name }}
+              <span v-if="s.recommended" class="ml-1 text-[10px] text-iron">推荐</span>
+            </div>
+            <div class="text-muted-foreground mt-0.5">
+              不含税 {{ money(s.totalExTax) }} · 毛利 {{ (s.margin * 100).toFixed(1) }}%
+              · {{ s.tip }}
+            </div>
+            <div v-if="s.risks?.length" class="text-sulfur mt-0.5 text-[11px]">
+              {{ s.risks.join('；') }}
+            </div>
+          </li>
+        </ul>
+        <pre v-if="instruction" class="whitespace-pre-wrap text-[11px] text-muted-foreground leading-relaxed">{{ instruction }}</pre>
       </Panel>
     </div>
   </div>
@@ -750,8 +1124,8 @@ async function confirmClear() {
   <AppDialog
     :open="previewOpen"
     size="xl"
-    :title="previewDetail ? (previewDetail.projectName || '未命名项目') : '报价预览'"
-    description="只读查看生成时的明细，关闭后仍停在记录列表。"
+    :title="previewDetail ? (previewDetail.projectName || '未命名项目') : '预览'"
+    description="只读查看生成时的明细。"
     @update:open="(open) => { previewOpen = open }"
   >
     <div v-if="previewDetail" class="flex min-h-0 flex-1 flex-col gap-3">
@@ -773,9 +1147,6 @@ async function confirmClear() {
           {{ formatRecordTime(previewDetail.createdAt) }}
         </div>
       </div>
-      <p v-if="previewDetail.note" class="shrink-0 text-[12px] text-muted-foreground">
-        {{ previewDetail.note }}
-      </p>
       <div class="min-h-0 flex-1 overflow-auto rounded-md border border-border">
         <table class="w-full text-[12px] border-collapse">
           <thead class="sticky top-0 bg-card">
@@ -785,9 +1156,8 @@ async function confirmClear() {
               <th class="py-1.5 px-2 font-medium">规格</th>
               <th class="py-1.5 px-2 font-medium w-12">单位</th>
               <th class="py-1.5 px-2 font-medium w-16 text-right">数量</th>
-              <th class="py-1.5 px-2 font-medium w-28 text-right">不含税单价</th>
+              <th class="py-1.5 px-2 font-medium w-24 text-right">售价</th>
               <th class="py-1.5 px-2 font-medium w-24 text-right">合价</th>
-              <th class="py-1.5 px-2 font-medium w-14">来源</th>
             </tr>
           </thead>
           <tbody>
@@ -802,27 +1172,14 @@ async function confirmClear() {
               <td class="py-1.5 px-2">{{ row.unit || '项' }}</td>
               <td class="py-1.5 px-2 text-right tabular-nums">{{ row.qty }}</td>
               <td class="py-1.5 px-2 text-right tabular-nums">
-                {{ Number(row.unitPrice) > 0 ? money(row.unitPrice) : '—' }}
+                {{ Number(row.unitPrice || row.sellPrice) > 0 ? money(row.unitPrice || row.sellPrice) : '—' }}
               </td>
               <td class="py-1.5 px-2 text-right tabular-nums">
-                {{ Number(row.unitPrice) > 0 ? money(lineAmount(row)) : '—' }}
+                {{ money(lineAmount(row)) }}
               </td>
-              <td class="py-1.5 px-2">
-                <Tag :tone="row.source === 'catalog' ? 'patina' : Number(row.unitPrice) > 0 ? 'default' : 'sulfur'">
-                  {{ SOURCE[row.source] || row.source || '人工' }}
-                </Tag>
-              </td>
-            </tr>
-            <tr v-if="!(previewDetail.lines || []).length">
-              <td colspan="8" class="py-8 text-center text-muted-foreground">该记录没有保存明细</td>
             </tr>
           </tbody>
         </table>
-      </div>
-      <div class="shrink-0 flex flex-wrap justify-end gap-x-4 gap-y-1 text-[12px]">
-        <span>不含税合计 {{ money(previewDetail.totalExTax) }} 元</span>
-        <span>增值税 {{ Math.round((previewDetail.taxRate || 0) * 100) }}% {{ money(previewDetail.totalIncTax - previewDetail.totalExTax) }} 元</span>
-        <span class="font-medium">含税合计 {{ money(previewDetail.totalIncTax) }} 元</span>
       </div>
     </div>
     <template #footer>
@@ -835,17 +1192,7 @@ async function confirmClear() {
       </button>
       <button
         type="button"
-        class="inline-flex h-8 items-center gap-1 rounded-md border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
-        :disabled="!previewDetail || downloadingId === previewDetail.id"
-        @click="previewDetail && downloadRecord(previewDetail)"
-      >
-        <Loader2 v-if="previewDetail && downloadingId === previewDetail.id" class="size-3.5 animate-spin" />
-        <FileSpreadsheet v-else class="size-3.5" />
-        下载 Excel
-      </button>
-      <button
-        type="button"
-        class="inline-flex h-8 items-center rounded-md bg-primary text-primary-foreground px-3 text-[12px] disabled:opacity-50"
+        class="inline-flex h-8 items-center rounded-md bg-primary text-primary-foreground px-3 text-[12px]"
         :disabled="!previewDetail"
         @click="loadFromPreview"
       >
@@ -856,10 +1203,10 @@ async function confirmClear() {
 
   <AppAlertDialog
     :open="confirmDeleteOpen"
-    title="删除报价记录"
+    title="删除记录"
     :description="
       pendingDelete
-        ? `确定删除「${pendingDelete.projectName || '未命名项目'}」这条报价记录？对应 Excel 也会删除。`
+        ? `确定删除「${pendingDelete.projectName || '未命名项目'}」？`
         : '确定删除该记录？'
     "
     confirm-label="确认删除"
@@ -870,8 +1217,8 @@ async function confirmClear() {
   />
   <AppAlertDialog
     :open="confirmClearOpen"
-    title="清空我的报价记录"
-    description="将删除你名下的全部报价记录及对应 Excel，不可恢复。"
+    title="清空当前入口记录"
+    description="将删除当前类型下你名下的全部记录及对应 Excel。"
     confirm-label="确认清空"
     destructive
     :loading="clearingRecords"
@@ -885,22 +1232,12 @@ async function confirmClear() {
       class="fixed inset-0 z-[70] bg-bg-base/85 backdrop-blur-sm flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="规划图预览"
       @click.self="peek = null"
     >
-      <div
-        class="bg-bg-elevated border border-hairline rounded-lg shadow-2xl w-full max-w-6xl flex flex-col max-h-[92vh]"
-      >
+      <div class="bg-bg-elevated border border-hairline rounded-lg shadow-2xl w-full max-w-6xl flex flex-col max-h-[92vh]">
         <div class="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-hairline">
-          <div class="min-w-0 text-[13px] text-text-primary font-medium truncate">
-            {{ peekItem.name }}
-          </div>
-          <button
-            type="button"
-            class="size-8 rounded-md hover:bg-hairline/60 inline-flex items-center justify-center text-text-secondary hover:text-text-primary"
-            aria-label="关闭"
-            @click="peek = null"
-          >
+          <div class="min-w-0 text-[13px] font-medium truncate">{{ peekItem.name }}</div>
+          <button type="button" class="size-8 rounded-md hover:bg-hairline/60 inline-flex items-center justify-center" @click="peek = null">
             <X class="size-4" />
           </button>
         </div>

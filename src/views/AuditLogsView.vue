@@ -19,6 +19,8 @@ const MODULE_LABEL: Record<string, string> = {
   roles: '角色',
   hot_configs: '热配置',
   quotes: '报价',
+  'quotes-cost': '造价',
+  'quotes-budget': '预算',
   tenders: '投标',
   mcp: 'MCP',
   models: '模型',

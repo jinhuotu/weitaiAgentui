@@ -2504,7 +2504,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <div class="min-w-0">
               <h2 class="text-[14px] font-semibold text-foreground">甲方邀请书</h2>
               <p class="text-[11px] text-muted-foreground mt-0.5">
-                支持 PDF、Word、图片；报价清单可上传 Excel，或勾选「AI报价生成」记录
+                支持 PDF、Word、图片；报价清单可上传 Excel，或勾选「AI报价智能体」记录
               </p>
             </div>
           </div>
@@ -4126,7 +4126,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         v-else-if="!quotePickerRows.length"
         class="py-6 text-center text-[12px] text-muted-foreground"
       >
-        暂无报价记录。请先到「AI报价生成」生成并下载 Excel。
+        暂无报价记录。请先到「AI报价智能体」生成并下载 Excel。
       </p>
       <ul v-else class="max-h-[50vh] divide-y divide-border overflow-y-auto rounded-md border border-border">
         <li v-for="row in quotePickerRows" :key="row.id">

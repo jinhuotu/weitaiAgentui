@@ -41,6 +41,15 @@ export type NavGroup = {
   children?: NavChild[]
 }
 
+/** 造价 / 报价 / 预算共用一个侧栏入口，子路径仍保留深链 */
+export const QUOTE_FAMILY = ['/quotes', '/quotes-cost', '/quotes-budget'] as const
+export const QUOTE_NAV_HREF = '/quotes'
+export const QUOTE_NAV_LABEL = 'AI报价中心'
+
+export function isQuotePath(path: string) {
+  return (QUOTE_FAMILY as readonly string[]).includes(path)
+}
+
 function canSeeNavItem(
   it: NavItem,
   admin: boolean,
@@ -49,7 +58,9 @@ function canSeeNavItem(
   if (it.adminOnly && !admin) return false
   if (admin) return true
   if (!menus || menus.length === 0) return it.href === '/'
-  return menus.includes(it.href)
+  if (menus.includes(it.href)) return true
+  if (isQuotePath(it.href) && QUOTE_FAMILY.some((h) => menus.includes(h))) return true
+  return false
 }
 
 export function filterNavGroups(
@@ -90,6 +101,14 @@ export function canAccessPath(
   )
   if (adminParent) return false
 
+  if (isQuotePath(path)) {
+    return canSeeNavItem(
+      { href: QUOTE_NAV_HREF, label: QUOTE_NAV_LABEL, icon: FileSpreadsheet },
+      admin,
+      menus,
+    )
+  }
+
   const exact = flattenNavItems().find((it) => it.href === path)
   if (exact) return canSeeNavItem(exact, admin, menus)
   if (!menus || menus.length === 0) return path === '/'
@@ -113,7 +132,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/knowledge', label: '知识库', icon: LibraryBig },
       { href: '/tenders', label: 'AI标书生成', icon: FileText },
       { href: '/tender-qa', label: 'AI标书复检', icon: FileSearch },
-      { href: '/quotes', label: 'AI报价生成', icon: FileSpreadsheet },
+      { href: QUOTE_NAV_HREF, label: QUOTE_NAV_LABEL, icon: FileSpreadsheet },
       { href: '/tender-library', label: '投标资料库', icon: FolderOpen },
       { href: '/scene-agents', label: '场景智能体', icon: Sparkles, adminOnly: true },
       { href: '/workflows', label: '工作流', icon: Workflow, adminOnly: true },
@@ -159,7 +178,7 @@ export const PRIMARY_NAV_HREFS = [
   '/approval',
   '/tenders',
   '/tender-qa',
-  '/quotes',
+  QUOTE_NAV_HREF,
   '/knowledge',
   '/tender-library',
 ] as const
@@ -173,7 +192,7 @@ export const NAV_ITEM_DESC: Record<string, string> = {
   '/knowledge': '文档入库、检索与预览',
   '/tenders': '邀请书识别与文档生成',
   '/tender-qa': '对照邀请书复检生成稿或上传终稿',
-  '/quotes': '规划图识别与 Excel 报价单',
+  [QUOTE_NAV_HREF]: '造价、报价与控制预算一站生成',
   '/tender-library': '企业常备资料与扫描件',
   '/scene-agents': '绑定提示词、知识库与 MCP',
   '/workflows': '编排知识检索 / LLM / 智能体',

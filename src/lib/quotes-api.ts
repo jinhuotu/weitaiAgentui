@@ -1,6 +1,8 @@
 import { apiDownload, apiRequest } from './api'
 import { getAccessToken } from './auth'
 
+export type QuotePurpose = 'cost' | 'quote' | 'budget'
+
 export type QuoteLine = {
   seq: string
   code: string
@@ -9,36 +11,110 @@ export type QuoteLine = {
   unit: string
   qty: number
   unitPrice: number
+  costPrice: number
+  sellPrice: number
   amount: number
   source: string
   matchName: string
   note: string
 }
 
+export type QuoteVerifyIssue = {
+  code: string
+  level: string
+  row: number
+  rows?: number[]
+  message: string
+  expect?: number
+}
+
+export type QuoteVerifyReport = {
+  ok: boolean
+  errorCount: number
+  warnCount: number
+  issues: QuoteVerifyIssue[]
+  lineCount: number
+}
+
+export type QuoteRates = {
+  laborCoef: number
+  measureRate: number
+  manageRate: number
+  profitRate: number
+  taxRate: number
+  budgetCoef: number
+  contingencyRate: number
+}
+
+export type QuoteCostSummary = {
+  materialCost: number
+  laborCost: number
+  measureFee: number
+  manageFee: number
+  costExTax: number
+  profit: number
+  quoteExTax: number
+  contingency: number
+  budgetExTax: number
+  taxRate: number
+  costIncTax: number
+  quoteIncTax: number
+  budgetIncTax: number
+  rates: QuoteRates
+}
+
+export type QuoteScheme = {
+  name: string
+  coef: number
+  totalExTax: number
+  margin: number
+  tip: string
+  risks: string[]
+  recommended?: boolean
+}
+
 export type QuoteRecognizeResult = {
+  purpose?: QuotePurpose
+  stage?: string
   projectName: string
+  location?: string
+  durationDays?: number | null
   lines: QuoteLine[]
   warnings: string[]
   catalogCount: number
   unmatched: number
   baseId?: string
   baseName?: string
+  verify?: QuoteVerifyReport
 }
 
 export type QuoteGenerateResult = {
   id?: string
+  purpose?: QuotePurpose
+  stage?: string
   xlsxFile: string
   downloadName: string
   totalExTax: number
   totalIncTax: number
   unmatched: number
   lineCount: number
+  costSummary?: QuoteCostSummary
+  verify?: QuoteVerifyReport
+  schemes?: QuoteScheme[]
+  instruction?: string
 }
 
 export type QuoteRecordItem = {
   id: string
+  purpose: QuotePurpose | string
+  stage: string
   projectName: string
   note: string
+  location?: string
+  durationDays?: number | null
+  bidCeiling?: number | null
+  competition?: string
+  targetMargin?: number | null
   baseId: string
   baseName: string
   taxRate: number
@@ -52,6 +128,41 @@ export type QuoteRecordItem = {
   username: string
   createdAt: number
   lines?: QuoteLine[]
+  rates?: QuoteRates | null
+  verify?: QuoteVerifyReport | null
+  schemes?: QuoteScheme[] | null
+  instruction?: string
+  costSummary?: QuoteCostSummary
+}
+
+export const PURPOSE_META: Record<
+  QuotePurpose,
+  { title: string; desc: string; exportLabel: string; href: string }
+> = {
+  cost: {
+    title: 'AI造价智能体',
+    desc: '规划图/工程量 → 核算 → 造价测算表（成本侧）',
+    exportLabel: '生成造价测算表',
+    href: '/quotes-cost',
+  },
+  quote: {
+    title: 'AI报价智能体',
+    desc: '规划图/工程量 → 核算 → 造价 → 多方案投标报价',
+    exportLabel: '生成并下载报价 Excel',
+    href: '/quotes',
+  },
+  budget: {
+    title: 'AI预算智能体',
+    desc: '规划图/工程量 → 核算 → 控制预算表（目标成本）',
+    exportLabel: '生成控制预算表',
+    href: '/quotes-budget',
+  },
+}
+
+export function purposeFromPath(path: string): QuotePurpose {
+  if (path.includes('quotes-cost')) return 'cost'
+  if (path.includes('quotes-budget')) return 'budget'
+  return 'quote'
 }
 
 function token() {
@@ -69,6 +180,8 @@ export function emptyQuoteLine(): QuoteLine {
     unit: '项',
     qty: 1,
     unitPrice: 0,
+    costPrice: 0,
+    sellPrice: 0,
     amount: 0,
     source: 'manual',
     matchName: '',
@@ -76,9 +189,21 @@ export function emptyQuoteLine(): QuoteLine {
   }
 }
 
+export function defaultRates(): QuoteRates {
+  return {
+    laborCoef: 0,
+    measureRate: 0.03,
+    manageRate: 0.05,
+    profitRate: 0.08,
+    taxRate: 0.13,
+    budgetCoef: 1.05,
+    contingencyRate: 0.03,
+  }
+}
+
 export function lineAmount(row: QuoteLine) {
   const qty = Number(row.qty) || 0
-  const price = Number(row.unitPrice) || 0
+  const price = Number(row.unitPrice) || Number(row.sellPrice) || Number(row.costPrice) || 0
   return Math.round(qty * price * 100) / 100
 }
 
@@ -87,12 +212,20 @@ export async function recognizeQuote(input: {
   baseId: string
   note?: string
   projectName?: string
+  purpose?: QuotePurpose
+  location?: string
+  durationDays?: number | null
 }): Promise<QuoteRecognizeResult> {
   const form = new FormData()
   for (const f of input.files) form.append('files', f)
   form.append('baseId', input.baseId)
+  form.append('purpose', input.purpose || 'quote')
   if (input.note) form.append('note', input.note)
   if (input.projectName) form.append('projectName', input.projectName)
+  if (input.location) form.append('location', input.location)
+  if (input.durationDays != null && input.durationDays !== undefined) {
+    form.append('durationDays', String(input.durationDays))
+  }
   return apiRequest<QuoteRecognizeResult>('/api/v1/quotes/recognize', {
     method: 'POST',
     token: token(),
@@ -100,12 +233,66 @@ export async function recognizeQuote(input: {
   })
 }
 
+export async function parseBoqQuote(input: {
+  file: File
+  baseId: string
+  purpose?: QuotePurpose
+  projectName?: string
+  location?: string
+  durationDays?: number | null
+}): Promise<QuoteRecognizeResult> {
+  const form = new FormData()
+  form.append('file', input.file)
+  form.append('baseId', input.baseId)
+  form.append('purpose', input.purpose || 'quote')
+  if (input.projectName) form.append('projectName', input.projectName)
+  if (input.location) form.append('location', input.location)
+  if (input.durationDays != null && input.durationDays !== undefined) {
+    form.append('durationDays', String(input.durationDays))
+  }
+  return apiRequest<QuoteRecognizeResult>('/api/v1/quotes/parse-boq', {
+    method: 'POST',
+    token: token(),
+    body: form,
+  })
+}
+
+export async function verifyQuote(body: {
+  lines: QuoteLine[]
+  applyFixes?: boolean
+}): Promise<{ verify: QuoteVerifyReport; lines: QuoteLine[] | null }> {
+  return apiRequest('/api/v1/quotes/verify', {
+    method: 'POST',
+    token: token(),
+    body,
+  })
+}
+
+export async function costQuote(body: {
+  lines: QuoteLine[]
+  rates?: QuoteRates
+}): Promise<{ stage: string; lines: QuoteLine[]; costSummary: QuoteCostSummary; verify: QuoteVerifyReport }> {
+  return apiRequest('/api/v1/quotes/cost', {
+    method: 'POST',
+    token: token(),
+    body,
+  })
+}
+
 export async function generateQuote(body: {
+  purpose: QuotePurpose
   projectName: string
   note?: string
+  location?: string
+  durationDays?: number | null
+  bidCeiling?: number | null
+  competition?: string
+  targetMargin?: number | null
   taxRate?: number
   baseId?: string
   baseName?: string
+  rates?: QuoteRates
+  applyVerifyFixes?: boolean
   lines: QuoteLine[]
 }): Promise<QuoteGenerateResult> {
   return apiRequest<QuoteGenerateResult>('/api/v1/quotes/generate', {
@@ -125,11 +312,13 @@ export async function downloadQuoteFile(fileName: string, downloadName: string):
 
 export async function fetchQuoteRecords(params?: {
   q?: string
+  purpose?: QuotePurpose
   limit?: number
   offset?: number
 }): Promise<{ total: number; items: QuoteRecordItem[] }> {
   const q = new URLSearchParams()
   if (params?.q) q.set('q', params.q)
+  if (params?.purpose) q.set('purpose', params.purpose)
   if (params?.limit) q.set('limit', String(params.limit))
   if (params?.offset) q.set('offset', String(params.offset))
   const suffix = q.toString() ? `?${q.toString()}` : ''
@@ -156,8 +345,9 @@ export async function deleteQuoteRecord(recordId: string): Promise<{ deleted: bo
   })
 }
 
-export async function clearMineQuoteRecords(): Promise<{ deleted: number; ids: string[] }> {
-  return apiRequest('/api/v1/quotes/records/clear-mine', {
+export async function clearMineQuoteRecords(purpose?: QuotePurpose): Promise<{ deleted: number; ids: string[] }> {
+  const q = purpose ? `?purpose=${encodeURIComponent(purpose)}` : ''
+  return apiRequest(`/api/v1/quotes/records/clear-mine${q}`, {
     method: 'POST',
     token: token(),
   })

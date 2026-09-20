@@ -1,6 +1,12 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import type { Component } from 'vue'
-import { canAccessPath, flattenNavItems } from '@/config/nav'
+import {
+  canAccessPath,
+  flattenNavItems,
+  isQuotePath,
+  QUOTE_FAMILY,
+  QUOTE_NAV_LABEL,
+} from '@/config/nav'
 import { useAuthStore } from '@/stores/auth'
 import { useMobileMenuStore } from '@/stores/mobile-menu'
 import { useTabsStore } from '@/stores/tabs'
@@ -20,6 +26,8 @@ const MIGRATED_VIEWS: Record<string, () => Promise<{ default: Component }>> = {
   '/tenders': () => import('@/views/TendersView.vue'),
   '/tender-qa': () => import('@/views/TenderQaView.vue'),
   '/quotes': () => import('@/views/QuotesView.vue'),
+  '/quotes-cost': () => import('@/views/QuotesView.vue'),
+  '/quotes-budget': () => import('@/views/QuotesView.vue'),
   '/tender-library': () => import('@/views/TenderLibraryView.vue'),
   '/work-tasks': () => import('@/views/WorkTasksView.vue'),
   '/tender-tasks': () => import('@/views/AllTenderTasksView.vue'),
@@ -27,6 +35,12 @@ const MIGRATED_VIEWS: Record<string, () => Promise<{ default: Component }>> = {
   '/users': () => import('@/views/UsersView.vue'),
   '/logs': () => import('@/views/AuditLogsView.vue'),
   '/settings': () => import('@/views/SettingsView.vue'),
+}
+
+const QUOTE_ROUTE_META: Record<string, string> = {
+  '/quotes-cost': 'AI造价智能体',
+  '/quotes': 'AI报价智能体',
+  '/quotes-budget': 'AI预算智能体',
 }
 
 function buildFeatureRoutes(): RouteRecordRaw[] {
@@ -44,6 +58,18 @@ function buildFeatureRoutes(): RouteRecordRaw[] {
       name: item.href === '/' ? 'overview' : item.href.slice(1).replace(/\//g, '-'),
       component,
       meta: { title: item.label, adminOnly: Boolean(item.adminOnly) },
+    })
+  }
+
+  // 页内 Tab 深链：侧栏只挂 /quotes，子路径仍要注册
+  for (const href of QUOTE_FAMILY) {
+    if (seen.has(href)) continue
+    seen.add(href)
+    routes.push({
+      path: href.replace(/^\//, ''),
+      name: href.slice(1).replace(/\//g, '-'),
+      component: MIGRATED_VIEWS[href],
+      meta: { title: QUOTE_ROUTE_META[href] || QUOTE_NAV_LABEL },
     })
   }
 
@@ -132,7 +158,9 @@ router.afterEach((to) => {
 
   if (to.path !== '/login') {
     const tabs = useTabsStore()
-    const label = (to.meta.title as string | undefined) || undefined
+    const label = isQuotePath(to.path)
+      ? QUOTE_NAV_LABEL
+      : (to.meta.title as string | undefined) || undefined
     tabs.ensureTab(to.path, label)
   }
 })

@@ -13,7 +13,7 @@ import {
   Users,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
-import { assignableNavGroups } from '@/config/nav'
+import { assignableNavGroups, isQuotePath, QUOTE_FAMILY } from '@/config/nav'
 import { Panel, PageHeader, KpiCard, Tag } from '@/components/ui-kit'
 import { ApiError } from '@/lib/api'
 import {
@@ -317,8 +317,22 @@ function roleMenusLocked() {
   return Boolean(editingRole.value && PROTECTED_ROLE_CODES.has(editingRole.value.code))
 }
 
+function menuSelected(href: string) {
+  if (isQuotePath(href)) {
+    return QUOTE_FAMILY.some((h) => roleForm.value.menus.includes(h))
+  }
+  return roleForm.value.menus.includes(href)
+}
+
 function toggleMenu(href: string) {
   if (href === '/' || roleMenusLocked()) return
+  if (isQuotePath(href)) {
+    const has = QUOTE_FAMILY.some((h) => roleForm.value.menus.includes(h))
+    roleForm.value.menus = has
+      ? roleForm.value.menus.filter((h) => !isQuotePath(h))
+      : [...new Set([...roleForm.value.menus, ...QUOTE_FAMILY])]
+    return
+  }
   const has = roleForm.value.menus.includes(href)
   roleForm.value.menus = has
     ? roleForm.value.menus.filter((h) => h !== href)
@@ -809,7 +823,7 @@ function onDeleteUserOpen(v: boolean) {
                     :disabled="it.href === '/' || roleMenusLocked()"
                     :class="[
                       'px-2.5 py-1 rounded-md text-[11px] border transition-colors disabled:opacity-70',
-                      roleForm.menus.includes(it.href)
+                      menuSelected(it.href)
                         ? 'border-iron bg-iron/10 text-iron'
                         : 'border-hairline text-text-secondary hover:text-text-primary',
                     ]"
