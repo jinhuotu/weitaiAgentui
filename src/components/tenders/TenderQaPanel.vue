@@ -20,7 +20,7 @@ const props = withDefaults(
     error: '',
     compact: false,
     page: false,
-    title: 'AI 质检',
+    title: 'AI 自检',
     runLabel: '',
     showRun: true,
   },
@@ -85,13 +85,13 @@ const groupedMissing = computed(() => {
 const emptyHint = computed(() => {
   if (props.loading) return '正在对照邀请书分析投标文件…'
   if (props.error) return props.error
-  return '生成后可对照上传的邀请书做 AI 质检，给出符合度并列出缺失项。'
+  return '生成后可对照上传的邀请书做 AI 自检，给出符合度并列出缺失项。'
 })
 
 const runText = computed(() => {
-  if (props.loading) return '质检中…'
+  if (props.loading) return '自检中…'
   if (props.runLabel) return props.runLabel
-  return props.report ? '重新质检' : '开始质检'
+  return props.report ? '重新自检' : '开始自检'
 })
 </script>
 
@@ -123,7 +123,7 @@ const runText = computed(() => {
       上次按上传终稿复检{{ report.uploadName ? `：${report.uploadName}` : '' }}
     </p>
     <p v-else-if="report?.stale" class="mt-2 text-[11px] text-sulfur">
-      文档已重新生成，以下为上次质检结果，请再跑一遍。
+      文档已重新生成，以下为上次自检结果，请再跑一遍。
     </p>
 
     <div v-if="report" class="mt-3 flex flex-col sm:flex-row gap-3">

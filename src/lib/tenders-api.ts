@@ -100,7 +100,9 @@ export function matchPerformanceLine(
   }
   if ((req.keywords || []).length || (req.similarScope || '').trim()) {
     similarOk = (req.keywords || []).some((word) => {
-      if (word && blob.includes(word)) return true
+      if (!word) return false
+      if (blob.includes(word)) return true
+      if (/^[A-Za-z0-9]+$/.test(word) && blob.toUpperCase().includes(word.toUpperCase())) return true
       if (CHARGER_SCOPE.has(word) && (line.chargerRelated || /充电|直流桩|交流桩|群充/.test(blob))) return true
       return false
     })

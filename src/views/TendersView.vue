@@ -104,6 +104,12 @@ function emptyDocumentFormat(): DocumentFormat {
   }
 }
 
+function todayYmd() {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
 function emptyBrief(): BidBrief {
   return {
     projectName: '',
@@ -118,7 +124,7 @@ function emptyBrief(): BidBrief {
     arrivalPct: 50,
     settlementPct: 17,
     warrantyPct: 3,
-    bidDate: new Date().toISOString().slice(0, 10),
+    bidDate: todayYmd(),
     tenderNo: '',
     bidderName: '河南伟泰光电科技有限公司',
     bidderNature: '有限责任公司',
@@ -144,7 +150,7 @@ function emptyBrief(): BidBrief {
     extraNote: '',
     factoryRole: '',
     attachQualifications: false,
-    includePlaceholders: true,
+    includePlaceholders: false,
     includeCommitment: true,
     extraPlaceholders: [],
     requiredSlotKeys: [],
@@ -208,6 +214,7 @@ const OUTLINE_KIND_OPTIONS: { value: string; label: string }[] = [
   { value: 'factory', label: '原厂承诺' },
   { value: 'tech_plan', label: '技术标' },
   { value: 'company', label: '企业信息表' },
+  { value: 'unknown', label: '按招标书原文' },
 ]
 
 const OUTLINE_GENERATE_KINDS = new Set([
@@ -234,8 +241,11 @@ function outlineSourceLabel(source: string, item?: OutlineItem) {
     source === 'generate' &&
     item &&
     OUTLINE_FORM_KINDS.has(item.kind) &&
-    (item.body || '').trim().length >= 60
+    (item.body || '').trim().length >= 1
   ) {
+    return '按招标书格式填空'
+  }
+  if (item && item.kind === 'quote' && (item.body || '').trim()) {
     return '按招标书格式填空'
   }
   if (source === 'generate') return '模块生成'
@@ -261,7 +271,13 @@ function outlineAuthHint(item: OutlineItem) {
 }
 
 function pruneUnknownOutline(items: OutlineItem[] | undefined) {
-  return (items || []).filter((item) => (item.kind || '') !== 'unknown')
+  return (items || []).filter((item) => {
+    const title = (item.title || '').replace(/\s+/g, '')
+    if (!title) return false
+    if ((item.kind || '') !== 'unknown') return true
+    if (/^(商务标|技术标|商务部分|技术部分|商务标书|技术标书)$/.test(title)) return false
+    return true
+  })
 }
 
 const visibleOutlineItems = computed(() => pruneUnknownOutline(form.outlineItems))
@@ -449,7 +465,7 @@ const pendingSlotReplace = ref(true)
 const hasParsed = ref(false)
 /** 右侧资料库列表默认折叠为紧凑条 */
 const slotsExpanded = ref(true)
-/** 向导当前步骤 0=上传 1=填表 2=在线预览 3=AI质检 4=下载定稿 */
+/** 向导当前步骤 0=上传 1=填表 2=在线预览 3=AI自检 4=下载定稿 */
 const currentStepIndex = ref(0)
 /** 填写页切换商务标 / 技术标；生成后各出一本 Word */
 const activeVolume = ref<BidVolume>('business')
@@ -477,6 +493,7 @@ const loadingFormId = ref<string | null>(null)
 const confirmGenerateOpen = ref(false)
 const confirmGenerateMode = ref<'form' | 'record'>('form')
 const pendingRegenItem = ref<TenderRecordItem | null>(null)
+const confirmDateOpen = ref(false)
 const qaReport = ref<QaReport | null>(null)
 const qaLoading = ref(false)
 const qaError = ref('')
@@ -701,6 +718,15 @@ const generateBlockers = computed(() => {
   if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
     issues.push('报价清单（上传 Excel/Word，或从 AI 报价记录勾选后识别）')
   }
+  if (performanceRequirementActive(form.performanceRequirement)) {
+    const picked = form.performanceLines.filter(
+      (row) => row.includeInBid !== false && String(row.projectName || '').trim(),
+    ).length
+    const need = form.performanceRequirement.minCount || 0
+    if (need > 0 && picked < need) {
+      issues.push(`类似业绩已选 ${picked} 条，招标要求至少 ${need} 个`)
+    }
+  }
   return issues
 })
 
@@ -804,6 +830,21 @@ const confirmGenerateDescription = computed(() =>
     : '将覆盖当前编制中任务的 Word。上次在预览里改过的内容不会自动合并进这次。',
 )
 
+function bidDateOffToday() {
+  const t = String(form.bidDate || '').trim()
+  return Boolean(t) && t !== todayYmd()
+}
+
+async function continueGenerateAfterChecks() {
+  if (result.value) {
+    confirmGenerateMode.value = 'form'
+    pendingRegenItem.value = null
+    confirmGenerateOpen.value = true
+    return
+  }
+  await doGenerate()
+}
+
 const placeholderItems = computed((): SlotStatus[] => {
   const byKey = new Map<string, SlotStatus>()
   for (const slot of catalogSlots.value) {
@@ -856,7 +897,7 @@ const workflowSteps = [
   { key: 'upload', label: '上传邀请书' },
   { key: 'form', label: '填商务/技术标' },
   { key: 'preview', label: '在线预览' },
-  { key: 'qa', label: 'AI 质检' },
+  { key: 'qa', label: 'AI 自检' },
   { key: 'generate', label: '下载定稿' },
 ] as const
 
@@ -1470,7 +1511,7 @@ onMounted(async () => {
     if (!form.layoutMode) form.layoutMode = 'chapter5'
     ensureDocumentFormat()
     ensurePerformanceRequirement()
-    if (form.includePlaceholders == null) form.includePlaceholders = true
+    if (form.includePlaceholders == null) form.includePlaceholders = false
     if (form.includeCommitment == null) form.includeCommitment = true
     form.techPlanNote = hydrateTechPlanNote(form)
     void loadRecords()
@@ -2050,7 +2091,7 @@ async function doGenerate() {
     const payload = {
       ...form,
       includeCommitment: true,
-      includePlaceholders: true,
+      includePlaceholders: false,
       requiredSlotKeys: effectiveRequiredKeys.value,
       includeSlotKeys: effectiveIncludeKeys.value,
       outlineItems: pruneUnknownOutline(form.outlineItems),
@@ -2094,7 +2135,7 @@ async function runTenderQa() {
   try {
     qaReport.value = await inspectTenderQa(id, { volume: previewVolume.value })
   } catch (e) {
-    qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '质检失败'
+    qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '自检失败'
   } finally {
     qaLoading.value = false
   }
@@ -2131,13 +2172,20 @@ async function onFormStepNext() {
     error.value = '当前任务已进入审批或已定稿，仅可预览'
     return
   }
-  if (result.value) {
-    confirmGenerateMode.value = 'form'
-    pendingRegenItem.value = null
-    confirmGenerateOpen.value = true
+  if (bidDateOffToday()) {
+    confirmDateOpen.value = true
     return
   }
-  await doGenerate()
+  await continueGenerateAfterChecks()
+}
+
+function onConfirmDateOpen(open: boolean) {
+  if (!open && !generating.value) confirmDateOpen.value = false
+}
+
+async function confirmBidDate() {
+  confirmDateOpen.value = false
+  await continueGenerateAfterChecks()
 }
 
 function askRegenerateRecord(item: TenderRecordItem) {
@@ -2433,16 +2481,16 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       :class="currentStepIndex === 2 ? 'mb-2 shrink-0' : 'mb-6'"
       aria-label="投标生成流程"
     >
-      <ol class="flex items-center gap-0">
+      <ol class="tender-steps-list">
         <li
           v-for="(step, i) in workflowSteps"
           :key="step.key"
-          class="flex items-center min-w-0"
-          :class="i < workflowSteps.length - 1 ? 'flex-1' : ''"
+          class="tender-step-item"
+          :class="{ 'tender-step-item--grow': i < workflowSteps.length - 1 }"
         >
           <button
             type="button"
-            class="flex items-center gap-2 shrink-0 text-left transition-opacity"
+            class="tender-step-btn"
             :class="[
               i <= activeWorkflowIndex ? 'text-foreground' : 'text-muted-foreground',
               i <= maxStepReached ? 'cursor-pointer hover:opacity-80' : 'cursor-default',
@@ -2463,7 +2511,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           </button>
           <span
             v-if="i < workflowSteps.length - 1"
-            class="tender-step-line mx-1.5 sm:mx-2"
+            class="tender-step-line"
             :class="i < activeWorkflowIndex ? 'tender-step-line--done' : ''"
           />
         </li>
@@ -2646,7 +2694,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         title="组卷模板"
         :subtitle="
           form.layoutMode === 'outline'
-            ? '用本标招标书里识别出的目录组卷；已知类型用模块填写，承诺函等复制原文'
+            ? '用本标招标书里识别出的目录组卷；函件、清单、报价单模板复制原文，没有的页不补'
             : '用公司固定投标文件格式组卷；下面清单只作对照，生成时不按这些条目排目录'
         "
         collapsible
@@ -2809,7 +2857,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           v-else
           class="mb-2 text-[11px] text-muted-foreground"
         >
-          拖动手柄或点箭头可调整顺序；生成目录与正文按此顺序，跳过项不入卷。未识别条目不显示、不入卷。
+          拖动手柄或点箭头可调整顺序；生成目录与正文按此顺序，跳过项不入卷。清单/模板按招标书原文复制。
         </p>
         <ul
           v-if="visibleOutlineItems.length"
@@ -2980,6 +3028,17 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
       <Panel title="项目与招标人" subtitle="识别结果可再改；投标人侧不会被邀请书覆盖">
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div class="md:col-span-2 rounded-md border border-primary/35 bg-primary/5 px-3 py-2.5">
+            <label class="text-[12px] space-y-1 block">
+              <span class="text-foreground font-medium">
+                投标日期<span class="tender-req" aria-hidden="true">*</span>
+              </span>
+              <span class="block text-[11px] text-muted-foreground leading-relaxed">
+                封面、投标函、授权委托书都用这个日期。默认今天，改了且与今天相差 ≥1 天会再确认。
+              </span>
+              <input v-model="form.bidDate" type="date" class="kb-input font-sans max-w-xs mt-1" />
+            </label>
+          </div>
           <label class="md:col-span-2 text-[12px] space-y-1">
             <span class="text-muted-foreground">项目名称<span class="tender-req" aria-hidden="true">*</span></span>
             <input
@@ -3007,10 +3066,6 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               class="kb-input font-sans"
               placeholder="邀请书写明时自动填，封面可印出"
             />
-          </label>
-          <label class="text-[12px] space-y-1">
-            <span class="text-muted-foreground">投标日期</span>
-            <input v-model="form.bidDate" type="date" class="kb-input font-sans" />
           </label>
           <label class="md:col-span-2 text-[12px] space-y-1">
             <span class="text-muted-foreground">投标内容</span>
@@ -3210,7 +3265,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
       <Panel
         title="类似业绩"
-        subtitle="按本标招标门槛预选写入项；不符的仍留在表中可勾选，资料库原件不会删"
+        subtitle="按本标邀请书门槛（行业、MES/MOM、份数）预选；不足 3 条或类型不符不能生成"
       >
         <div class="flex items-center justify-between mb-2 gap-2">
           <p class="text-[12px] text-muted-foreground min-w-0">
@@ -3242,16 +3297,16 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           未从本份招标书抽出同类/金额/数量门槛。资料库合同会列入本标，可取消勾选。
         </p>
         <div class="overflow-x-auto border border-border rounded-md">
-          <table class="w-full text-[11px] border-collapse min-w-[860px]">
+          <table class="w-full text-[11px] border-collapse min-w-[1080px] tender-perf-table">
             <thead>
               <tr class="text-muted-foreground bg-accent/40">
                 <th class="px-2 py-1.5 text-left font-medium w-14">写入</th>
-                <th class="px-2 py-1.5 text-left font-medium min-w-[140px]">项目/合同</th>
-                <th class="px-2 py-1.5 text-left font-medium">规格型号</th>
-                <th class="px-2 py-1.5 text-left font-medium">买方</th>
-                <th class="px-2 py-1.5 text-left font-medium">联系人</th>
-                <th class="px-2 py-1.5 text-left font-medium w-24">合同额（元）</th>
-                <th class="px-2 py-1.5 text-left font-medium">概况</th>
+                <th class="px-2 py-1.5 text-left font-medium min-w-[160px]">项目/合同</th>
+                <th class="px-2 py-1.5 text-left font-medium min-w-[88px]">规格型号</th>
+                <th class="px-2 py-1.5 text-left font-medium min-w-[80px]">买方</th>
+                <th class="px-2 py-1.5 text-left font-medium min-w-[72px]">联系人</th>
+                <th class="px-2 py-1.5 text-left font-medium min-w-[96px]">合同额（元）</th>
+                <th class="px-2 py-1.5 text-left font-medium min-w-[120px]">概况</th>
                 <th class="px-2 py-1.5 text-left font-medium w-16">在建</th>
                 <th class="px-2 py-1.5 text-left font-medium w-24">对照</th>
                 <th class="w-10"></th>
@@ -3281,10 +3336,10 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 <td class="px-1 py-1 min-w-[100px]">
                   <input v-model="row.client" class="kb-input font-sans !py-1 !px-1" placeholder="甲方/买方" />
                 </td>
-                <td class="px-1 py-1">
+                <td class="px-1 py-1 min-w-[72px]">
                   <input v-model="row.contact" class="kb-input font-sans !py-1 !px-1" placeholder="可空或保密" />
                 </td>
-                <td class="px-1 py-1">
+                <td class="px-1 py-1 min-w-[96px]">
                   <input v-model.number="row.amountYuan" type="number" min="0" step="0.01" class="kb-input font-sans !py-1 !px-1" />
                 </td>
                 <td class="px-1 py-1 min-w-[120px]">
@@ -3804,7 +3859,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           <div class="min-w-0">
             <h2 class="text-[14px] font-semibold text-foreground">Word 在线预览</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
-              左上角选哪一卷就生成哪一卷。预览用本机 WPS 排出的 PDF，分页与本地打开一致。
+              当前预览格式基于本地 WPS。如果本机未装 WPS，请忽略预览格式问题，直接进行下一步，或点下载查看。
             </p>
           </div>
           <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
@@ -3931,18 +3986,18 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             去工作任务
           </button>
           <button type="button" class="tender-primary-btn min-w-[160px]" @click="onPreviewStepNext">
-            去 AI 质检
+            去 AI 自检
             <ChevronRight class="size-3.5" />
           </button>
         </footer>
       </div>
     </section>
 
-    <!-- 步骤 4：AI 质检 -->
+    <!-- 步骤 4：AI 自检 -->
     <section v-else-if="currentStepIndex === 3 && result" class="tender-step-panel space-y-4">
       <TenderQaPanel
         page
-        :title="previewVolume === 'technical' ? 'AI 质检 · 技术标' : 'AI 质检 · 商务标'"
+        :title="previewVolume === 'technical' ? 'AI 自检 · 技术标' : 'AI 自检 · 商务标'"
         :report="qaReport"
         :loading="qaLoading"
         :error="qaError"
@@ -4082,7 +4137,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       <footer class="tender-step-footer">
         <button type="button" class="tender-ghost-btn" @click="onStepBack">
           <ChevronLeft class="size-3.5" />
-          返回 AI 质检
+          返回 AI 自检
         </button>
         <button type="button" class="tender-ghost-btn" @click="goToStep(1)">
           修改表单
@@ -4167,6 +4222,15 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   </AppDialog>
 
   <AppAlertDialog
+    :open="confirmDateOpen"
+    title="确认投标日期"
+    :description="`投标日期为 ${form.bidDate}，与今天相差不少于 1 天。函件、封面、授权书都会用这个日期，确认按该日期生成？`"
+    confirm-label="按该日期生成"
+    :loading="generating"
+    @update:open="onConfirmDateOpen"
+    @confirm="confirmBidDate"
+  />
+  <AppAlertDialog
     :open="confirmGenerateOpen"
     :title="confirmGenerateTitle"
     :description="confirmGenerateDescription"
@@ -4204,15 +4268,38 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
 <style scoped>
 .tender-steps {
+  --step-rail: color-mix(in srgb, var(--bg-elevated, hsl(var(--card))) 88%, transparent);
   padding: 0.9rem 1.35rem;
   border-radius: 0.75rem;
   border: 1px solid var(--hairline, hsl(var(--border)));
-  background: color-mix(in srgb, var(--bg-elevated, hsl(var(--card))) 88%, transparent);
+  background: var(--step-rail);
 }
-.tender-steps button {
+.tender-steps-list {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.tender-step-item {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.tender-step-item--grow {
+  flex: 1 1 0;
+  min-width: min-content;
+}
+.tender-step-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
   border: none;
   background: transparent;
   padding: 0;
+  text-align: left;
+  position: relative;
+  z-index: 1;
+  transition: opacity 0.15s;
 }
 .tender-step-dot {
   display: inline-flex;
@@ -4224,24 +4311,27 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   border: 1.5px solid var(--hairline, hsl(var(--border)));
   font-size: 11px;
   font-weight: 600;
-  background: var(--bg-base, hsl(var(--background)));
+  flex-shrink: 0;
+  background: var(--step-rail);
+  box-shadow: 0 0 0 3px var(--step-rail);
 }
 .tender-step-dot--active {
   border-color: var(--accent-iron, hsl(var(--primary)));
-  background: color-mix(in srgb, var(--accent-iron, hsl(var(--primary))) 12%, transparent);
+  background: color-mix(in srgb, var(--accent-iron, hsl(var(--primary))) 12%, var(--bg-elevated, hsl(var(--card))));
   color: var(--accent-iron, hsl(var(--primary)));
 }
 .tender-step-dot--done {
   border-color: var(--accent-patina, #3d8b7a);
-  background: color-mix(in srgb, var(--accent-patina, #3d8b7a) 15%, transparent);
+  background: color-mix(in srgb, var(--accent-patina, #3d8b7a) 16%, var(--bg-elevated, hsl(var(--card))));
   color: var(--accent-patina, #3d8b7a);
 }
 .tender-step-line {
-  flex: 1;
+  flex: 1 1 0;
   height: 2px;
   border-radius: 1px;
   background: var(--hairline, hsl(var(--border)));
-  min-width: 1.5rem;
+  min-width: 0.75rem;
+  margin: 0 0.7rem;
 }
 .tender-step-line--done {
   background: color-mix(in srgb, var(--accent-patina, #3d8b7a) 55%, var(--hairline, hsl(var(--border))));
@@ -4501,6 +4591,9 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   font-size: 12px;
   padding: 8px 10px;
   width: 100%;
+}
+.tender-perf-table th {
+  white-space: nowrap;
 }
 .kb-input:focus {
   outline: none;
