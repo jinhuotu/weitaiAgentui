@@ -338,7 +338,7 @@ function resultLabel(task: TenderTask) {
                 class="ml-2 text-muted-foreground hover:underline"
                 @click="goQa(row)"
               >
-                复检
+                评分
               </button>
             </td>
           </tr>
@@ -414,7 +414,7 @@ function resultLabel(task: TenderTask) {
         class="h-8 px-3 text-xs rounded-md border border-border hover:bg-accent"
         @click="goQa(current)"
       >
-        去复检
+        去评分
       </button>
       <button
         type="button"

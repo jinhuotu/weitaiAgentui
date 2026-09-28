@@ -39,6 +39,83 @@ export type PerformanceMatchResult = {
 }
 
 const CHARGER_SCOPE = new Set(['充电桩', '充电设施', '充电机', '直流桩', '交流桩', '群充'])
+const SCOPE_JUNK = [
+  '所要求',
+  '相符',
+  '指标项',
+  '招标文件',
+  '投标人',
+  '须提供',
+  '资格审查',
+  '证明材料',
+  '与牵引',
+  '响应情况',
+  '填写',
+  '详见',
+]
+const SCOPE_WORDS = [
+  'MES',
+  'MOM',
+  'WMS',
+  'TPM',
+  'QMS',
+  '数字化工厂',
+  '数智化',
+  '智能制造',
+  '制造执行',
+  '制造运营',
+  '充电桩',
+  '充电设施',
+  '充电机',
+  '直流桩',
+  '交流桩',
+  '群充',
+  '热力',
+  '供热',
+  '供暖',
+  '信息化',
+  '系统集成',
+  '软件开发',
+  'DICT',
+  '电缆',
+  '箱变',
+  '光伏',
+  '变电站',
+  '电力施工',
+  'EPC',
+]
+
+function wordInBlob(blob: string, word: string) {
+  if (!word || !blob) return false
+  if (blob.includes(word)) return true
+  return /^[A-Za-z0-9]+$/.test(word) && blob.toUpperCase().includes(word.toUpperCase())
+}
+
+export function cleanPerformanceScope(text: string) {
+  const s = (text || '').replace(/\s+/g, '')
+  if (s.length < 2) return ''
+  const pickHits = () => SCOPE_WORDS.filter((w) => wordInBlob(s, w)).slice(0, 3).join('、')
+  if (SCOPE_JUNK.some((j) => s.includes(j))) return pickHits()
+  if (s.length > 16) return pickHits()
+  return s.slice(0, 80)
+}
+
+export function performanceTypeTokens(req?: PerformanceRequirement | null) {
+  if (!req) return [] as string[]
+  const out: string[] = []
+  const seen = new Set<string>()
+  const add = (raw: string) => {
+    for (const part of cleanPerformanceScope(raw).split(/[、,，;；/]/)) {
+      const word = (part || '').trim()
+      if (!word || seen.has(word)) continue
+      seen.add(word)
+      out.push(word)
+    }
+  }
+  for (const item of req.keywords || []) add(String(item || ''))
+  add(req.similarScope || '')
+  return out
+}
 
 export function emptyPerformanceRequirement(): PerformanceRequirement {
   return {
@@ -65,7 +142,8 @@ export function performanceRequirementActive(req?: PerformanceRequirement | null
 export function formatPerformanceRequirement(req?: PerformanceRequirement | null): string {
   if (!performanceRequirementActive(req) || !req) return ''
   const parts: string[] = []
-  const scope = (req.similarScope || '').trim() || (req.keywords || []).slice(0, 3).join('、')
+  const tokens = performanceTypeTokens(req)
+  const scope = cleanPerformanceScope(req.similarScope || '') || tokens.slice(0, 3).join('、')
   if (scope) parts.push(`同类「${scope}」`)
   if (req.minAmountYuan > 0) parts.push(`单份≥${formatPerfAmount(req.minAmountYuan)}`)
   if (req.minCount > 0) parts.push(`至少${req.minCount}个`)
@@ -98,16 +176,14 @@ export function matchPerformanceLine(
       reasons.push('金额不足')
     }
   }
-  if ((req.keywords || []).length || (req.similarScope || '').trim()) {
-    similarOk = (req.keywords || []).some((word) => {
+  const tokens = performanceTypeTokens(req)
+  if (tokens.length) {
+    similarOk = tokens.some((word) => {
       if (!word) return false
-      if (blob.includes(word)) return true
-      if (/^[A-Za-z0-9]+$/.test(word) && blob.toUpperCase().includes(word.toUpperCase())) return true
+      if (wordInBlob(blob, word)) return true
       if (CHARGER_SCOPE.has(word) && (line.chargerRelated || /充电|直流桩|交流桩|群充/.test(blob))) return true
       return false
     })
-    const scope = (req.similarScope || '').replace(/\s+/g, '')
-    if (!similarOk && scope.length >= 2 && blob.includes(scope)) similarOk = true
     if (!similarOk) reasons.push('类型不符')
   }
   if (req.requireCompleted && line.ongoing) {
@@ -200,6 +276,14 @@ export type OutlineItem = {
   level?: number
 }
 
+export type BidRequirement = {
+  id: string
+  text: string
+  category: string
+  targetKind: string
+  targetTitle?: string
+}
+
 export type DocumentFormat = {
   specified: boolean
   notes: string[]
@@ -262,9 +346,20 @@ export type BidBrief = {
   agentIdNo: string
   agentAuthUntil: string
   authNeed?: string
+  authEnabled?: boolean
   trafficFeeNote: string
   extraNote: string
   factoryRole: string
+  controlPriceYuan?: number | null
+  safetyFeeYuan?: number | null
+  provisionalYuan?: number | null
+  primeCostYuan?: number | null
+  bidBondYuan?: number | null
+  pmName?: string
+  pmCertNo?: string
+  pmGrade?: string
+  defectPeriod?: string
+  perfBond?: string
   attachQualifications: boolean
   includePlaceholders: boolean
   includeCommitment: boolean
@@ -292,6 +387,7 @@ export type BidBrief = {
   layoutMode: string
   outlineChapter: string
   outlineItems: OutlineItem[]
+  bidRequirements?: BidRequirement[]
   documentFormat: DocumentFormat
   invitationId?: string
   generateVolume?: 'business' | 'technical'
@@ -383,6 +479,7 @@ export type QaReport = {
   llmUsed: boolean
   coverage: Record<string, QaCoverageBucket>
   missing: QaGap[]
+  letterChecklist?: string[]
   checkedAt?: number
   stale?: boolean
   source?: 'generated' | 'upload' | string
@@ -547,6 +644,7 @@ export type ParseInvitationResult = {
   preview: string
   knowledgeHits: { name?: string; docId?: string }[]
   quoteFileName?: string | null
+  agentHint?: { agentName?: string; agentIdNo?: string }
 }
 
 function token(): string {

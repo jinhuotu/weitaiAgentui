@@ -71,9 +71,9 @@ const coverageRows = computed(() => {
 
 const groupedMissing = computed(() => {
   const groups: { severity: string; label: string; items: QaGap[] }[] = [
-    { severity: 'disqualify', label: '废标风险', items: [] },
-    { severity: 'deduct', label: '扣分风险', items: [] },
-    { severity: 'suggest', label: '建议补全', items: [] },
+    { severity: 'disqualify', label: '🔴 否决投标风险（致命）', items: [] },
+    { severity: 'deduct', label: '🟠 中等风险', items: [] },
+    { severity: 'suggest', label: '🟡 格式瑕疵', items: [] },
   ]
   for (const item of props.report?.missing || []) {
     const group = groups.find((g) => g.severity === item.severity) || groups[2]
@@ -120,7 +120,7 @@ const runText = computed(() => {
     </div>
 
     <p v-if="report?.source === 'upload'" class="mt-2 text-[11px] text-muted-foreground">
-      上次按上传终稿复检{{ report.uploadName ? `：${report.uploadName}` : '' }}
+      上次按上传终稿评分{{ report.uploadName ? `：${report.uploadName}` : '' }}
     </p>
     <p v-else-if="report?.stale" class="mt-2 text-[11px] text-sulfur">
       文档已重新生成，以下为上次自检结果，请再跑一遍。
@@ -181,6 +181,12 @@ const runText = computed(() => {
           </li>
         </ul>
       </div>
+    </div>
+    <div v-if="report?.letterChecklist?.length" class="mt-3">
+      <div class="text-[11px] font-medium text-foreground/80 mb-1">自检核对清单</div>
+      <ul class="space-y-1 text-[11px] leading-snug text-muted-foreground">
+        <li v-for="(line, i) in report.letterChecklist" :key="'ck-' + i">{{ line }}</li>
+      </ul>
     </div>
     <p v-else-if="report && !loading" class="mt-3 text-[11px] text-patina">
       未列出缺失项。下载前仍建议人工核对签章、保证金和原件扫描件。

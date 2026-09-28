@@ -146,9 +146,20 @@ function emptyBrief(): BidBrief {
     agentIdNo: '',
     agentAuthUntil: '',
     authNeed: '',
+    authEnabled: false,
     trafficFeeNote: '',
     extraNote: '',
     factoryRole: '',
+    controlPriceYuan: null,
+    safetyFeeYuan: null,
+    provisionalYuan: null,
+    primeCostYuan: null,
+    bidBondYuan: null,
+    pmName: '',
+    pmCertNo: '',
+    pmGrade: '',
+    defectPeriod: '',
+    perfBond: '',
     attachQualifications: false,
     includePlaceholders: false,
     includeCommitment: true,
@@ -176,6 +187,7 @@ function emptyBrief(): BidBrief {
     layoutMode: 'chapter5',
     outlineChapter: '',
     outlineItems: [],
+    bidRequirements: [],
     documentFormat: emptyDocumentFormat(),
     invitationId: '',
   }
@@ -258,26 +270,48 @@ function setOutlineKind(item: OutlineItem, kind: string) {
 }
 
 function setOutlineSkipped(item: OutlineItem, skipped: boolean) {
-  if (item.kind === 'auth' && form.authNeed === 'required' && skipped) return
+  if (item.kind === 'auth' && form.authEnabled && skipped) return
   item.skipped = skipped
   item.source = outlineSourceFor(item.kind, skipped)
 }
 
 function outlineAuthHint(item: OutlineItem) {
   if (item.kind !== 'auth') return ''
-  if (hasAgent.value) return item.skipped ? '已填委托人，请取消跳过' : '需贴委托人身份证'
-  if (form.authNeed === 'required') return '招标书要求必须委托'
-  return '法人自签可跳过'
+  if (form.authEnabled) return item.skipped ? '已启用授权委托，请取消跳过' : '需贴委托人身份证'
+  return '未启用授权委托，法人自签即可跳过'
+}
+
+function prettyOutlineTitle(title: string) {
+  const t = (title || '').replace(/\s+/g, '')
+  if (t.includes('营业执照') && /注册地址|注册住所/.test(t)) return '营业执照'
+  return title
 }
 
 function pruneUnknownOutline(items: OutlineItem[] | undefined) {
-  return (items || []).filter((item) => {
-    const title = (item.title || '').replace(/\s+/g, '')
-    if (!title) return false
-    if ((item.kind || '') !== 'unknown') return true
-    if (/^(商务标|技术标|商务部分|技术部分|商务标书|技术标书)$/.test(title)) return false
-    return true
-  })
+  return (items || [])
+    .map((item) => {
+      const title = prettyOutlineTitle(item.title)
+      return title === item.title ? item : { ...item, title }
+    })
+    .filter((item) => {
+      const raw = item.title || ''
+      const title = raw.replace(/\s+/g, '')
+      if (!title) return false
+      if (/[：:]\s*[/／]\s*$/.test(raw) || /[：:][/／]+$/.test(title)) return false
+      if (/计分规则|计分办法|评分细则|基准价/.test(title)) return false
+      if (/见下表|如下表/.test(title)) return false
+      if (title.includes('评审') && /(共计\d*分|计分|评分)/.test(title)) return false
+      if (title.includes('计算规则') && !title.includes('报价表')) return false
+      if (
+        /中小企业声明|残疾人福利|资格审查资料|投标人基本情况表|近年财务状况表|正在施工的?和?新承接|管理人员简历|项目经理简历表|项目管理机构组成|拟分包项目情况|施工组织设计|暗标|装订要求|劳动力计划表|国家企业信用信息公示/.test(
+          title,
+        )
+      )
+        return false
+      if ((item.kind || '') !== 'unknown') return true
+      if (/^(商务标|技术标|商务部分|技术部分|商务标书|技术标书)$/.test(title)) return false
+      return true
+    })
 }
 
 const visibleOutlineItems = computed(() => pruneUnknownOutline(form.outlineItems))
@@ -362,6 +396,15 @@ function ensureCompanyDefaults(target: BidBrief) {
   }
 }
 
+function junkPmName(name: string): boolean {
+  const t = (name || '').replace(/[＿_—\-－/\s／]/g, '')
+  if (!t || ['无', '暂无', '待定', '空白', '姓名'].includes(t)) return true
+  if (/是指|由承|承包|拟派|拟任|详见|如下|项目|经理|投标|招标|应当|必须|填写|注册|证书/.test(t)) {
+    return true
+  }
+  return !/^[\u4e00-\u9fff]{2,4}$/.test(t)
+}
+
 /** 合并 brief：空字符串不覆盖已有公司默认；其它字段照常写入 */
 function mergeBriefIntoForm(brief: Partial<BidBrief>) {
   const defaults = emptyBrief()
@@ -377,11 +420,17 @@ function mergeBriefIntoForm(brief: Partial<BidBrief>) {
     }
     next[key] = value
   }
+  if (junkPmName(String(next.pmName || ''))) next.pmName = ''
   Object.assign(form, next)
   ensureCompanyDefaults(form)
+  if (brief.authEnabled === undefined) {
+    form.authEnabled = Boolean(String(form.agentName || '').trim() || String(form.agentIdNo || '').trim())
+  }
+  syncAuthOutline(Boolean(form.authEnabled))
   if (Array.isArray(form.outlineItems)) {
     form.outlineItems = pruneUnknownOutline(form.outlineItems)
   }
+  if (!Array.isArray(form.bidRequirements)) form.bidRequirements = []
 }
 
 function isWeakPerfTitle(name: string): boolean {
@@ -523,7 +572,7 @@ function isParseNoiseNote(note: string) {
 
 function isParsePrimaryNote(note: string) {
   if (isParseNoiseNote(note)) return false
-  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标|招标书要求提供授权委托/.test(
+  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标|须授权委托/.test(
     note,
   )
 }
@@ -649,14 +698,60 @@ function isBlank(value: unknown) {
   return !String(value ?? '').trim()
 }
 
-const agentIdRequired = computed(() => !isBlank(form.agentName) || form.authNeed === 'required')
-const agentNameRequired = computed(() => form.authNeed === 'required')
-const hasAgent = computed(() => !isBlank(form.agentName) || !isBlank(form.agentIdNo))
+const agentIdRequired = computed(() => Boolean(form.authEnabled))
+const agentNameRequired = computed(() => Boolean(form.authEnabled))
+const hasAgent = computed(() => Boolean(form.authEnabled))
+const agentHint = ref<{ agentName?: string; agentIdNo?: string }>({})
+const agentSlotReady = computed(() => {
+  const slot = catalogSlots.value.find((s) => s.key === 'id_agent')
+  return Boolean(slot && slot.fileCount > 0)
+})
+const authPanelSubtitle = computed(() => {
+  if (form.authEnabled) return '须填委托人姓名和身份证号；扫描件优先用投标资料库'
+  if (form.authNeed === 'required') return '招标书写了须授权委托，默认法人自签；要用委托人请打开开关'
+  return '法人身份证贴在身份证明页；默认不启用授权委托'
+})
+
+function fillAgentFromReadySources() {
+  if (!form.authEnabled) return
+  const hint = agentHint.value || {}
+  if (isBlank(form.agentName) && hint.agentName) form.agentName = hint.agentName
+  if (isBlank(form.agentIdNo) && hint.agentIdNo) form.agentIdNo = hint.agentIdNo
+  const slot = catalogSlots.value.find((s) => s.key === 'id_agent')
+  for (const f of slot?.files || []) {
+    const raw = String(f.name || f.fileName || '')
+    if (isBlank(form.agentIdNo)) {
+      const idm = raw.match(/\d{17}[\dXx]/)
+      if (idm) form.agentIdNo = idm[0].toUpperCase()
+    }
+    if (isBlank(form.agentName)) {
+      const nm = raw.match(/([\u4e00-\u9fff]{2,4})(?=身份证|身份|委托|授权)/)
+      if (nm && nm[1] !== '法人' && nm[1] !== '法定') form.agentName = nm[1]
+    }
+  }
+}
+
+function syncAuthOutline(on: boolean) {
+  for (const item of form.outlineItems) {
+    if (item.kind === 'auth') {
+      item.skipped = !on
+      item.source = outlineSourceFor(item.kind, !on)
+    }
+  }
+}
+
+watch(
+  () => form.authEnabled,
+  (on) => {
+    syncAuthOutline(Boolean(on))
+    if (on) fillAgentFromReadySources()
+  },
+)
 
 watch(
   () => form.agentName,
   (name) => {
-    if (!String(name || '').trim()) return
+    if (!form.authEnabled || !String(name || '').trim()) return
     for (const item of form.outlineItems) {
       if (item.kind === 'auth' && item.skipped) setOutlineSkipped(item, false)
     }
@@ -713,7 +808,7 @@ const generateBlockers = computed(() => {
   if (isBlank(form.legalPersonName)) issues.push('法人姓名')
   if (isBlank(form.legalPersonAge)) issues.push('年龄')
   if (isBlank(form.legalPersonIdNo)) issues.push('法人身份证号')
-  if (agentNameRequired.value && isBlank(form.agentName)) issues.push('委托代理人（招标书要求授权委托）')
+  if (agentNameRequired.value && isBlank(form.agentName)) issues.push('委托代理人')
   if (agentIdRequired.value && isBlank(form.agentIdNo)) issues.push('代理人身份证号')
   if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
     issues.push('报价清单（上传 Excel/Word，或从 AI 报价记录勾选后识别）')
@@ -1050,8 +1145,10 @@ function refreshAttachmentMatch() {
   const report = attachmentMatch.value
   if (!report) return
   const counts = new Map<string, number>()
+  const filledTitles: string[] = []
   for (const slot of [...catalogSlots.value, ...slotStatuses.value]) {
     if (slot.key) counts.set(slot.key, slot.fileCount || 0)
+    if ((slot.fileCount || 0) > 0 && slot.title) filledTitles.push(slot.title.replace(/\s/g, ''))
   }
   const seen = new Set<string>()
   const matched: AttachmentMatchItem[] = []
@@ -1063,10 +1160,33 @@ function refreshAttachmentMatch() {
     const fileCount = counts.has(item.key) ? counts.get(item.key)! : item.fileCount
     const next = { ...item, fileCount }
     if (fileCount > 0) matched.push({ ...next, created: false })
-    else if (item.created) createdItems.push(next)
+    else if (filledTitles.some((t) => sameLibraryTitle(t, (item.title || '').replace(/\s/g, '')))) {
+      const hit = [...catalogSlots.value, ...slotStatuses.value].find(
+        (s) =>
+          (s.fileCount || 0) > 0 &&
+          sameLibraryTitle((s.title || '').replace(/\s/g, ''), (item.title || '').replace(/\s/g, '')),
+      )
+      if (hit?.key && !seen.has(hit.key)) {
+        seen.add(hit.key)
+        matched.push({
+          key: hit.key,
+          title: hit.title,
+          fileCount: hit.fileCount,
+          required: Boolean(item.required),
+          created: false,
+        })
+      }
+    } else if (item.created) createdItems.push(next)
     else missingFiles.push(next)
   }
   attachmentMatch.value = { matched, missingFiles, createdItems }
+}
+
+function sameLibraryTitle(a: string, b: string) {
+  if (!a || !b) return false
+  if (a === b || a.includes(b) || b.includes(a)) return true
+  const marks = ['营业执照', '开户许可', 'ISO', '质量体系', '体系认证']
+  return marks.some((m) => a.includes(m) && b.includes(m))
 }
 
 function includeOptionalSlot(slot: SlotStatus) {
@@ -1320,6 +1440,7 @@ function applyBriefToForm(brief: BidBrief) {
   if (!Array.isArray(form.techDevHeaders)) form.techDevHeaders = []
   if (!Array.isArray(form.performanceLines)) form.performanceLines = []
   if (!Array.isArray(form.outlineItems)) form.outlineItems = []
+  if (!Array.isArray(form.bidRequirements)) form.bidRequirements = []
   if (!form.layoutMode) form.layoutMode = 'chapter5'
   ensureDocumentFormat()
   ensurePerformanceRequirement()
@@ -1508,6 +1629,7 @@ onMounted(async () => {
     if (!Array.isArray(form.techDevHeaders)) form.techDevHeaders = []
     if (!Array.isArray(form.performanceLines)) form.performanceLines = []
     if (!Array.isArray(form.outlineItems)) form.outlineItems = []
+    if (!Array.isArray(form.bidRequirements)) form.bidRequirements = []
     if (!form.layoutMode) form.layoutMode = 'chapter5'
     ensureDocumentFormat()
     ensurePerformanceRequirement()
@@ -1892,6 +2014,9 @@ async function onParseInvitation() {
       quoteRecordIds: quoteRecordIds.value,
     })
     mergeBriefIntoForm(data.brief)
+    form.authEnabled = false
+    agentHint.value = data.agentHint || {}
+    syncAuthOutline(false)
     form.techPlanNote = hydrateTechPlanNote(form)
     if (!Array.isArray(form.extraPlaceholders)) form.extraPlaceholders = []
     if (!Array.isArray(form.requiredSlotKeys)) form.requiredSlotKeys = data.requiredSlotKeys || []
@@ -1904,6 +2029,7 @@ async function onParseInvitation() {
     if (!Array.isArray(form.techDevHeaders)) form.techDevHeaders = []
     if (!Array.isArray(form.performanceLines)) form.performanceLines = []
     if (!Array.isArray(form.outlineItems)) form.outlineItems = []
+    if (!Array.isArray(form.bidRequirements)) form.bidRequirements = []
     if (!form.layoutMode) form.layoutMode = 'chapter5'
     ensureDocumentFormat()
     ensurePerformanceRequirement()
@@ -1920,6 +2046,8 @@ async function onParseInvitation() {
     }
     if (data.catalogSlots?.length) catalogSlots.value = data.catalogSlots
     if (data.slots?.length) slotStatuses.value = data.slots
+    await refreshLibrary()
+    refreshAttachmentMatch()
     if (!form.deviationLines.length && form.quoteLines.length) {
       fillDeviationFromQuote({ silent: true })
     } else if (form.quoteLines.length && quoteSpecFilledCount.value) {
@@ -2925,8 +3053,8 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 type="checkbox"
                 class="accent-current"
                 :checked="item.skipped"
-                :disabled="item.kind === 'auth' && form.authNeed === 'required'"
-                :title="item.kind === 'auth' && form.authNeed === 'required' ? '招标书要求授权委托，不可跳过' : '跳过则不入卷'"
+                :disabled="item.kind === 'auth' && form.authEnabled"
+                :title="item.kind === 'auth' && form.authEnabled ? '已启用授权委托，不可跳过' : '跳过则不入卷'"
                 @change="setOutlineSkipped(item, ($event.target as HTMLInputElement).checked)"
               />
               跳过
@@ -3104,7 +3232,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             </span>
           </label>
           <label class="text-[12px] space-y-1">
-            <span class="text-muted-foreground">供货期（天）</span>
+            <span class="text-muted-foreground">工期/交货期（日历天）</span>
             <input v-model.number="form.deliveryDays" type="number" min="1" class="kb-input font-sans" />
           </label>
           <label class="text-[12px] space-y-1">
@@ -3118,6 +3246,42 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           <label class="text-[12px] space-y-1">
             <span class="text-muted-foreground">投标有效期（天）</span>
             <input v-model.number="form.bidValidityDays" type="number" min="1" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">投标保证金（元）</span>
+            <input v-model.number="form.bidBondYuan" type="number" min="0" step="0.01" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">安全生产措施费（元）</span>
+            <input v-model.number="form.safetyFeeYuan" type="number" min="0" step="0.01" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">暂列金额（元）</span>
+            <input v-model.number="form.provisionalYuan" type="number" min="0" step="0.01" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">专业工程暂估价（元）</span>
+            <input v-model.number="form.primeCostYuan" type="number" min="0" step="0.01" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">项目经理</span>
+            <input v-model="form.pmName" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">项目经理注册证号</span>
+            <input v-model="form.pmCertNo" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">项目经理专业等级</span>
+            <input v-model="form.pmGrade" class="kb-input font-sans" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">缺陷责任期</span>
+            <input v-model="form.defectPeriod" class="kb-input font-sans" placeholder="招标文件给定，如 12个月" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">履约担保金额</span>
+            <input v-model="form.perfBond" class="kb-input font-sans" placeholder="招标文件给定，空则留下划线" />
           </label>
           <label class="text-[12px] space-y-1">
             <span class="text-muted-foreground">预付款 %</span>
@@ -3265,7 +3429,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
       <Panel
         title="类似业绩"
-        subtitle="按本标邀请书门槛（行业、MES/MOM、份数）预选；不足 3 条或类型不符不能生成"
+        subtitle="按本标邀请书抽出的业绩门槛预选；份数不够时不能生成"
       >
         <div class="flex items-center justify-between mb-2 gap-2">
           <p class="text-[12px] text-muted-foreground min-w-0">
@@ -3297,7 +3461,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           未从本份招标书抽出同类/金额/数量门槛。资料库合同会列入本标，可取消勾选。
         </p>
         <div class="overflow-x-auto border border-border rounded-md">
-          <table class="w-full text-[11px] border-collapse min-w-[1080px] tender-perf-table">
+          <table class="w-full text-[11px] border-collapse min-w-[1140px] tender-perf-table">
             <thead>
               <tr class="text-muted-foreground bg-accent/40">
                 <th class="px-2 py-1.5 text-left font-medium w-14">写入</th>
@@ -3309,7 +3473,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 <th class="px-2 py-1.5 text-left font-medium min-w-[120px]">概况</th>
                 <th class="px-2 py-1.5 text-left font-medium w-16">在建</th>
                 <th class="px-2 py-1.5 text-left font-medium w-24">对照</th>
-                <th class="w-10"></th>
+                <th class="tender-op-col px-2 py-1.5 text-center font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -3366,9 +3530,15 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                   </span>
                   <span v-else class="text-muted-foreground">—</span>
                 </td>
-                <td class="px-1 py-1 text-center">
-                  <button type="button" class="text-muted-foreground hover:text-sulfur" @click="removePerformanceRow(i)">
-                    删
+                <td class="tender-op-col px-1.5 py-1 text-center">
+                  <button
+                    type="button"
+                    class="tender-row-del"
+                    title="删除本条业绩"
+                    @click="removePerformanceRow(i)"
+                  >
+                    <Trash2 class="size-3" />
+                    删除
                   </button>
                 </td>
               </tr>
@@ -3422,17 +3592,20 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
       <Panel
         title="法定代表人 / 授权"
-        :subtitle="
-          form.authNeed === 'required'
-            ? '招标书要求授权委托，须填委托人并贴身份证'
-            : '法人身份证贴在身份证明页；有委托人时贴在授权委托书，法人自签可跳过授权委托'
-        "
+        :subtitle="authPanelSubtitle"
         collapsible
-        :default-open="form.authNeed === 'required'"
+        :default-open="form.authEnabled || form.authNeed === 'required'"
       >
+        <template #action>
+          <label class="inline-flex items-center gap-1.5 text-[12px] text-foreground whitespace-nowrap">
+            <input v-model="form.authEnabled" type="checkbox" class="accent-current" />
+            启用授权委托
+          </label>
+        </template>
         <template #summary>
           {{ form.legalPersonName || '法人未填' }} · {{ form.legalPersonAge ? `${form.legalPersonAge}岁` : '年龄未填' }} ·
           {{ form.legalPersonIdNo || '身份证未填' }}
+          <template v-if="form.authEnabled"> · 授权委托已开</template>
         </template>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
           <label class="text-[12px] space-y-1">
@@ -3455,32 +3628,42 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <span class="text-muted-foreground">法人身份证号<span class="tender-req" aria-hidden="true">*</span></span>
             <input v-model="form.legalPersonIdNo" class="kb-input font-sans" required aria-required="true" />
           </label>
-          <label class="text-[12px] space-y-1">
-            <span class="text-muted-foreground">
-              委托代理人
-              <span v-if="agentNameRequired" class="tender-req" aria-hidden="true">*</span>
-            </span>
-            <input
-              v-model="form.agentName"
-              class="kb-input font-sans"
-              :required="agentNameRequired"
-              :aria-required="agentNameRequired"
-              :placeholder="agentNameRequired ? '招标书要求必填' : '法人自签可留空'"
-            />
-          </label>
-          <label class="text-[12px] space-y-1">
-            <span class="text-muted-foreground">
-              代理人身份证号
-              <span v-if="agentIdRequired" class="tender-req" aria-hidden="true">*</span>
-            </span>
-            <input
-              v-model="form.agentIdNo"
-              class="kb-input font-sans"
-              :required="agentIdRequired"
-              :aria-required="agentIdRequired"
-            />
-          </label>
+          <template v-if="form.authEnabled">
+            <label class="text-[12px] space-y-1">
+              <span class="text-muted-foreground">
+                委托代理人
+                <span class="tender-req" aria-hidden="true">*</span>
+              </span>
+              <input
+                v-model="form.agentName"
+                class="kb-input font-sans"
+                required
+                aria-required="true"
+                placeholder="必填，优先从资料库回填"
+              />
+            </label>
+            <label class="text-[12px] space-y-1">
+              <span class="text-muted-foreground">
+                代理人身份证号
+                <span class="tender-req" aria-hidden="true">*</span>
+              </span>
+              <input
+                v-model="form.agentIdNo"
+                class="kb-input font-sans"
+                required
+                aria-required="true"
+                placeholder="必填"
+              />
+            </label>
+          </template>
         </div>
+        <p v-if="form.authEnabled" class="text-[11px] text-muted-foreground mt-2 leading-relaxed">
+          {{
+            agentSlotReady
+              ? '资料库已有委托人身份证，将写入授权委托书'
+              : '请填写委托人，并在下方资料区上传或确认身份证扫描件'
+          }}
+        </p>
       </Panel>
 
       <div class="tender-card">
@@ -3691,7 +3874,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 >
                   {{ h }}
                 </th>
-                <th class="w-10"></th>
+                <th class="tender-op-col px-2 py-1.5 text-center font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -3714,9 +3897,15 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                   />
                   <span v-else class="text-muted-foreground">—</span>
                 </td>
-                <td class="px-1 py-1 text-center">
-                  <button type="button" class="text-muted-foreground hover:text-sulfur" @click="removeDeviationRow(i)">
-                    删
+                <td class="tender-op-col px-1.5 py-1 text-center">
+                  <button
+                    type="button"
+                    class="tender-row-del"
+                    title="删除本行"
+                    @click="removeDeviationRow(i)"
+                  >
+                    <Trash2 class="size-3" />
+                    删除
                   </button>
                 </td>
               </tr>
@@ -4594,6 +4783,34 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 }
 .tender-perf-table th {
   white-space: nowrap;
+}
+.tender-op-col {
+  width: 5.25rem;
+  min-width: 5.25rem;
+  white-space: nowrap;
+}
+th.tender-op-col {
+  background: color-mix(in srgb, var(--accent, #e8eef6) 40%, var(--background, #fff));
+}
+.tender-row-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  height: 1.75rem;
+  padding: 0 0.45rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--hairline, hsl(var(--border)));
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-secondary, hsl(var(--muted-foreground)));
+  background: var(--background, #fff);
+}
+.tender-row-del:hover {
+  color: var(--accent-sulfur);
+  border-color: color-mix(in srgb, var(--accent-sulfur) 45%, var(--hairline, hsl(var(--border))));
+  background: color-mix(in srgb, var(--accent-sulfur) 8%, var(--background, #fff));
 }
 .kb-input:focus {
   outline: none;

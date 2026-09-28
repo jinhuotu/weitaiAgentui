@@ -134,7 +134,7 @@ async function runGenerated() {
     qaReport.value = await inspectTenderQa(id, { volume: volume.value })
     await loadList()
   } catch (e) {
-    qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '复检失败'
+    qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '评分失败'
   } finally {
     qaLoading.value = false
   }
@@ -154,7 +154,7 @@ async function runUpload() {
     qaReport.value = await inspectTenderQaUpload(id, file, { volume: volume.value })
     await loadList()
   } catch (e) {
-    qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '复检失败'
+    qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '评分失败'
   } finally {
     uploading.value = false
     qaLoading.value = false
@@ -209,8 +209,8 @@ watch([selectedId, volume], ([id]) => {
 
 <template>
   <PageHeader
-    title="AI复检"
-    description="选一条投标任务，对照邀请书复检系统生成稿；也可上传本地下载改过的终稿再检一遍。"
+    title="AI标书评分"
+    description="选一条投标任务，对照邀请书给系统生成稿打分；也可上传本地下载改过的终稿再评一遍。"
   />
 
   <p v-if="err" class="mb-3 text-xs text-iron">{{ err }}</p>
@@ -231,7 +231,7 @@ watch([selectedId, volume], ([id]) => {
         加载任务…
       </div>
       <div v-else-if="!items.length" class="py-16 text-center text-xs text-muted-foreground">
-        还没有可复检的投标任务。
+        还没有可评分的投标任务。
       </div>
       <ul v-else class="max-h-[min(70vh,40rem)] overflow-y-auto">
         <li v-for="it in items" :key="it.id">
@@ -256,9 +256,9 @@ watch([selectedId, volume], ([id]) => {
     </Panel>
 
     <div class="min-w-0 space-y-4">
-      <Panel v-if="!selected" title="复检说明">
+      <Panel v-if="!selected" title="评分说明">
         <p class="text-[12px] leading-relaxed text-muted-foreground">
-          左侧选任务后，默认复检服务器上的生成稿。若已用 WPS / Word 改过，把终稿 .docx 传上来，会用同一套规则和模型对照邀请书打分。
+          左侧选任务后，默认给服务器上的生成稿打分。若已用 WPS / Word 改过，把终稿 .docx 传上来，会用同一套规则和模型对照邀请书评分。
         </p>
       </Panel>
 
@@ -313,7 +313,7 @@ watch([selectedId, volume], ([id]) => {
               @click="runGenerated"
             >
               <Loader2 v-if="qaLoading && !uploading" class="size-3.5 animate-spin" />
-              复检生成稿
+              评分生成稿
             </button>
             <input
               ref="fileInput"
@@ -337,7 +337,7 @@ watch([selectedId, volume], ([id]) => {
               @click="runUpload"
             >
               <Loader2 v-if="uploading" class="size-3.5 animate-spin" />
-              按终稿复检
+              按终稿评分
             </button>
           </div>
           <p v-if="qaError" class="mt-2 text-[11px] text-iron">{{ qaError }}</p>
@@ -345,7 +345,7 @@ watch([selectedId, volume], ([id]) => {
 
         <TenderQaPanel
           page
-          :title="volume === 'technical' ? 'AI复检 · 技术标' : 'AI复检 · 商务标'"
+          :title="volume === 'technical' ? 'AI评分 · 技术标' : 'AI评分 · 商务标'"
           :show-run="false"
           :report="qaReport"
           :loading="qaLoading"
