@@ -1,0 +1,29 @@
+---
+description: Vue 3 + TypeScript 页面、路由与样式约定
+globs: "**/*.{vue,ts}"
+alwaysApply: false
+---
+
+# Vue / TypeScript
+
+- SFC 用 `<script setup lang="ts">`。可复用逻辑放 `composables/`，状态用 Pinia（`src/stores/`）。
+- 新页面：在 `src/config/nav.ts` 加入口，并在 `src/router/index.ts` 的 `MIGRATED_VIEWS` 注册。权限用 `adminOnly` / `requireMenu`，不要只改一侧。
+- 按业务拆 `src/lib/*-api.ts`，类型与后端字段对齐。不要把 API 调用堆进超大 View。
+- 样式：Tailwind + `cn()`（`src/lib/utils.ts`）。优先主题 token（`border-border`、`text-muted-foreground`、`panel-surface`），少写死颜色。图标用 `lucide-vue-next`。
+- 布局组件优先复用 `src/components/ui-kit/`（如 `Panel`）和 `src/components/ui/`。
+- 时间展示用 `src/lib/time.ts`。路径别名 `@/` → `src/`。
+
+```vue
+<!-- ❌ Options API + 页面内直接 fetch -->
+<script>
+export default { async mounted() { this.list = await fetch('/api/v1/...') } }
+</script>
+
+<!-- ✅ -->
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { listKnowledgeBaseCatalog } from '@/lib/knowledge-api'
+const items = ref([])
+onMounted(async () => { items.value = await listKnowledgeBaseCatalog() })
+</script>
+```

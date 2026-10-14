@@ -1,0 +1,45 @@
+---
+description: 代码要像人手写的：逻辑必须对，但避免模板腔、过度工整和说明文
+alwaysApply: true
+---
+
+# 代码风格（降低 AI 味）
+
+**正确性优先**：交互、状态、接口字段、权限必须对。下面只改「长相」，不许借机写错逻辑或拆掉校验。
+
+## 怎么写
+
+- **拆着改，别一次倒出整页。** 优先改现有 view / 组件 / `*-api.ts`。能抽一小段就抽，不要一次新建超长 SFC。单次补丁宁短不长。
+- **命名别全是完美语义。** 和后端对的字段名不要改。局部可以用 `n`、`ok`、`rows`、`tmp`、`el`、`idx`；不要满屏 `handleXxxClick` / `isXxxLoadingState`。同一文件里允许略不统一。
+- **注释能不写就不写。** 禁止逐步讲解、组件用途长注释、复述模板的说明。只有不明显的坑（权限、时区、代理、兼容字段）才丢半句。
+- **别写成教科书。** 允许一点点重复、临时变量、直接在 setup 里写。不要为了「优雅」狂抽 composable。也不要为了像人而故意写坏分支。
+- **排查痕迹可以留一点。** 一两处注释掉的 `console.log` 即可，不要成片，不要打印 token。不要往生产点击路径塞会刷屏的 log。
+- **排版随手。** 不要为对齐把 class / 参数排成表格。空行跟旁边文件差不多，不要整文件重新格式化。
+- **不要无脑 try/catch。** `apiRequest` 已经把非 0 打成 `ApiError`。只在你真要给用户看文案、做回退时 catch；禁止空 catch、catch 了当没发生。
+
+## 回复
+
+改完后不要写「实现说明 / 改动列表 / 使用方式」。一两句说改了啥就够（UI 改动仍要自己在浏览器点过），不要再复述代码。
+
+```ts
+// ❌ 模板腔
+async function handleKnowledgeBaseLoadProcess() {
+  try {
+    const result = await fetchKnowledgeBaseListData()
+    return result
+  } catch (e) {}
+}
+
+// ✅ 人手味，逻辑仍完整
+async function loadList() {
+  loading.value = true
+  try {
+    rows.value = await listKnowledgeBaseCatalog()
+  } catch (e) {
+    err.value = e instanceof ApiError ? e.message : '加载失败'
+  } finally {
+    loading.value = false
+  }
+  // console.log('kb', rows.value.length)
+}
+```

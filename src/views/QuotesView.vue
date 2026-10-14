@@ -18,6 +18,7 @@ import AppAlertDialog from '@/components/ui/AppAlertDialog.vue'
 import AppDialog from '@/components/ui/AppDialog.vue'
 import { ApiError } from '@/lib/api'
 import { listKnowledgeBases, type KnowledgeBaseItem } from '@/lib/knowledge-api'
+import { useAuthStore } from '@/stores/auth'
 import {
   clearMineQuoteRecords,
   costQuote,
@@ -26,9 +27,12 @@ import {
   downloadQuoteFile,
   emptyQuoteLine,
   exportQuoteRecord,
+  fetchCatalogCandidates,
   fetchQuoteRecord,
   fetchQuoteRecords,
   generateQuote,
+  lockQuoteRecord,
+  type CatalogHit,
   lineAmount,
   parseBoqQuote,
   PURPOSE_META,
@@ -49,8 +53,10 @@ const MAX_MAPS = 20
 const router = useRouter()
 const route = useRoute()
 
+const auth = useAuthStore()
 const purpose = computed<QuotePurpose>(() => purposeFromPath(route.path))
 const meta = computed(() => PURPOSE_META[purpose.value])
+const seeCost = computed(() => purpose.value !== 'quote' || auth.isAdmin)
 
 const PURPOSE_TABS: { id: QuotePurpose; label: string }[] = [
   { id: 'cost', label: '造价' },
@@ -84,6 +90,15 @@ const warnings = ref<string[]>([])
 const verifyReport = ref<QuoteVerifyReport | null>(null)
 const costSummary = ref<QuoteCostSummary | null>(null)
 const schemes = ref<QuoteScheme[]>([])
+const selectedScheme = ref('')
+const forceExport = ref(false)
+const lastRecordId = ref('')
+const lastRecordStatus = ref('')
+const lockingId = ref<string | null>(null)
+const pickOpen = ref(false)
+const pickIdx = ref(-1)
+const pickHits = ref<CatalogHit[]>([])
+const pickLoading = ref(false)
 const instruction = ref('')
 const recognizing = ref(false)
 const parsingBoq = ref(false)
@@ -114,9 +129,6 @@ const kbList = ref<KnowledgeBaseItem[]>([])
 const kbId = ref('')
 const kbLoading = ref(false)
 
-const unmatched = computed(() =>
-  lines.value.filter((r) => r.name && !(Number(r.unitPrice) > 0 || Number(r.costPrice) > 0)).length,
-)
 const total = computed(() => lines.value.reduce((s, r) => s + lineAmount(r), 0))
 const selectedKb = computed(() => kbList.value.find((b) => b.id === kbId.value) || null)
 
@@ -124,9 +136,18 @@ const SOURCE: Record<string, string> = {
   vision: '读图',
   rule: '规则',
   catalog: '价目',
+  estimate: '估价',
   boq: '工程量',
   manual: '人工',
 }
+
+function linePending(row: QuoteLine) {
+  const price = Number(row.sellPrice) || Number(row.unitPrice) || Number(row.costPrice) || 0
+  if (price <= 0) return true
+  return (row.matchStatus || '') === 'estimate'
+}
+
+const pendingCount = computed(() => lines.value.filter((r) => r.name && linePending(r)).length)
 
 watch(purpose, () => {
   showRecords.value = false
@@ -329,11 +350,24 @@ async function onCost() {
     const data = await costQuote({
       lines: lines.value.filter((r) => r.name.trim()),
       rates: rates.value,
+      purpose: purpose.value,
+      projectName: projectName.value,
+      location: location.value,
+      durationDays: durationDays.value,
+      bidCeiling: purpose.value === 'quote' ? bidCeiling.value : null,
+      competition: competition.value,
+      targetMargin: purpose.value === 'quote' ? targetMargin.value : null,
     })
     lines.value = normalizeLines(data.lines || [])
     costSummary.value = data.costSummary
     verifyReport.value = data.verify
-    hint.value = `造价测算完成，成本不含税 ${money(data.costSummary.costExTax)} 元`
+    if (data.schemes?.length) {
+      schemes.value = data.schemes
+      selectedScheme.value = data.schemes.find((s) => s.recommended)?.name || data.schemes[0]!.name
+    }
+    hint.value = data.costSummary.costExTax
+      ? `造价测算完成，成本不含税 ${money(data.costSummary.costExTax)} 元`
+      : '造价测算完成'
   } catch (e) {
     err.value = e instanceof ApiError || e instanceof Error ? e.message : '造价测算失败'
   } finally {
@@ -378,6 +412,8 @@ async function onGenerate() {
       baseName: selectedKb.value?.name || '',
       rates: rates.value,
       applyVerifyFixes: true,
+      schemeName: selectedScheme.value,
+      forceExport: forceExport.value,
       lines: rows.map((r) => ({ ...r, amount: lineAmount(r) })),
     })
     await downloadQuoteFile(data.xlsxFile, data.downloadName)
@@ -385,7 +421,10 @@ async function onGenerate() {
     if (data.verify) verifyReport.value = data.verify
     if (data.schemes) schemes.value = data.schemes
     if (data.instruction) instruction.value = data.instruction
-    hint.value = `已下载 ${data.downloadName}，不含税合计 ${money(data.totalExTax)} 元`
+    if (data.schemeName) selectedScheme.value = data.schemeName
+    lastRecordId.value = data.id || ''
+    lastRecordStatus.value = data.status || 'draft'
+    hint.value = `已下载 ${data.downloadName}，不含税合计 ${money(data.totalExTax)} 元。签认锁定后才能用于投标组卷。`
     void loadRecords()
   } catch (e) {
     err.value = e instanceof ApiError || e instanceof Error ? e.message : '生成失败'
@@ -420,6 +459,9 @@ function applyDetail(detail: QuoteRecordItem) {
   lines.value = normalizeLines(detail.lines || [])
   verifyReport.value = detail.verify || null
   schemes.value = detail.schemes || []
+  selectedScheme.value = detail.schemeName || schemes.value.find((s) => s.applied || s.recommended)?.name || ''
+  lastRecordId.value = detail.id
+  lastRecordStatus.value = detail.status || 'draft'
   instruction.value = detail.instruction || ''
   warnings.value = []
   showRecords.value = false
@@ -506,6 +548,70 @@ async function downloadRecord(item: QuoteRecordItem) {
     err.value = e instanceof ApiError || e instanceof Error ? e.message : '下载失败'
   } finally {
     downloadingId.value = null
+  }
+}
+
+function confirmLine(row: QuoteLine) {
+  row.matchStatus = 'confirmed'
+  if (row.source === 'estimate') row.source = 'catalog'
+}
+
+async function openPick(row: QuoteLine, idx: number) {
+  if (!kbId.value) {
+    err.value = '请先选择知识库'
+    return
+  }
+  pickIdx.value = idx
+  pickOpen.value = true
+  pickLoading.value = true
+  pickHits.value = []
+  try {
+    const data = await fetchCatalogCandidates({
+      baseId: kbId.value,
+      name: row.name,
+      spec: row.spec,
+      code: row.code,
+    })
+    pickHits.value = data.items || []
+  } catch (e) {
+    err.value = e instanceof ApiError || e instanceof Error ? e.message : '加载价目候选失败'
+    pickOpen.value = false
+  } finally {
+    pickLoading.value = false
+  }
+}
+
+function applyHit(hit: CatalogHit) {
+  const row = lines.value[pickIdx.value]
+  if (!row) return
+  row.matchName = hit.name
+  if (hit.spec) row.spec = hit.spec
+  if (hit.unit) row.unit = hit.unit
+  if (seeCost.value) row.costPrice = hit.costPrice
+  row.sellPrice = hit.sellPrice || hit.unitPrice
+  row.unitPrice = row.sellPrice
+  row.matchScore = hit.score
+  row.matchStatus = 'confirmed'
+  row.source = 'catalog'
+  onQtyPrice(row)
+  pickOpen.value = false
+}
+
+async function lockItem(id: string) {
+  lockingId.value = id
+  err.value = ''
+  try {
+    const data = await lockQuoteRecord(id)
+    lastRecordId.value = data.id
+    lastRecordStatus.value = data.status || 'locked'
+    hint.value = `已签认锁定「${data.projectName || '未命名项目'}」`
+    const idx = records.value.findIndex((r) => r.id === id)
+    if (idx >= 0) records.value.splice(idx, 1, { ...records.value[idx], ...data })
+    if (previewDetail.value?.id === id) previewDetail.value = { ...previewDetail.value, ...data }
+  } catch (e) {
+    err.value = e instanceof ApiError || e instanceof Error ? e.message : '签认失败'
+  } finally {
+    lockingId.value = null
   }
 }
 
@@ -658,6 +764,12 @@ async function confirmClear() {
               {{ item.projectName || '未命名项目' }}
             </button>
             <div class="mt-0.5 text-[11px] text-muted-foreground">
+              <span
+                class="mr-1 rounded px-1 py-px text-[10px]"
+                :class="item.status === 'locked' ? 'bg-iron/15 text-iron' : 'bg-muted text-muted-foreground'"
+              >
+                {{ item.status === 'locked' ? '已签认' : '草稿' }}
+              </span>
               {{ item.lineCount }} 项 · {{ money(item.totalExTax) }} 元
               <span v-if="item.baseName"> · {{ item.baseName }}</span>
               · {{ formatRecordTime(item.createdAt) }}
@@ -691,9 +803,19 @@ async function confirmClear() {
               下载
             </button>
             <button
+              v-if="item.status !== 'locked'"
+              type="button"
+              class="inline-flex h-8 items-center rounded-md border border-border px-2.5 text-[12px] hover:bg-accent disabled:opacity-50"
+              :disabled="lockingId === item.id"
+              @click="lockItem(item.id)"
+            >
+              <Loader2 v-if="lockingId === item.id" class="size-3.5 animate-spin" />
+              签认
+            </button>
+            <button
               type="button"
               class="inline-flex h-8 items-center rounded-md border border-border px-2.5 text-[12px] text-sulfur hover:bg-accent disabled:opacity-50"
-              :disabled="deletingId === item.id"
+              :disabled="deletingId === item.id || (item.status === 'locked' && !auth.isAdmin)"
               @click="askDelete(item)"
             >
               删除
@@ -704,7 +826,7 @@ async function confirmClear() {
     </section>
 
     <div v-else class="space-y-4">
-      <Panel title="知识库" subtitle="对价只读所选库中的 Excel（名称 + 单价/成本价/指导售价）。">
+      <Panel title="知识库" subtitle="对价只读所选库中的 Excel。低分匹配须确认或换条，不能当正式价。">
         <div class="flex flex-wrap items-center gap-2">
           <select
             v-model="kbId"
@@ -976,7 +1098,7 @@ async function confirmClear() {
         <p v-else class="text-[12px] text-muted-foreground">暂无异常。</p>
       </Panel>
 
-      <Panel title="明细" subtitle="核对数量、成本价与售价后再导出。">
+      <Panel title="明细" subtitle="低分估价须确认或换条；未核价默认不能导出正式稿。">
         <template #action>
           <button
             type="button"
@@ -1002,10 +1124,11 @@ async function confirmClear() {
                 <th class="py-1.5 pr-2 font-medium min-w-[120px]">规格</th>
                 <th class="py-1.5 pr-2 font-medium w-12">单位</th>
                 <th class="py-1.5 pr-2 font-medium w-14">数量</th>
-                <th class="py-1.5 pr-2 font-medium w-24">成本价</th>
+                <th v-if="seeCost" class="py-1.5 pr-2 font-medium w-24">成本价</th>
                 <th class="py-1.5 pr-2 font-medium w-24">售价</th>
                 <th class="py-1.5 pr-2 font-medium w-20">合价</th>
                 <th class="py-1.5 pr-2 font-medium w-14">来源</th>
+                <th class="py-1.5 pr-2 font-medium w-16">对价</th>
                 <th class="py-1.5 w-8" />
               </tr>
             </thead>
@@ -1034,7 +1157,7 @@ async function confirmClear() {
                     @input="onQtyPrice(row)"
                   />
                 </td>
-                <td class="py-1 pr-2">
+                <td v-if="seeCost" class="py-1 pr-2">
                   <input
                     v-model.number="row.costPrice"
                     type="number"
@@ -1056,9 +1179,45 @@ async function confirmClear() {
                   {{ lineAmount(row).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }}
                 </td>
                 <td class="py-1 pr-2">
-                  <Tag :tone="row.source === 'catalog' ? 'patina' : 'default'">
+                  <Tag :tone="row.source === 'catalog' ? 'patina' : row.matchStatus === 'estimate' ? 'sulfur' : 'default'">
                     {{ SOURCE[row.source] || row.source || '人工' }}
                   </Tag>
+                </td>
+                <td class="py-1 pr-2">
+                  <div class="flex flex-col gap-0.5">
+                    <span
+                      class="text-[10px]"
+                      :class="linePending(row) ? 'text-sulfur' : 'text-muted-foreground'"
+                    >
+                      {{
+                        row.matchStatus === 'confirmed'
+                          ? '已确认'
+                          : row.matchStatus === 'official'
+                            ? '正式'
+                            : row.matchStatus === 'estimate'
+                              ? '待确认'
+                              : Number(row.sellPrice || row.unitPrice) > 0
+                                ? '已填价'
+                                : '待核价'
+                      }}
+                    </span>
+                    <button
+                      v-if="row.matchStatus === 'estimate'"
+                      type="button"
+                      class="text-[10px] text-iron hover:underline text-left"
+                      @click="confirmLine(row)"
+                    >
+                      确认
+                    </button>
+                    <button
+                      v-if="row.name"
+                      type="button"
+                      class="text-[10px] text-muted-foreground hover:underline text-left"
+                      @click="openPick(row, i)"
+                    >
+                      换条
+                    </button>
+                  </div>
                 </td>
                 <td class="py-1">
                   <button type="button" class="text-muted-foreground hover:text-sulfur" @click="removeLine(i)">
@@ -1067,7 +1226,7 @@ async function confirmClear() {
                 </td>
               </tr>
               <tr v-if="!lines.length">
-                <td colspan="10" class="py-8 text-center text-muted-foreground">
+                <td :colspan="seeCost ? 11 : 10" class="py-8 text-center text-muted-foreground">
                   识别或解析后会出现明细，也可增行手工填写。
                 </td>
               </tr>
@@ -1077,35 +1236,58 @@ async function confirmClear() {
         <footer class="mt-3 flex flex-wrap items-center justify-between gap-2">
           <p class="text-[12px] text-muted-foreground">
             {{ lines.length }} 项
-            <span v-if="unmatched"> · {{ unmatched }} 项待核价</span>
+            <span v-if="pendingCount"> · {{ pendingCount }} 项待核价/待确认</span>
             · 明细合计
             <span class="text-foreground font-medium">{{ money(total) }}</span>
             元
+            <span v-if="selectedScheme"> · 采用 {{ selectedScheme }}</span>
           </p>
-          <button
-            type="button"
-            class="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 text-[12px] disabled:opacity-50"
-            :disabled="generating || !lines.length"
-            @click="onGenerate"
-          >
-            <Loader2 v-if="generating" class="size-3.5 animate-spin" />
-            <FileSpreadsheet v-else class="size-3.5" />
-            {{ meta.exportLabel }}
-          </button>
+          <div class="flex flex-wrap items-center gap-2">
+            <label v-if="purpose === 'quote'" class="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+              <input v-model="forceExport" type="checkbox" />
+              强制导出草稿
+            </label>
+            <button
+              v-if="lastRecordId && lastRecordStatus !== 'locked'"
+              type="button"
+              class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
+              :disabled="!!lockingId"
+              @click="lockItem(lastRecordId)"
+            >
+              <Loader2 v-if="lockingId === lastRecordId" class="size-3.5 animate-spin" />
+              签认锁定
+            </button>
+            <button
+              type="button"
+              class="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 text-[12px] disabled:opacity-50"
+              :disabled="generating || !lines.length"
+              @click="onGenerate"
+            >
+              <Loader2 v-if="generating" class="size-3.5 animate-spin" />
+              <FileSpreadsheet v-else class="size-3.5" />
+              {{ meta.exportLabel }}
+            </button>
+          </div>
         </footer>
       </Panel>
 
-      <Panel v-if="purpose === 'quote' && (schemes.length || instruction)" title="报价方案" subtitle="生成后展示多方案与编制说明。">
+      <Panel v-if="purpose === 'quote' && (schemes.length || instruction)" title="报价方案" subtitle="试算或生成后出现；点选一档，导出会按该档总价回写明细。">
         <ul v-if="schemes.length" class="space-y-2 mb-3">
           <li
             v-for="(s, i) in schemes"
             :key="i"
-            class="rounded-md border border-border px-3 py-2 text-[12px]"
-            :class="s.recommended ? 'border-iron bg-iron/5' : ''"
+            class="rounded-md border px-3 py-2 text-[12px] cursor-pointer"
+            :class="
+              (selectedScheme ? selectedScheme === s.name : s.applied || s.recommended)
+                ? 'border-iron bg-iron/5'
+                : 'border-border'
+            "
+            @click="selectedScheme = s.name"
           >
             <div class="font-medium">
               {{ s.name }}
               <span v-if="s.recommended" class="ml-1 text-[10px] text-iron">推荐</span>
+              <span v-if="selectedScheme === s.name || s.applied" class="ml-1 text-[10px] text-iron">采用</span>
             </div>
             <div class="text-muted-foreground mt-0.5">
               不含税 {{ money(s.totalExTax) }} · 毛利 {{ (s.margin * 100).toFixed(1) }}%
@@ -1201,6 +1383,40 @@ async function confirmClear() {
     </template>
   </AppDialog>
 
+  <AppDialog
+    :open="pickOpen"
+    title="换价目"
+    description="从所选知识库挑一条替换当前行，确认后作为正式价。"
+    @update:open="(open) => { pickOpen = open }"
+  >
+    <div v-if="pickLoading" class="py-8 text-center text-[12px] text-muted-foreground">
+      <Loader2 class="inline size-4 animate-spin mr-2" />加载候选…
+    </div>
+    <p v-else-if="!pickHits.length" class="py-6 text-center text-[12px] text-muted-foreground">
+      没有足够相似的价目。
+    </p>
+    <ul v-else class="max-h-[50vh] divide-y divide-border overflow-y-auto rounded-md border border-border">
+      <li v-for="(hit, i) in pickHits" :key="i">
+        <button
+          type="button"
+          class="w-full text-left px-3 py-2.5 hover:bg-accent/40"
+          @click="applyHit(hit)"
+        >
+          <div class="text-[13px] font-medium">{{ hit.name }}</div>
+          <div class="mt-0.5 text-[11px] text-muted-foreground">
+            {{ money(hit.sellPrice || hit.unitPrice) }} 元
+            · 匹配 {{ Math.round(hit.score * 100) }}%
+            <span v-if="hit.official"> · 可作正式价</span>
+            <span v-else> · 低分</span>
+          </div>
+          <div v-if="hit.spec" class="mt-0.5 text-[11px] text-muted-foreground whitespace-pre-wrap line-clamp-3">
+            {{ hit.spec }}
+          </div>
+        </button>
+      </li>
+    </ul>
+  </AppDialog>
+
   <AppAlertDialog
     :open="confirmDeleteOpen"
     title="删除记录"
@@ -1218,7 +1434,7 @@ async function confirmClear() {
   <AppAlertDialog
     :open="confirmClearOpen"
     title="清空当前入口记录"
-    description="将删除当前类型下你名下的全部记录及对应 Excel。"
+    description="将删除当前类型下你名下的草稿记录。已签认锁定的记录会保留。"
     confirm-label="确认清空"
     destructive
     :loading="clearingRecords"

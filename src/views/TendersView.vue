@@ -29,6 +29,7 @@ import { ApiError } from '@/lib/api'
 import { getAccessToken } from '@/lib/auth'
 import { useAuthStore } from '@/stores/auth'
 import { listKnowledgeBases, type KnowledgeBaseItem } from '@/lib/knowledge-api'
+import { listPromptOptions, type PromptOption } from '@/lib/prompts-api'
 import { fetchQuoteRecords, type QuoteRecordItem } from '@/lib/quotes-api'
 import {
   clearMineTenderRecords,
@@ -41,6 +42,7 @@ import {
   fetchTenderRecords,
   fetchTenderQa,
   fetchTenderSlots,
+  draftTenderTech,
   generateTender,
   inspectTenderQa,
   parseTenderInvitation,
@@ -194,7 +196,11 @@ function emptyBrief(): BidBrief {
 }
 
 function emptyDeviationLine(): DeviationLine {
-  return { seq: '', requirement: '', response: '', deviation: '无偏差' }
+  return { seq: '', requirement: '', response: '', deviation: '待确认' }
+}
+
+function isTechChapterKind(kind: string) {
+  return kind === 'tech_plan' || kind === 'tech_chapter'
 }
 
 function emptyPerformanceLine(): PerformanceLine {
@@ -225,6 +231,7 @@ const OUTLINE_KIND_OPTIONS: { value: string; label: string }[] = [
   { value: 'performance', label: '业绩' },
   { value: 'factory', label: '原厂承诺' },
   { value: 'tech_plan', label: '技术标' },
+  { value: 'tech_chapter', label: '技术章节' },
   { value: 'company', label: '企业信息表' },
   { value: 'unknown', label: '按招标书原文' },
 ]
@@ -239,6 +246,7 @@ const OUTLINE_GENERATE_KINDS = new Set([
   'performance',
   'factory',
   'tech_plan',
+  'tech_chapter',
 ])
 const OUTLINE_FORM_KINDS = new Set(['letter', 'auth', 'factory', 'commitment_copy', 'company'])
 
@@ -302,6 +310,9 @@ function pruneUnknownOutline(items: OutlineItem[] | undefined) {
       if (/见下表|如下表/.test(title)) return false
       if (title.includes('评审') && /(共计\d*分|计分|评分)/.test(title)) return false
       if (title.includes('计算规则') && !title.includes('报价表')) return false
+      if (item.kind === 'tech_chapter' || item.kind === 'tech_plan' || item.kind === 'tech_dev') {
+        return true
+      }
       if (
         /中小企业声明|残疾人福利|资格审查资料|投标人基本情况表|近年财务状况表|正在施工的?和?新承接|管理人员简历|项目经理简历表|项目管理机构组成|拟分包项目情况|施工组织设计|暗标|装订要求|劳动力计划表|国家企业信用信息公示/.test(
           title,
@@ -314,7 +325,38 @@ function pruneUnknownOutline(items: OutlineItem[] | undefined) {
     })
 }
 
-const visibleOutlineItems = computed(() => pruneUnknownOutline(form.outlineItems))
+const BIZ_OUTLINE_KINDS = new Set([
+  'letter',
+  'legal_id',
+  'auth',
+  'quote',
+  'biz_dev',
+  'commitment_copy',
+  'performance',
+  'factory',
+  'company',
+])
+const TECH_OUTLINE_KINDS = new Set(['tech_dev', 'tech_plan', 'tech_chapter'])
+const TECH_TITLE_MARK =
+  /方案|组织设计|质量|安全|进度|措施|保证体系|技术规格|图纸|工艺|信息化|风险|环保|售后|培训|验收|调试|运维|偏离|偏差/
+const VOLUME_LABELS = new Set(['商务标', '技术标', '商务部分', '技术部分', '商务标书', '技术标书'])
+
+function isVolumeLabelTitle(title: string) {
+  const n = (title || '').replace(/\s+/g, '').replace(/投标文件|响应文件/g, '')
+  return VOLUME_LABELS.has(n)
+}
+
+function outlineItemVolume(item: OutlineItem): BidVolume {
+  const kind = (item.kind || '').trim()
+  if (TECH_OUTLINE_KINDS.has(kind)) return 'technical'
+  if (BIZ_OUTLINE_KINDS.has(kind)) return 'business'
+  const title = (item.title || '').replace(/\s+/g, '')
+  if (title.includes('发包人代表') || (title.includes('撤换') && title.includes('发包人'))) {
+    return 'technical'
+  }
+  const blob = `${item.id || ''}${item.title || ''}`
+  return TECH_TITLE_MARK.test(blob) ? 'technical' : 'business'
+}
 
 const outlineDragFrom = ref<number | null>(null)
 const outlineDragOver = ref<number | null>(null)
@@ -476,6 +518,8 @@ const layoutTemplate = ref<Chapter5TemplateStatus | null>(null)
 const uploadingLayoutTemplate = ref(false)
 const layoutTemplateInput = ref<HTMLInputElement | null>(null)
 const result = ref<GenerateResult | null>(null)
+const draftingTech = ref(false)
+const redraftingId = ref('')
 const form = reactive<BidBrief>(emptyBrief())
 const inviteFile = ref<File | null>(null)
 const quoteFile = ref<File | null>(null)
@@ -488,6 +532,8 @@ const quotePickerQuery = ref('')
 const quotePickerDraft = ref<string[]>([])
 const kbList = ref<KnowledgeBaseItem[]>([])
 const selectedKbIds = ref<string[]>([])
+const promptOptions = ref<PromptOption[]>([])
+const selectedPromptId = ref<string>('')
 const parseNotes = ref<string[]>([])
 const attachmentMatch = ref<AttachmentMatch | null>(null)
 const parseOcr = ref<{
@@ -518,6 +564,11 @@ const slotsExpanded = ref(true)
 const currentStepIndex = ref(0)
 /** 填写页切换商务标 / 技术标；生成后各出一本 Word */
 const activeVolume = ref<BidVolume>('business')
+const visibleOutlineItems = computed(() =>
+  pruneUnknownOutline(form.outlineItems).filter(
+    (item) => !isVolumeLabelTitle(item.title) && outlineItemVolume(item) === activeVolume.value,
+  ),
+)
 const previewVolume = ref<BidVolume>('business')
 const volumeHint = ref('')
 const maxStepReached = ref(0)
@@ -572,7 +623,7 @@ function isParseNoiseNote(note: string) {
 
 function isParsePrimaryNote(note: string) {
   if (isParseNoiseNote(note)) return false
-  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标|须授权委托/.test(
+  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标|须授权委托|来自知识库/.test(
     note,
   )
 }
@@ -670,10 +721,11 @@ async function onRestoreLayoutTemplate() {
 
 const outlineSummary = computed(() => {
   const items = visibleOutlineItems.value
-  if (!items.length) return '未抽出格式章节'
+  const volLabel = activeVolume.value === 'technical' ? '技术标' : '商务标'
+  if (!items.length) return `${volLabel}无对应条目`
   const skipped = items.filter((item) => item.skipped).length
   const copied = items.filter((item) => !item.skipped && (item.body || '').trim()).length
-  const parts = [`${items.length} 条`]
+  const parts = [`${volLabel} ${items.length} 条`]
   if (copied) parts.push(`可复制 ${copied}`)
   if (skipped) parts.push(`跳过 ${skipped}`)
   if (form.layoutMode === 'outline') parts.push('按本标大纲')
@@ -844,7 +896,7 @@ const TECH_DRAWING_KEY = 'tech_drawings'
 function blankTechDrawings(): SlotStatus {
   return {
     key: TECH_DRAWING_KEY,
-    title: '实施方案图纸',
+    title: '本项目图纸',
     hint: '本标平面图、系统图或施工图。换一份邀请书需重新上传，不要用其他项目图纸。',
     fileCount: 0,
     files: [],
@@ -863,8 +915,13 @@ const technicalWarnings = computed(() => {
   if (!form.deviationLines.some((row) => String(row.requirement || '').trim())) {
     issues.push('技术偏差表为空，不响应技术要求会大量扣分')
   }
-  if (!String(form.techPlanNote || '').trim()) issues.push('实施方案文字描述未写')
-  if (!techDrawingSlot.value.fileCount) issues.push('尚未上传实施方案图纸')
+  const emptyChaps = techChapterItems.value.filter((item) => !String(item.draftBody || '').trim())
+  if (emptyChaps.length) {
+    issues.push(`${emptyChaps.length} 章技术标尚未起草`)
+  } else if (!String(form.techPlanNote || '').trim() && !techChapterItems.value.length) {
+    issues.push('技术方案尚未起草')
+  }
+  if (!techDrawingSlot.value.fileCount) issues.push('尚未上传本项目图纸')
   if (!form.performanceLines.some((row) => row.includeInBid !== false && String(row.projectName || '').trim())) {
     issues.push('类似业绩为空，资格评审可能扣分')
   } else if (performanceRequirementActive(form.performanceRequirement)) {
@@ -1605,16 +1662,18 @@ onMounted(async () => {
     return
   }
   try {
-    const [data, bases, library] = await Promise.all([
+    const [data, bases, prompts, library] = await Promise.all([
       fetchTenderDefaults(),
       listKnowledgeBases({ access: 'use' }).catch(() => [] as KnowledgeBaseItem[]),
+      listPromptOptions().catch(() => []),
       fetchTenderLibrary().catch(() => null),
     ])
     qualification.value = data.qualification
     layoutTemplate.value = data.chapter5Template || null
     catalogSlots.value = library?.slots?.length ? library.slots : data.slots || []
     slotStatuses.value = catalogSlots.value
-    kbList.value = bases
+    kbList.value = bases as KnowledgeBaseItem[]
+    promptOptions.value = (prompts as import('@/lib/prompts-api').PromptOption[]) || []
     const { qualification: _q, slots: _s, chapter5Template: _t, docPreview: _p, ...rest } =
       data as TenderDefaultsLoose
     mergeBriefIntoForm(rest as Partial<BidBrief>)
@@ -1734,6 +1793,8 @@ async function loadQuotePicker() {
   try {
     const data = await fetchQuoteRecords({
       q: quotePickerQuery.value.trim() || undefined,
+      purpose: 'quote',
+      status: 'locked',
       limit: 50,
     })
     quotePickerRows.value = data.items || []
@@ -1815,30 +1876,87 @@ function removeDeviationRow(index: number) {
   form.deviationLines.splice(index, 1)
 }
 
+const techChapterItems = computed(() =>
+  form.outlineItems.filter((item) => !item.skipped && isTechChapterKind(item.kind)),
+)
+
+const openTechExcerpt = ref<string>('')
+
+function applyDraftBrief(brief: BidBrief) {
+  if (!Array.isArray(brief.outlineItems)) brief.outlineItems = []
+  if (!Array.isArray(brief.deviationLines)) brief.deviationLines = []
+  form.outlineItems = brief.outlineItems
+  form.deviationLines = brief.deviationLines
+  if (brief.techPlanNote) form.techPlanNote = brief.techPlanNote
+}
+
+async function onDraftTech(itemId?: string) {
+  error.value = ''
+  if (itemId) redraftingId.value = itemId
+  else draftingTech.value = true
+  try {
+    const data = await draftTenderTech(
+      {
+        ...form,
+        outlineItems: pruneUnknownOutline(form.outlineItems),
+        generateVolume: 'technical',
+      },
+      { kbIds: selectedKbIds.value, itemId, promptId: selectedPromptId.value || undefined },
+    )
+    applyDraftBrief(data.brief)
+    if (data.notes?.length) parseNotes.value = [...parseNotes.value, ...data.notes]
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '起草失败'
+  } finally {
+    draftingTech.value = false
+    redraftingId.value = ''
+  }
+}
+
+function compactDev(text: string) {
+  return (text || '').replace(/\s+/g, '')
+}
+
+function matchQuoteFact(requirement: string) {
+  const req = compactDev(requirement)
+  if (!req) return ''
+  for (const line of form.quoteLines) {
+    const name = String(line.name || '').trim()
+    const spec = String(line.spec || '').trim()
+    const fact = [name, spec].filter(Boolean).join(' ')
+    const blob = compactDev(fact)
+    if (blob.length < 2) continue
+    if (blob.includes(req) || req.includes(blob)) return fact
+    for (let i = 0; i <= Math.max(0, req.length - 4); i++) {
+      if (blob.includes(req.slice(i, i + 4))) return fact
+    }
+  }
+  return ''
+}
+
 function fillDeviationFromQuote(opts?: { silent?: boolean }) {
-  const rows = form.quoteLines
-    .map((row, i) => {
-      const name = String(row.name || '').trim()
-      const spec = String(row.spec || '').trim()
-      if (!name && !spec) return null
-      const requirement = name && spec ? `${name}\n${spec}` : name || spec
-      const response =
-        name && spec
-          ? `我司所投${name}：\n${spec}\n含供货、安装、调试，安装费已含在综合单价内。`
-          : `我司所投${name || '产品'}：${spec || name}，含供货、安装、调试，安装费已含在综合单价内。`
-      return {
-        seq: String(i + 1),
-        requirement,
-        response,
-        deviation: '无偏差',
-      } satisfies DeviationLine
-    })
-    .filter((row): row is DeviationLine => row != null)
-  if (!rows.length) {
-    if (!opts?.silent) error.value = '请先识别报价清单，再生成偏差表'
+  const rows = form.deviationLines
+  if (!rows.some((row) => String(row.requirement || '').trim())) {
+    if (!opts?.silent) error.value = '请先识别邀请书技术条款，不要用报价清单当招标要求'
     return
   }
-  form.deviationLines = rows
+  if (!form.quoteLines.some((row) => String(row.name || row.spec || '').trim())) {
+    if (!opts?.silent) error.value = '请先识别报价清单，再对照填写'
+    return
+  }
+  form.deviationLines = rows.map((row) => {
+    const req = String(row.requirement || '').trim()
+    if (!req) return row
+    const resp = String(row.response || '').trim()
+    const pending = !resp || resp === req || resp.startsWith('【')
+    const hit = matchQuoteFact(req)
+    const next = { ...row }
+    if (hit && pending) next.response = `响应：${hit}`
+    else if (pending && !resp) next.response = '【待响应】'
+    const dev = String(next.deviation || '').trim()
+    if (!dev || (pending && (dev === '无偏差' || !hit))) next.deviation = '待确认'
+    return next
+  })
 }
 
 const quoteSpecFilledCount = computed(
@@ -2048,15 +2166,6 @@ async function onParseInvitation() {
     if (data.slots?.length) slotStatuses.value = data.slots
     await refreshLibrary()
     refreshAttachmentMatch()
-    if (!form.deviationLines.length && form.quoteLines.length) {
-      fillDeviationFromQuote({ silent: true })
-    } else if (form.quoteLines.length && quoteSpecFilledCount.value) {
-      // 重新识别带出技术参数后，刷新偏差表明细
-      const thin = form.deviationLines.every(
-        (d) => !String(d.requirement || '').includes('\n') && String(d.requirement || '').length < 40,
-      )
-      if (thin) fillDeviationFromQuote({ silent: true })
-    }
     hasParsed.value = true
     volumeHint.value = ''
     techDrawingSlot.value = blankTechDrawings()
@@ -2730,8 +2839,16 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         </div>
 
         <div v-if="kbList.length" class="mt-4 pt-4 border-t border-border/60">
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <label class="text-[11px] text-muted-foreground">投标模板</label>
+            <select v-model="selectedPromptId" class="h-7 rounded-md border border-border bg-background px-2 text-[11px]">
+              <option value="">通用（不指定）</option>
+              <option v-for="o in promptOptions" :key="o.id" :value="o.id">{{ o.name }}</option>
+            </select>
+
+          </div>
           <p class="text-[11px] text-muted-foreground mb-2">
-            可选知识库（默认不选）。只对照资格条款种类，不会套用历史投标书或他司合同。
+            历史标书参考（只学写法，不抄数据，默认推荐同行业1-2份）。
           </p>
           <div class="flex flex-wrap gap-1.5">
             <button
@@ -2822,7 +2939,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         title="组卷模板"
         :subtitle="
           form.layoutMode === 'outline'
-            ? '用本标招标书里识别出的目录组卷；函件、清单、报价单模板复制原文，没有的页不补'
+            ? `当前只列出${activeVolume === 'technical' ? '技术标' : '商务标'}条目；生成仍按整份大纲分卷，不改另一卷`
             : '用公司固定投标文件格式组卷；下面清单只作对照，生成时不按这些条目排目录'
         "
         collapsible
@@ -2973,7 +3090,11 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           </div>
         </div>
         <p v-if="!visibleOutlineItems.length" class="text-[11px] text-muted-foreground">
-          未抽出格式章节。可换一份带「投标/响应文件格式」的招标书再识别，或继续用公司固定模板生成。
+          {{
+            form.outlineItems.length
+              ? `当前${activeVolume === 'technical' ? '技术标' : '商务标'}没有对应目录。切到另一卷可看其余条目。`
+              : '未抽出格式章节。可换一份带「投标/响应文件格式」的招标书再识别，或继续用公司固定模板生成。'
+          }}
         </p>
         <p
           v-else-if="form.layoutMode === 'chapter5'"
@@ -3833,13 +3954,13 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           <span class="text-[11px] text-muted-foreground">废标风险较低，但不响应技术要求会大量扣分</span>
         </div>
         <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed">
-          上传本项目图纸，再写一段文字说明。缺图纸会在 Word 里画虚线框，不阻止生成。
+          按本标邀请书技术章起草草稿，改完再出 Word。缺图纸会在 Word 里画虚线框，不阻止生成。
         </p>
       </div>
 
       <Panel
         title="技术偏差表"
-        subtitle="对应招标技术要求与投标响应；可从报价清单生成后微调"
+        subtitle="条款来自邀请书。对不上或未人工确认的标待确认，不自动写无偏差"
       >
         <div class="flex items-center justify-between mb-2">
           <p class="text-[12px] text-muted-foreground">
@@ -3852,7 +3973,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               :disabled="!form.quoteLines.length"
               @click="fillDeviationFromQuote()"
             >
-              从报价清单生成
+              用报价对照
             </button>
             <button
               type="button"
@@ -3880,7 +4001,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <tbody>
               <tr v-if="!form.deviationLines.length">
                 <td :colspan="deviationPreviewHeaders.length + 1" class="px-2 py-3 text-muted-foreground">
-                  识别邀请书/清单后会出现在这里，也可点「从报价清单生成」或手工增行。
+                  识别邀请书后会出现条款。不要用报价清单充当招标要求，可手工增行。
                 </td>
               </tr>
               <tr v-for="(row, i) in form.deviationLines" :key="i" class="border-t border-border">
@@ -3914,7 +4035,66 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         </div>
       </Panel>
 
-      <Panel title="充电站实施方案" subtitle="写入技术标：本标图纸 + 文字说明。换一份邀请书请重新上传，不要用其他项目图纸">
+      <Panel title="技术章节草稿" subtitle="按邀请书目录分章写，缺事实会标【待补充】。有历史技术标知识库时会参考写法">
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-[12px] text-muted-foreground">
+            {{ techChapterItems.length ? `${techChapterItems.length} 章` : '识别邀请书后出现，也可直接起草补空章' }}
+          </p>
+          <button
+            type="button"
+            class="h-7 px-2 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+            :disabled="draftingTech || Boolean(redraftingId)"
+            @click="onDraftTech()"
+          >
+            {{ draftingTech && !redraftingId ? '起草中…' : '生成技术标草稿' }}
+          </button>
+        </div>
+        <div v-if="!techChapterItems.length" class="text-[11px] text-muted-foreground py-2">
+          还没有技术章。识别带技术目录的邀请书，或点上面按钮补「技术方案」。
+        </div>
+        <div v-else class="space-y-3">
+          <div
+            v-for="item in techChapterItems"
+            :key="item.id || item.title"
+            class="rounded-md border border-border/70 px-2.5 py-2 space-y-1.5"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-[12px] font-medium">{{ item.title }}</p>
+              <button
+                type="button"
+                class="h-6 px-1.5 rounded border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="draftingTech || Boolean(redraftingId)"
+                @click="onDraftTech(item.id)"
+              >
+                {{ redraftingId === item.id ? '重写中…' : '重写本章' }}
+              </button>
+            </div>
+            <button
+              v-if="item.inviteExcerpt || item.body"
+              type="button"
+              class="text-[11px] text-muted-foreground hover:text-foreground"
+              @click="openTechExcerpt = openTechExcerpt === item.id ? '' : item.id"
+            >
+              {{ openTechExcerpt === item.id ? '收起招标原文' : '招标原文' }}
+            </button>
+            <p
+              v-if="openTechExcerpt === item.id && (item.inviteExcerpt || item.body)"
+              class="text-[11px] text-muted-foreground whitespace-pre-wrap max-h-32 overflow-auto"
+            >
+              {{ item.inviteExcerpt || item.body }}
+            </p>
+            <textarea
+              v-model="item.draftBody"
+              rows="5"
+              class="kb-input font-sans min-h-[96px]"
+              placeholder="本章草稿。可点「重写本章」或直接改。"
+              @input="item.draftStatus = 'edited'"
+            />
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="本项目图纸" subtitle="写入技术标。换一份邀请书请重新上传，不要用其他项目图纸">
         <div class="space-y-3">
           <div class="space-y-1.5">
             <span class="text-[12px] text-muted-foreground">上传图纸</span>
@@ -3936,7 +4116,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                     ? '正在上传…'
                     : techDrawingSlot.fileCount
                       ? `${techDrawingSlot.fileCount} 张图纸`
-                      : '点击或拖拽上传本标平面图 / 系统图'
+                      : '点击或拖拽上传本项目图纸'
                 }}
               </p>
               <p class="text-[11px] text-muted-foreground mt-1">
@@ -3974,15 +4154,6 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               </button>
             </div>
           </div>
-          <label class="block text-[12px] space-y-1">
-            <span class="text-muted-foreground">文字描述</span>
-            <textarea
-              v-model="form.techPlanNote"
-              rows="6"
-              class="kb-input font-sans min-h-[120px]"
-              placeholder="按本邀请书写施工、布置、配电、运维与工期要点。没有原文请手工写，不要编造桩数和图纸。"
-            />
-          </label>
         </div>
       </Panel>
       </div>
@@ -4300,7 +4471,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <dt class="text-[11px] text-muted-foreground">商务标 / 技术标</dt>
             <dd class="mt-0.5">
               {{ form.performanceLines.length }} 条业绩 · {{ form.deviationLines.length }} 条偏差
-              · {{ form.techPlanNote ? '已写方案说明' : '方案说明未写' }}
+              · {{ techChapterItems.filter((i) => i.draftBody).length }}/{{ techChapterItems.length || 0 }} 章已起草
               · 图纸 {{ techDrawingSlot.fileCount }} 张
             </dd>
           </div>
@@ -4339,7 +4510,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     :open="quotePickerOpen"
     size="wide"
     title="从 AI 报价记录选择"
-    description="可勾选一条或多条；多条会合并成一张清单。与本地上传二选一。"
+    description="只列出已签认锁定的报价。多条会合并成一张清单，与本地上传二选一。"
     @update:open="(open) => { quotePickerOpen = open }"
   >
     <div class="space-y-3">
@@ -4370,7 +4541,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         v-else-if="!quotePickerRows.length"
         class="py-6 text-center text-[12px] text-muted-foreground"
       >
-        暂无报价记录。请先到「AI报价智能体」生成并下载 Excel。
+        暂无已签认的报价记录。请先到「AI报价智能体」生成 Excel 并点签认锁定。
       </p>
       <ul v-else class="max-h-[50vh] divide-y divide-border overflow-y-auto rounded-md border border-border">
         <li v-for="row in quotePickerRows" :key="row.id">

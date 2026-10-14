@@ -260,6 +260,7 @@ export type OutlineKind =
   | 'performance'
   | 'factory'
   | 'tech_plan'
+  | 'tech_chapter'
   | 'company'
   | 'unknown'
 
@@ -273,6 +274,9 @@ export type OutlineItem = {
   required: boolean
   skipped: boolean
   body?: string
+  inviteExcerpt?: string
+  draftBody?: string
+  draftStatus?: string
   level?: number
 }
 
@@ -847,6 +851,23 @@ export async function parseTenderInvitation(
     method: 'POST',
     token: token(),
     body: form,
+  })
+}
+
+export async function draftTenderTech(
+  brief: BidBrief,
+  options: { kbIds?: string[]; itemId?: string; promptId?: string; materialIds?: string[] } = {},
+): Promise<{ brief: BidBrief; notes: string[] }> {
+  return apiRequest<{ brief: BidBrief; notes: string[] }>('/api/v1/tenders/tech/draft', {
+    method: 'POST',
+    token: token(),
+    body: {
+      brief,
+      kbIds: options.kbIds || [],
+      itemId: options.itemId || null,
+      promptId: options.promptId || null,
+      materialIds: options.materialIds || [],
+    },
   })
 }
 

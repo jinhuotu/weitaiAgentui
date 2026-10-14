@@ -16,6 +16,8 @@ export type QuoteLine = {
   amount: number
   source: string
   matchName: string
+  matchScore?: number
+  matchStatus?: 'none' | 'estimate' | 'official' | 'confirmed' | string
   note: string
 }
 
@@ -71,6 +73,7 @@ export type QuoteScheme = {
   tip: string
   risks: string[]
   recommended?: boolean
+  applied?: boolean
 }
 
 export type QuoteRecognizeResult = {
@@ -85,6 +88,7 @@ export type QuoteRecognizeResult = {
   unmatched: number
   baseId?: string
   baseName?: string
+  catalog?: { fileCount?: number; itemCount?: number; files?: string[]; errors?: string[] }
   verify?: QuoteVerifyReport
 }
 
@@ -102,6 +106,9 @@ export type QuoteGenerateResult = {
   verify?: QuoteVerifyReport
   schemes?: QuoteScheme[]
   instruction?: string
+  status?: string
+  schemeName?: string
+  seeCost?: boolean
 }
 
 export type QuoteRecordItem = {
@@ -133,6 +140,12 @@ export type QuoteRecordItem = {
   schemes?: QuoteScheme[] | null
   instruction?: string
   costSummary?: QuoteCostSummary
+  status?: string
+  schemeName?: string
+  lockedAt?: number
+  lockedBy?: string
+  seeCost?: boolean
+  catalog?: { fileCount?: number; itemCount?: number; files?: string[]; errors?: string[] }
 }
 
 export const PURPOSE_META: Record<
@@ -185,6 +198,8 @@ export function emptyQuoteLine(): QuoteLine {
     amount: 0,
     source: 'manual',
     matchName: '',
+    matchScore: 0,
+    matchStatus: 'none',
     note: '',
   }
 }
@@ -271,7 +286,20 @@ export async function verifyQuote(body: {
 export async function costQuote(body: {
   lines: QuoteLine[]
   rates?: QuoteRates
-}): Promise<{ stage: string; lines: QuoteLine[]; costSummary: QuoteCostSummary; verify: QuoteVerifyReport }> {
+  purpose?: QuotePurpose
+  projectName?: string
+  location?: string
+  durationDays?: number | null
+  bidCeiling?: number | null
+  competition?: string
+  targetMargin?: number | null
+}): Promise<{
+  stage: string
+  lines: QuoteLine[]
+  costSummary: QuoteCostSummary
+  verify: QuoteVerifyReport
+  schemes?: QuoteScheme[]
+}> {
   return apiRequest('/api/v1/quotes/cost', {
     method: 'POST',
     token: token(),
@@ -293,6 +321,8 @@ export async function generateQuote(body: {
   baseName?: string
   rates?: QuoteRates
   applyVerifyFixes?: boolean
+  schemeName?: string
+  forceExport?: boolean
   lines: QuoteLine[]
 }): Promise<QuoteGenerateResult> {
   return apiRequest<QuoteGenerateResult>('/api/v1/quotes/generate', {
@@ -313,12 +343,14 @@ export async function downloadQuoteFile(fileName: string, downloadName: string):
 export async function fetchQuoteRecords(params?: {
   q?: string
   purpose?: QuotePurpose
+  status?: string
   limit?: number
   offset?: number
 }): Promise<{ total: number; items: QuoteRecordItem[] }> {
   const q = new URLSearchParams()
   if (params?.q) q.set('q', params.q)
   if (params?.purpose) q.set('purpose', params.purpose)
+  if (params?.status) q.set('status', params.status)
   if (params?.limit) q.set('limit', String(params.limit))
   if (params?.offset) q.set('offset', String(params.offset))
   const suffix = q.toString() ? `?${q.toString()}` : ''
@@ -342,6 +374,47 @@ export async function deleteQuoteRecord(recordId: string): Promise<{ deleted: bo
   return apiRequest(`/api/v1/quotes/records/${encodeURIComponent(recordId)}`, {
     method: 'DELETE',
     token: token(),
+  })
+}
+
+export async function lockQuoteRecord(recordId: string): Promise<QuoteRecordItem> {
+  return apiRequest(`/api/v1/quotes/records/${encodeURIComponent(recordId)}/lock`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
+export async function unlockQuoteRecord(recordId: string): Promise<QuoteRecordItem> {
+  return apiRequest(`/api/v1/quotes/records/${encodeURIComponent(recordId)}/unlock`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
+export type CatalogHit = {
+  name: string
+  spec: string
+  unit: string
+  unitPrice: number
+  costPrice: number
+  sellPrice: number
+  score: number
+  official: boolean
+  source: string
+  category?: string
+  scene?: string
+}
+
+export async function fetchCatalogCandidates(input: {
+  baseId: string
+  name: string
+  spec?: string
+  code?: string
+}): Promise<{ items: CatalogHit[] }> {
+  return apiRequest('/api/v1/quotes/catalog-candidates', {
+    method: 'POST',
+    token: token(),
+    body: input,
   })
 }
 

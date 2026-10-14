@@ -1,0 +1,31 @@
+---
+description: 优祺智能前端必须遵守的产品与协作约束（每次会话生效）
+alwaysApply: true
+---
+
+# weitaiAgentui 核心规则
+
+本仓库是 **优祺智能** 前端（Vue 3 + Vite + Pinia + Vue Router，开发 :5173）。品牌文案以 `src/config/brand.ts` 为准。
+
+## 必须
+
+- 后端约定：`{ code, msg, data }`，`code === 0` 成功。一律走 `src/lib/api.ts` 的 `apiRequest` / `apiDownload` / `apiFetchBlob`，不要另写 fetch。
+- JSON 字段与后端一致（camelCase）。未要求时不要改 URL、方法、字段。开发环境 `VITE_API_BASE_URL` 默认为空，走 Vite `/api` 代理到 8100。
+- 鉴权：`Authorization: Bearer` 与 `X-Access-Token` 都要带（`apiRequest` 已处理）。业务 API 模块用 `getAccessToken()`。
+- **改 UI、布局、路由、客户端状态或展示数据后，必须用浏览器把改动流程点一遍**（交互，不只截图）。同源页面要核对状态是否一致；有问题先修再收工。
+- **不要**提交密钥、Token、`.env`。不要把 Key 写进前端代码。
+- 改动保持最小：只动任务需要的文件；不顺手重构。
+- 界面文案用中文。用户可见错误优先展示后端 `msg`。代码少写注释（见 `code-style.mdc`）。
+
+## 禁止
+
+```ts
+// ❌ 绕过统一客户端 / 自造响应判断
+const res = await fetch('/api/v1/knowledge')
+const json = await res.json()
+if (json.success) { ... }
+
+// ✅
+import { apiRequest } from '@/lib/api'
+const data = await apiRequest<KnowledgeBaseItem[]>('/api/v1/knowledge/bases', { token })
+```
