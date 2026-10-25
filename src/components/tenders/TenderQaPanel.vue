@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { Loader2, ShieldCheck, TriangleAlert } from 'lucide-vue-next'
 import { Tag } from '@/components/ui-kit'
-import type { QaGap, QaReport } from '@/lib/tenders-api'
+import type { QaGap, QaReport, RequirementCoverage } from '@/lib/tenders-api'
 
 const props = withDefaults(
   defineProps<{
@@ -82,6 +82,22 @@ const groupedMissing = computed(() => {
   return groups.filter((g) => g.items.length)
 })
 
+const vetoCoverage = computed<RequirementCoverage | null>(() => props.report?.requirementCoverage || null)
+
+const vetoGaps = computed(() =>
+  (vetoCoverage.value?.rows || []).filter((row) => row.matchStatus === 'gap' || row.matchStatus === 'unbound'),
+)
+
+const vetoFormats = computed(() =>
+  (vetoCoverage.value?.rows || []).filter((row) => row.matchStatus === 'format'),
+)
+
+function vetoStatusLabel(status?: string) {
+  if (status === 'gap') return '尚未覆盖'
+  if (status === 'unbound') return '格式章无此空'
+  return '只提示'
+}
+
 const emptyHint = computed(() => {
   if (props.loading) return '正在对照邀请书分析投标文件…'
   if (props.error) return props.error
@@ -156,6 +172,26 @@ const runText = computed(() => {
         </li>
       </ul>
     </div>
+
+    <div v-if="vetoCoverage" class="mt-3 text-[11px] leading-relaxed">
+      <div class="font-medium text-foreground">
+        否决项覆盖 {{ vetoCoverage.mandatoryCovered }}/{{ vetoCoverage.mandatoryTotal }}
+      </div>
+      <p class="text-muted-foreground mt-0.5">
+          只统计当前这一卷。商务偏离不看技术偏离表，技术偏离不看商务偏离表。只认资料文件、已勾选业绩、本卷偏离表里已填的行。稿里出现招标原句不算覆盖。红线未开启，不拦下载和提交。
+      </p>
+    </div>
+
+    <ul v-if="vetoGaps.length || vetoFormats.length" class="mt-2 space-y-1.5 text-[11px] leading-snug">
+      <li v-for="row in vetoGaps" :key="'veto-' + row.id">
+        <span class="font-medium text-foreground">{{ vetoStatusLabel(row.matchStatus) }}</span>
+        <span class="text-muted-foreground"> {{ row.text }}</span>
+        <span v-if="row.matchNote" class="block text-muted-foreground">{{ row.matchNote }}</span>
+      </li>
+      <li v-for="row in vetoFormats" :key="'fmt-' + row.id" class="text-muted-foreground">
+        只提示：{{ row.text }}
+      </li>
+    </ul>
 
     <div
       v-if="groupedMissing.length"

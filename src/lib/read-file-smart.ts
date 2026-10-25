@@ -14,6 +14,7 @@ export const KB_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
 
 export const KB_UPLOAD_EXTS = [
   'pdf',
+  'doc',
   'docx',
   'xlsx',
   'xls',
@@ -38,7 +39,7 @@ const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff']
 const CAD_EXTS = ['dwg', 'dxf', 'step', 'stp', 'iges', 'igs']
 
 const ALLOWED_HINT =
-  'pdf / docx / xlsx / xls / pptx / txt / md / csv / json / xml / yaml / png / jpg / webp / mp4 / webm'
+  'pdf / doc / docx / xlsx / xls / pptx / txt / md / csv / json / xml / yaml / png / jpg / webp / mp4 / webm'
 
 export function fileExt(name: string): string {
   return name.split('.').pop()?.toLowerCase() || ''
@@ -66,7 +67,6 @@ export function validateKbUploadFile(file: File): string | null {
   if (t === 'tif' || t === 'tiff') {
     return `暂不支持 .${t}，请先转为 png / jpg。当前支持：${ALLOWED_HINT}`
   }
-  if (t === 'doc') return '旧版 .doc 请另存为 .docx 后上传'
   if (t === 'ppt') return '旧版 .ppt 请另存为 .pptx 后上传'
   if (THREE_D_EXTS.includes(t) || CAD_EXTS.includes(t) || IMAGE_EXTS.includes(t)) {
     return `暂不支持 .${t}。当前支持：${ALLOWED_HINT}`

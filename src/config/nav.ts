@@ -134,6 +134,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/tender-qa', label: 'AI标书评分', icon: FileSearch },
       { href: QUOTE_NAV_HREF, label: QUOTE_NAV_LABEL, icon: FileSpreadsheet },
       { href: '/tender-library', label: '投标资料库', icon: FolderOpen },
+      { href: '/history-bids', label: '历史标书', icon: History },
       { href: '/scene-agents', label: '场景智能体', icon: Sparkles, adminOnly: true },
       { href: '/workflows', label: '工作流', icon: Workflow, adminOnly: true },
       { href: '/model-manage', label: '模型管理', icon: Boxes, adminOnly: true },
@@ -181,6 +182,7 @@ export const PRIMARY_NAV_HREFS = [
   QUOTE_NAV_HREF,
   '/knowledge',
   '/tender-library',
+  '/history-bids',
 ] as const
 
 export const NAV_ITEM_DESC: Record<string, string> = {
@@ -194,6 +196,7 @@ export const NAV_ITEM_DESC: Record<string, string> = {
   '/tender-qa': '对照邀请书给生成稿或终稿打分',
   [QUOTE_NAV_HREF]: '造价、报价与控制预算一站生成',
   '/tender-library': '企业常备资料与扫描件',
+  '/history-bids': '按章标记可参考或需规避的历史标书',
   '/scene-agents': '绑定提示词、知识库与 MCP',
   '/workflows': '编排知识检索 / LLM / 智能体',
   '/model-manage': '配置快速 / 深度 / Embedding',

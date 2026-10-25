@@ -13,11 +13,44 @@ const props = defineProps<{
   files: SlotFileInfo[]
   removable?: boolean
   removingId?: string | null
+  savingId?: string | null
 }>()
 
 const emit = defineEmits<{
   remove: [file: SlotFileInfo]
+  saveFacts: [payload: { id: string; role: string; fields: { name: string; value: string }[] }]
 }>()
+
+const ROLE_LABEL: Record<string, string> = {
+  company: '企业',
+  'person/legal': '法定代表人',
+  'person/pm': '项目经理',
+  'person/pmWork': '工作经历',
+  performance: '业绩',
+  other: '其他',
+}
+
+const drafts = ref<Record<string, { name: string; value: string }[]>>({})
+
+watch(
+  () => props.files,
+  (files) => {
+    const next: Record<string, { name: string; value: string }[]> = {}
+    for (const file of files) {
+      const id = resolveLibraryFileId(file)
+      if (!id || !file.facts?.fields?.length) continue
+      next[id] = file.facts.fields.map((item) => ({ name: item.name, value: item.value }))
+    }
+    drafts.value = next
+  },
+  { immediate: true },
+)
+
+function saveFacts(id: string, role: string) {
+  const fields = drafts.value[id]
+  if (!id || !fields) return
+  emit('saveFacts', { id, role, fields })
+}
 
 const openIndex = ref<number | null>(null)
 
@@ -162,6 +195,29 @@ onUnmounted(() => {
         <template v-if="it.file.performance.amountYuan">{{ it.file.performance.amountYuan }} 元 · </template>
         {{ it.file.performance.ongoing ? '在建' : '已竣工' }}
       </p>
+      <div v-if="it.id && drafts[it.id]?.length" class="space-y-1 pl-6 pt-1">
+        <p class="text-[10px] leading-4 text-muted-foreground">
+          {{ ROLE_LABEL[it.file.facts?.role || ''] || '识别字段' }}
+        </p>
+        <div v-for="(field, idx) in drafts[it.id]" :key="field.name + idx" class="flex items-center gap-1">
+          <span class="w-16 shrink-0 truncate text-[10px] text-muted-foreground" :title="field.name">{{
+            field.name
+          }}</span>
+          <input
+            v-model="field.value"
+            class="h-6 min-w-0 flex-1 rounded border border-border bg-transparent px-1 text-[11px]"
+            @click.stop
+          />
+        </div>
+        <button
+          type="button"
+          class="h-6 rounded border border-border px-1.5 text-[10px] hover:bg-accent disabled:opacity-50"
+          :disabled="savingId === it.id"
+          @click.stop="saveFacts(it.id, it.file.facts?.role || '')"
+        >
+          {{ savingId === it.id ? '保存中' : '保存识别' }}
+        </button>
+      </div>
     </li>
   </ul>
 

@@ -15,6 +15,7 @@ import {
   fetchTenderLibrary,
   resolveLibraryFileId,
   reindexTenderLibrary,
+  updateLibraryFileFacts,
   updateTenderLibraryItem,
   uploadTenderSlot,
   type SlotFileInfo,
@@ -28,6 +29,7 @@ const hint = ref('')
 const baseId = ref('')
 const slots = ref<SlotStatus[]>([])
 const uploadingKey = ref<string | null>(null)
+const savingFactsId = ref<string | null>(null)
 const reindexing = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const pendingKey = ref<string | null>(null)
@@ -177,6 +179,23 @@ function askDeleteItem(slot: SlotStatus) {
 
 function onDeleteOpen(open: boolean) {
   if (!open && !deleting.value) pendingDelete.value = null
+}
+
+async function saveFacts(payload: { id: string; role: string; fields: { name: string; value: string }[] }) {
+  savingFactsId.value = payload.id
+  error.value = ''
+  try {
+    const slot = await updateLibraryFileFacts(payload.id, {
+      role: payload.role,
+      fields: payload.fields,
+    })
+    const idx = slots.value.findIndex((item) => item.key === slot.key)
+    if (idx >= 0) slots.value[idx] = slot
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : '保存识别结果失败'
+  } finally {
+    savingFactsId.value = null
+  }
 }
 
 function askDeleteFile(slot: SlotStatus, file: SlotFileInfo) {
@@ -418,12 +437,20 @@ async function onReindex(force = false) {
               >
                 上传后会扫描合同/发票，抽出项目名称、规格型号、买方、联系人、合同额、概况和是否在建。招标优先采用已竣工充电桩项目。
               </p>
+              <p
+                v-if="slot.key === 'id_legal'"
+                class="mt-1 text-[11px] text-muted-foreground leading-relaxed"
+              >
+                可放多位法定代表人。每人上传正面和反面，正面识别姓名、性别、年龄和身份证号。同一人请先传正面再传反面。做标书时再选择本标用谁。
+              </p>
               <TenderScanGallery
                 v-if="slot.files?.length"
                 :files="slot.files"
                 removable
                 :removing-id="removingFileId"
+                :saving-id="savingFactsId"
                 @remove="(file) => askDeleteFile(slot, file)"
+                @save-facts="saveFacts"
               />
             </div>
             <div class="flex shrink-0 flex-wrap items-center gap-1.5">
@@ -435,7 +462,7 @@ async function onReindex(force = false) {
               >
                 <Loader2 v-if="uploadingKey === slot.key" class="size-3 animate-spin" />
                 <Upload v-else class="size-3" />
-                {{ uploadingKey === slot.key ? (slot.key === 'perf' ? '识别中' : '上传中') : slot.fileCount ? '替换' : '上传' }}
+                {{ uploadingKey === slot.key ? '识别中' : slot.fileCount ? '替换' : '上传' }}
               </button>
               <button
                 v-if="slot.fileCount"

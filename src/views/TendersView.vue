@@ -7,12 +7,12 @@ import {
   ChevronRight,
   ChevronUp,
   Download,
-  GripVertical,
   FileSpreadsheet,
   FileUp,
   FolderOpen,
   History,
   Loader2,
+  RotateCcw,
   Trash2,
   Maximize2,
   Minimize2,
@@ -36,6 +36,7 @@ import {
   clearTenderSlot,
   deleteTenderRecord,
   downloadTenderFile,
+  fetchFixedTemplates,
   fetchTenderDefaults,
   fetchTenderLibrary,
   fetchTenderRecord,
@@ -43,9 +44,14 @@ import {
   fetchTenderQa,
   fetchTenderSlots,
   draftTenderTech,
+  fillTechBoq,
+  fillTechDrawing,
   generateTender,
   inspectTenderQa,
+  publishTenderRecord,
   parseTenderInvitation,
+  prepareInvitationFormatDocx,
+  previewTenderOutline,
   regenerateTenderRecord,
   restoreTenderLayoutTemplate,
   uploadTenderLayoutTemplate,
@@ -62,6 +68,10 @@ import {
   type GenerateResult,
   type QaReport,
   type OutlineItem,
+  type FixedTemplate,
+  type OutlinePreviewRow,
+  type StructureMode,
+  type CopyPolicy,
   type AttachmentMatch,
   type AttachmentMatchItem,
   type BidVolume,
@@ -76,10 +86,31 @@ import {
 import TenderDocEditor from '@/components/tenders/TenderDocEditor.vue'
 import TenderQaPanel from '@/components/tenders/TenderQaPanel.vue'
 
+function emptyVolumeFormat() {
+  return {
+    marginSet: false,
+    marginLeftCm: 2.8,
+    marginRightCm: 2.6,
+    marginTopCm: 2.6,
+    marginBottomCm: 2.5,
+    fontSet: false,
+    fontName: '',
+    bodySizeSet: false,
+    bodySizePt: 12,
+    pagePosSet: false,
+    pageStartSet: false,
+    pageNumberPos: '',
+    pageNumberStart: '',
+    notes: [] as string[],
+  }
+}
+
 function emptyDocumentFormat(): DocumentFormat {
   return {
     specified: false,
     notes: [],
+    businessFormat: emptyVolumeFormat(),
+    technicalFormat: emptyVolumeFormat(),
     marginLeftCm: 2.8,
     marginRightCm: 2.6,
     marginTopCm: 2.6,
@@ -100,7 +131,7 @@ function emptyDocumentFormat(): DocumentFormat {
     coverShowDate: true,
     coverNeedSeal: false,
     tocNumbering: 'cn',
-    tocNeedPageNos: false,
+    tocNeedPageNos: true,
     pageNumberPos: 'bottom-center',
     pageNumberStart: 'body',
   }
@@ -144,6 +175,7 @@ function emptyBrief(): BidBrief {
     legalPersonAge: '28',
     legalPersonTitle: '执行董事',
     legalPersonIdNo: '410521199802104053',
+    legalPersonKey: '',
     agentName: '',
     agentIdNo: '',
     agentAuthUntil: '',
@@ -187,6 +219,16 @@ function emptyBrief(): BidBrief {
     schedulePlan: '',
     techPlanNote: '',
     layoutMode: 'chapter5',
+    // Phase1-3 双轨：内容模板 / 结构来源 / 复制策略
+    contentTemplateId: 'general',
+    structureMode: 'fixed' as StructureMode,
+    // 整单策略留空 = 跟随后端按渲染模式判定（1:1 下默认照抄原文）。
+    // 这里必须留空：写死 'rewrite' 会显式覆盖后端，把投标函改成重写版。
+    copyPolicy: '' as CopyPolicy | '',
+    // 1:1 忠实渲染：默认照抄招标书序号/标题/顺序/原文
+    outlineRender: 'verbatim' as 'verbatim' | 'curated',
+    outlineConfirmed: false,
+    formatConfirmed: false,
     outlineChapter: '',
     outlineItems: [],
     bidRequirements: [],
@@ -289,6 +331,24 @@ function outlineAuthHint(item: OutlineItem) {
   return '未启用授权委托，法人自签即可跳过'
 }
 
+/** 轨道B 每节的三态提示：重写/沿用原文 + 是否抽到原文 + 缺件红点。 */
+function outlinePolicyHint(item: OutlineItem) {
+  if (form.structureMode !== 'outline') return outlineSourceLabel(item.source, item)
+  const row = outlinePreviewRows.value.find((r) => r.id === item.id)
+  const parts: string[] = []
+  if (item.skipped) {
+    parts.push('已跳过')
+  } else if (itemPolicy(item) === 'verbatim') {
+    parts.push((item.body || '').trim() ? '照抄招标书空白稿并填空' : '未抽到原文，将只保留标题')
+  } else {
+    parts.push('按系统资料与表单重写')
+  }
+  if (outlineAuthHint(item)) parts.push(outlineAuthHint(item))
+  if (row?.missing?.length) parts.push(`缺件：${row.missing.join('、')}`)
+  if (row?.needsConfirm) parts.push('类型未识别，请人工确认')
+  return parts.join(' · ')
+}
+
 function prettyOutlineTitle(title: string) {
   const t = (title || '').replace(/\s+/g, '')
   if (t.includes('营业执照') && /注册地址|注册住所/.test(t)) return '营业执照'
@@ -298,10 +358,17 @@ function prettyOutlineTitle(title: string) {
 function pruneUnknownOutline(items: OutlineItem[] | undefined) {
   return (items || [])
     .map((item) => {
+      // 1:1 忠实渲染：来自招标书原文的条目，标题一个字都不许改
+      if (item.rawTitle) return item
       const title = prettyOutlineTitle(item.title)
       return title === item.title ? item : { ...item, title }
     })
     .filter((item) => {
+      // 1:1：条目来自招标书格式章，抽取阶段已判过噪，一律保留。
+      // 下面的硬编码黑名单只用于「系统自己造的」条目，
+      // 否则会把资格审查资料、项目管理机构组成表等整节删掉——
+      // 不同行业叫法千差万别，靠关键词写死必然漏。
+      if (item.rawTitle) return true
       const raw = item.title || ''
       const title = raw.replace(/\s+/g, '')
       if (!title) return false
@@ -379,7 +446,7 @@ function moveVisibleOutline(from: number, to: number) {
 }
 
 function onOutlineDragStart(index: number, ev: DragEvent) {
-  if (form.layoutMode !== 'outline') {
+  if (form.structureMode !== 'outline') {
     ev.preventDefault()
     return
   }
@@ -391,7 +458,7 @@ function onOutlineDragStart(index: number, ev: DragEvent) {
 }
 
 function onOutlineDragOver(index: number, ev: DragEvent) {
-  if (form.layoutMode !== 'outline' || outlineDragFrom.value == null) return
+  if (form.structureMode !== 'outline' || outlineDragFrom.value == null) return
   ev.preventDefault()
   if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move'
   outlineDragOver.value = index
@@ -499,6 +566,7 @@ function absorbLibraryPerformance(files: SlotFileInfo[]) {
       matchPerformanceLine(line, form.performanceRequirement).passed
     form.performanceLines.push({ ...emptyPerformanceLine(), ...line, includeInBid })
   }
+  padPerformancePlaceholders()
 }
 
 const router = useRouter()
@@ -509,18 +577,26 @@ const canEditLibrary = computed(
 )
 const loading = ref(true)
 const generating = ref(false)
+const pendingBoth = ref(false)
+const followAdvice = ref(false)
 const parsing = ref(false)
+const parseElapsed = ref(0)
+let parseClock = 0
 const downloading = ref<'docx' | 'tech' | 'pdf' | null>(null)
 const uploadingKey = ref<string | null>(null)
 const error = ref('')
+const success = ref('')
 const qualification = ref<QualificationStatus | null>(null)
 const layoutTemplate = ref<Chapter5TemplateStatus | null>(null)
 const uploadingLayoutTemplate = ref(false)
 const layoutTemplateInput = ref<HTMLInputElement | null>(null)
 const result = ref<GenerateResult | null>(null)
+const knownFiles = ref({ docx: false, tech: false })
 const draftingTech = ref(false)
 const redraftingId = ref('')
 const form = reactive<BidBrief>(emptyBrief())
+/** 进入页时的公司默认表单，重置时回到这里，不带本次邀请书 */
+let formBaseline: BidBrief | null = null
 const inviteFile = ref<File | null>(null)
 const quoteFile = ref<File | null>(null)
 const quoteRecordIds = ref<string[]>([])
@@ -589,11 +665,23 @@ const confirmDeleteOpen = ref(false)
 const pendingDeleteItem = ref<TenderRecordItem | null>(null)
 const confirmClearOpen = ref(false)
 const clearingRecords = ref(false)
+const confirmResetOpen = ref(false)
+const resetting = ref(false)
+const publishing = ref(false)
 const loadingFormId = ref<string | null>(null)
 const confirmGenerateOpen = ref(false)
 const confirmGenerateMode = ref<'form' | 'record'>('form')
 const pendingRegenItem = ref<TenderRecordItem | null>(null)
 const confirmDateOpen = ref(false)
+const formatPreviewOpen = ref(false)
+const formatPreviewFile = ref('')
+const formatPreviewBusy = ref(false)
+const formatPreviewTick = ref(0)
+const formatConfirmBusy = ref(false)
+const formatSaveError = ref('')
+const formatEditorRef = ref<{ flushSave: () => Promise<void> } | null>(null)
+const bidEditorRef = ref<{ flushSave: () => Promise<void> } | null>(null)
+const bidSaveBusy = ref(false)
 const qaReport = ref<QaReport | null>(null)
 const qaLoading = ref(false)
 const qaError = ref('')
@@ -623,7 +711,7 @@ function isParseNoiseNote(note: string) {
 
 function isParsePrimaryNote(note: string) {
   if (isParseNoiseNote(note)) return false
-  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标|须授权委托|来自知识库/.test(
+  return /废标|扣分|未解析|未找到|失败|警告|OCR 已达|模型未抽出|暂用内置模板|请确认使用哪一档|类似业绩符合|均未达到招标|须授权委托|来自知识库|法定代表人/.test(
     note,
   )
 }
@@ -645,6 +733,7 @@ const parseNotesSummary = computed(() => {
 
 const parseExtraOpen = ref(false)
 const parseMatchListOpen = ref(false)
+const vetoListOpen = ref(false)
 const generateHintsDismissed = ref(false)
 
 const GENERATE_NOISE_RE =
@@ -700,6 +789,14 @@ async function onPickLayoutTemplate(ev: Event) {
   error.value = ''
   try {
     layoutTemplate.value = await uploadTenderLayoutTemplate(file)
+    // 上传的是自定义空白稿，重新体检并把结果落到下拉里
+    fixedTemplates.value = await fetchFixedTemplates().catch(() => fixedTemplates.value)
+    const health = activeFixedTemplate.value?.health
+    if (health && !health.ok) {
+      error.value = `模板标题体检未通过：缺少「${health.missingRequired.join('、')}」，生成时会被拦下`
+    } else if (health) {
+      success.value = '模板已更换，标题体检通过'
+    }
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '更换固定模板失败'
   } finally {
@@ -719,21 +816,161 @@ async function onRestoreLayoutTemplate() {
   }
 }
 
+/** 轨道A 固定模板下拉（Phase1）。缺失的项置灰，避免点了才报错。 */
+const fixedTemplates = ref<FixedTemplate[]>([])
+const outlinePreviewRows = ref<OutlinePreviewRow[]>([])
+const outlineWarnings = ref<string[]>([])
+const outlineBusy = ref(false)
+
+/** 轨道B：切到按本标时立即拉大纲预览；未确认不放行生成。 */
+async function loadOutlinePreview() {
+  outlineBusy.value = true
+  try {
+    const data = await previewTenderOutline(form as unknown as BidBrief)
+    outlinePreviewRows.value = data.items || []
+    outlineWarnings.value = data.warnings || []
+    for (const row of outlinePreviewRows.value) {
+      const hit = form.outlineItems.find((x) => x.id === row.id)
+      if (hit && !hit.copyPolicy) hit.copyPolicy = row.copyPolicy
+    }
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '大纲预览失败'
+    outlinePreviewRows.value = []
+  } finally {
+    outlineBusy.value = false
+  }
+}
+
+async function confirmFormatTemplate() {
+  if (!formatPreviewFile.value) {
+    error.value = '请先点「预览模板」核对截出的格式章'
+    return
+  }
+  if (formatConfirmBusy.value) return
+  formatConfirmBusy.value = true
+  formatSaveError.value = ''
+  try {
+    await formatEditorRef.value?.flushSave?.()
+    form.formatConfirmed = true
+    formatPreviewOpen.value = false
+    error.value = ''
+    success.value = '已确认使用这份模板，可生成'
+  } catch (e) {
+    formatSaveError.value = e instanceof Error ? e.message : '模板保存失败'
+    error.value = formatSaveError.value
+  } finally {
+    formatConfirmBusy.value = false
+  }
+}
+
+async function onFormatPreviewOpen(open: boolean) {
+  if (open) {
+    formatSaveError.value = ''
+    formatPreviewOpen.value = true
+    return
+  }
+  if (formatConfirmBusy.value) return
+  formatConfirmBusy.value = true
+  formatSaveError.value = ''
+  try {
+    await formatEditorRef.value?.flushSave?.()
+    formatPreviewOpen.value = false
+  } catch (e) {
+    formatSaveError.value = e instanceof Error ? e.message : '模板保存失败'
+    error.value = formatSaveError.value
+  } finally {
+    formatConfirmBusy.value = false
+  }
+}
+
+function clearFormatPreview() {
+  form.formatConfirmed = false
+  formatPreviewFile.value = ''
+  formatPreviewOpen.value = false
+}
+
+/** 预览识别出的格式章 Word；后端会拷一份到标书目录再走统一预览。 */
+async function loadFormatFile(openDialog: boolean) {
+  const invitationId = String(form.invitationId || '').trim()
+  if (!invitationId) {
+    error.value = '未识别到招标文件，无法预览格式章'
+    return
+  }
+  formatPreviewBusy.value = true
+  error.value = ''
+  try {
+    const fileName = await prepareInvitationFormatDocx(invitationId)
+    if (!fileName) throw new Error('未生成预览文件')
+    formatPreviewFile.value = fileName
+    formatPreviewTick.value += 1
+    if (openDialog) formatPreviewOpen.value = true
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '预览格式章失败'
+  } finally {
+    formatPreviewBusy.value = false
+  }
+}
+
+async function openFormatPreview() {
+  await loadFormatFile(true)
+}
+
+/** 双轨结构来源。fixed=按固定模板，outline=按本标招标书大纲。 */
+function setStructureMode(mode: StructureMode) {
+  form.structureMode = mode
+  form.layoutMode = mode === 'outline' ? 'outline' : 'chapter5'
+  clearFormatPreview()
+  if (mode !== 'outline') {
+    outlinePreviewRows.value = []
+    outlineWarnings.value = []
+  }
+}
+
+/** 单节三态：rewrite=重写，verbatim=沿用原文，skipped=跳过。
+ *  1:1 忠实渲染（outlineRender=verbatim）下默认沿用原文：
+ *  只有用户显式点「重写」才改写，否则投标函会被凭空改写。 */
+function itemPolicy(item: OutlineItem): CopyPolicy {
+  if (item.copyPolicy === 'rewrite') return 'rewrite'
+  if (item.copyPolicy === 'verbatim') return 'verbatim'
+  return isVerbatimRender() ? 'verbatim' : 'rewrite'
+}
+
+/** 组卷模板是否走 1:1 忠实渲染（与后端 outlineRender 默认一致）。 */
+function isVerbatimRender(): boolean {
+  return (form.outlineRender || 'verbatim') !== 'curated'
+}
+
+function setItemPolicy(item: OutlineItem, policy: string) {
+  if (policy === 'skip') {
+    item.skipped = true
+    return
+  }
+  item.skipped = false
+  item.copyPolicy = policy === 'verbatim' ? 'verbatim' : 'rewrite'
+}
+
 const outlineSummary = computed(() => {
   const items = visibleOutlineItems.value
   const volLabel = activeVolume.value === 'technical' ? '技术标' : '商务标'
   if (!items.length) return `${volLabel}无对应条目`
-  const skipped = items.filter((item) => item.skipped).length
-  const copied = items.filter((item) => !item.skipped && (item.body || '').trim()).length
   const parts = [`${volLabel} ${items.length} 条`]
-  if (copied) parts.push(`可复制 ${copied}`)
-  if (skipped) parts.push(`跳过 ${skipped}`)
-  if (form.layoutMode === 'outline') parts.push('按本标大纲')
-  else parts.push('公司固定模板')
+  if (form.structureMode === 'outline') {
+    parts.push(form.formatConfirmed ? '模板已确认' : '模板待确认')
+  } else {
+    parts.push(fixedTemplateLabel.value || '固定模板')
+  }
   if (form.outlineChapter) parts.push(form.outlineChapter)
   if (form.documentFormat?.specified) parts.push('已抽排版要求')
   return parts.join(' · ')
 })
+
+const fixedTemplateLabel = computed(
+  () => fixedTemplates.value.find((t) => t.id === form.contentTemplateId)?.label || '',
+)
+
+const activeFixedTemplate = computed(
+  () => fixedTemplates.value.find((t) => t.id === form.contentTemplateId) || null,
+)
 
 function noteTone(note: string) {
   if (/废标|扣分/.test(note)) return 'text-sulfur'
@@ -758,11 +995,78 @@ const agentSlotReady = computed(() => {
   const slot = catalogSlots.value.find((s) => s.key === 'id_agent')
   return Boolean(slot && slot.fileCount > 0)
 })
+
+type LegalPersonOption = {
+  key: string
+  name: string
+  gender: string
+  age: string
+  idNo: string
+  hasBack: boolean
+}
+
+const legalPersonOptions = computed<LegalPersonOption[]>(() => {
+  const slot = catalogSlots.value.find((item) => item.key === 'id_legal')
+  const buckets = new Map<string, LegalPersonOption>()
+  for (const file of slot?.files || []) {
+    const card = file.idCard
+    const key = String(card?.personKey || '').trim()
+    if (!key) continue
+    let row = buckets.get(key)
+    if (!row) {
+      row = {
+        key,
+        name: '',
+        gender: '',
+        age: '',
+        idNo: String(card?.idNo || key),
+        hasBack: false,
+      }
+      buckets.set(key, row)
+    }
+    if (card?.name) row.name = card.name
+    if (card?.gender) row.gender = card.gender
+    if (card?.age) row.age = card.age
+    if (card?.idNo) row.idNo = card.idNo
+    if (card?.side === 'back') row.hasBack = true
+  }
+  return [...buckets.values()].filter((row) => row.name || row.idNo)
+})
+
+const legalPickMissing = computed(() => {
+  const rows = legalPersonOptions.value
+  if (rows.length < 2) return false
+  const key = String(form.legalPersonKey || '').trim()
+  return !rows.some((row) => row.key === key)
+})
+
 const authPanelSubtitle = computed(() => {
+  if (legalPickMissing.value) return '资料库有多位法定代表人，请先选择本标使用的人和身份证'
   if (form.authEnabled) return '须填委托人姓名和身份证号；扫描件优先用投标资料库'
   if (form.authNeed === 'required') return '招标书写了须授权委托，默认法人自签；要用委托人请打开开关'
-  return '法人身份证贴在身份证明页；默认不启用授权委托'
+  return '法人身份证贴在身份证明页；多本证件时在下方选择本标用谁'
 })
+
+function applyLegalPerson() {
+  const hit = legalPersonOptions.value.find((row) => row.key === form.legalPersonKey)
+  if (!hit) return
+  if (hit.name) form.legalPersonName = hit.name
+  if (hit.gender) form.legalPersonGender = hit.gender
+  if (hit.age) form.legalPersonAge = hit.age
+  if (hit.idNo) form.legalPersonIdNo = hit.idNo
+}
+
+function syncLegalPersonPick() {
+  const rows = legalPersonOptions.value
+  const key = String(form.legalPersonKey || '').trim()
+  if (key && !rows.some((row) => row.key === key)) form.legalPersonKey = ''
+  if (rows.length === 1 && !String(form.legalPersonKey || '').trim()) {
+    form.legalPersonKey = rows[0].key
+    applyLegalPerson()
+  }
+}
+
+watch(legalPersonOptions, () => syncLegalPersonPick())
 
 function fillAgentFromReadySources() {
   if (!form.authEnabled) return
@@ -852,6 +1156,8 @@ const generateBlockers = computed(() => {
   if (isBlank(form.projectName)) issues.push('项目名称')
   if (isBlank(form.tenderer)) issues.push('招标人')
   if (isBlank(form.bidderName)) issues.push('投标人全称')
+  if (legalPickMissing.value) issues.push('本标法定代表人')
+  if (form.structureMode === 'outline' && !form.formatConfirmed) issues.push('确认格式章模板')
   if (activeVolume.value === 'technical') return issues
   if (!(Number(form.bidPriceYuan) > 0)) issues.push('投标总价')
   if (isBlank(form.bidderAddress)) issues.push('地址')
@@ -862,18 +1168,6 @@ const generateBlockers = computed(() => {
   if (isBlank(form.legalPersonIdNo)) issues.push('法人身份证号')
   if (agentNameRequired.value && isBlank(form.agentName)) issues.push('委托代理人')
   if (agentIdRequired.value && isBlank(form.agentIdNo)) issues.push('代理人身份证号')
-  if (!form.quoteLines.some((row) => String(row.name || '').trim())) {
-    issues.push('报价清单（上传 Excel/Word，或从 AI 报价记录勾选后识别）')
-  }
-  if (performanceRequirementActive(form.performanceRequirement)) {
-    const picked = form.performanceLines.filter(
-      (row) => row.includeInBid !== false && String(row.projectName || '').trim(),
-    ).length
-    const need = form.performanceRequirement.minCount || 0
-    if (need > 0 && picked < need) {
-      issues.push(`类似业绩已选 ${picked} 条，招标要求至少 ${need} 个`)
-    }
-  }
   return issues
 })
 
@@ -921,20 +1215,12 @@ const technicalWarnings = computed(() => {
   } else if (!String(form.techPlanNote || '').trim() && !techChapterItems.value.length) {
     issues.push('技术方案尚未起草')
   }
-  if (!techDrawingSlot.value.fileCount) issues.push('尚未上传本项目图纸')
-  if (!form.performanceLines.some((row) => row.includeInBid !== false && String(row.projectName || '').trim())) {
-    issues.push('类似业绩为空，资格评审可能扣分')
-  } else if (performanceRequirementActive(form.performanceRequirement)) {
-    const passed = form.performanceLines.filter(
-      (row) =>
-        row.includeInBid !== false && matchPerformanceLine(row, form.performanceRequirement).passed,
+  if (!techDrawingSlot.value.fileCount) issues.push('尚未上传图纸 PDF')
+  if (performanceRequirementActive(form.performanceRequirement)) {
+    const ph = form.performanceLines.filter(
+      (row) => row.includeInBid !== false && isPerfPlaceholder(row),
     ).length
-    const req = form.performanceRequirement
-    if (req.minCount > 0 && passed < req.minCount) {
-      issues.push(`类似业绩符合 ${passed} 条，招标要求至少 ${req.minCount} 个`)
-    } else if (passed === 0) {
-      issues.push('类似业绩均未达到招标门槛')
-    }
+    if (ph) issues.push(`类似业绩有 ${ph} 条资料库未匹配，已占位，可手工补`)
   }
   return issues
 })
@@ -962,10 +1248,30 @@ const softGenerateNotes = computed(() => {
 const formStepNextLabel = computed(() => {
   if (generating.value) return '正在生成…'
   if (workflowLocked.value) return '当前任务只读'
+  if (followAdvice.value && form.volumeAdvice === 'full') {
+    return result.value?.docxFile ? '覆盖生成投标文件' : '生成投标文件并预览'
+  }
+  if (followAdvice.value && form.volumeAdvice === 'split') return '按分册生成两卷'
   const volLabel = activeVolume.value === 'technical' ? '技术标' : '商务标'
   const hasThis =
     activeVolume.value === 'technical' ? Boolean(result.value?.techDocxFile) : Boolean(result.value?.docxFile)
   return hasThis ? `覆盖生成${volLabel}` : `生成${volLabel}并预览`
+})
+
+const volumeStatusHint = computed(() => {
+  if (followAdvice.value && form.volumeNote) return form.volumeNote
+  if (result.value?.generateVolume === 'full') return '本次生成的是完整投标文件。'
+  const cur = activeVolume.value === 'technical' ? '技术标' : '商务标'
+  const other = activeVolume.value === 'technical' ? '商务标' : '技术标'
+  const row = result.value
+  if (row?.generateVolume === activeVolume.value && row.otherVolumeNote) return row.otherVolumeNote
+  if (row?.generateVolume === activeVolume.value && row.otherVolumeReady) {
+    return `本次生成的是${cur}，${other}已生成。`
+  }
+  const docx = row ? Boolean(row.docxFile) : knownFiles.value.docx
+  const tech = row ? Boolean(row.techDocxFile) : knownFiles.value.tech
+  const ready = activeVolume.value === 'technical' ? docx : tech
+  return ready ? `当前将只生成${cur}。${other}已生成。` : `当前将只生成${cur}。${other}尚未生成。`
 })
 
 const workflowLocked = computed(() =>
@@ -1045,6 +1351,118 @@ const matchHasRows = computed(() => {
   return m.matched.length + m.missingFiles.length + m.createdItems.length > 0
 })
 
+const TECH_VETO_MARKS = [
+  '技术标准',
+  '技术规格',
+  '技术参数',
+  '技术指标',
+  '技术要求',
+  '技术偏离',
+  '技术偏差',
+  '负偏离',
+  '施工组织',
+  '暗标',
+]
+const BIZ_VETO_MARKS = [
+  '营业执照',
+  '信誉',
+  '法定代表人',
+  '投标保证金',
+  '履约保证金',
+  '投标报价',
+  '类似项目',
+  '类似业绩',
+  '授权委托',
+  '投标函',
+  '联合体',
+  '项目经理',
+  '单位负责人',
+  '失信',
+  '信用信息',
+]
+
+function textVetoVolume(text: string): '' | 'business' | 'technical' {
+  const tech = TECH_VETO_MARKS.some((k) => text.includes(k))
+  const biz = BIZ_VETO_MARKS.some((k) => text.includes(k))
+  if (tech && !biz) return 'technical'
+  if (biz && !tech) return 'business'
+  return ''
+}
+
+function shownVetoVolume(item: { text?: string; targetKind?: string; volume?: string }) {
+  const byText = textVetoVolume(item.text || '')
+  if (byText) return byText
+  const kind = item.targetKind || ''
+  if (kind === 'tech_dev' || kind === 'tech_plan' || kind === 'tech_chapter') return 'technical'
+  if (kind === 'performance' || kind === 'biz_dev') return 'business'
+  if (kind === 'format') return (item.text || '').includes('暗标') ? 'technical' : 'business'
+  return item.volume === 'technical' || item.volume === 'business' ? item.volume : ''
+}
+
+const vetoItems = computed(() =>
+  (form.bidRequirements || []).filter(
+    (item) => item.strength === 'mandatory' && shownVetoVolume(item) === activeVolume.value,
+  ),
+)
+
+const compareItems = computed(() =>
+  (form.bidRequirements || []).filter((item) => {
+    const text = String(item.text || '').trim()
+    if (text.length < 8) return false
+    if (item.targetKind === 'format' || item.category === 'format') return false
+    const keep =
+      item.strength === 'mandatory' ||
+      ['qualification', 'material', 'scoring', 'performance', 'veto'].includes(item.category || '') ||
+      Boolean(item.display)
+    if (!keep) return false
+    const vol = shownVetoVolume(item) || (item.volume === 'technical' || item.volume === 'business' ? item.volume : '')
+    if (vol === 'business' || vol === 'technical') return vol === activeVolume.value
+    return activeVolume.value === 'business'
+  }),
+)
+
+function compareAnswer(item: { matchStatus?: string; respond?: string }) {
+  if (item.matchStatus === 'matched') return '已响应'
+  if (item.matchStatus === 'gap') return '待补充'
+  if (item.matchStatus === 'format') return '只提示'
+  if (item.matchStatus === 'unbound') return '格式章无此空'
+  return item.respond || '待核对'
+}
+
+const vetoOtherCount = computed(() =>
+  (form.bidRequirements || []).filter((item) => {
+    if (item.strength !== 'mandatory') return false
+    const vol = shownVetoVolume(item)
+    return Boolean(vol) && vol !== activeVolume.value
+  }).length,
+)
+
+const activeFormatNotes = computed(() => {
+  const fmt = form.documentFormat
+  const spec = activeVolume.value === 'technical' ? fmt?.technicalFormat : fmt?.businessFormat
+  return spec?.notes || []
+})
+
+function vetoStatusLabel(status?: string) {
+  if (status === 'matched') return '已有证据'
+  if (status === 'gap') return '尚未覆盖'
+  if (status === 'format') return '只提示'
+  if (status === 'unbound') return '格式章无此空'
+  return '待核对'
+}
+
+function dropVeto(id: string) {
+  form.bidRequirements = (form.bidRequirements || []).filter((item) => item.id !== id)
+}
+
+function easeVeto(id: string) {
+  form.bidRequirements = (form.bidRequirements || []).map((item) =>
+    item.id === id
+      ? { ...item, strength: 'general', matchStatus: '', matchNote: '已降为一般要求' }
+      : item,
+  )
+}
+
 const workflowSteps = [
   { key: 'upload', label: '上传邀请书' },
   { key: 'form', label: '填商务/技术标' },
@@ -1099,6 +1517,7 @@ function advanceStep(index: number) {
 }
 
 async function selectVolume(volume: BidVolume) {
+  followAdvice.value = false
   activeVolume.value = volume
   volumeHint.value = ''
   if (showRecords.value) closeRecords()
@@ -1124,41 +1543,45 @@ async function selectVolume(volume: BidVolume) {
 }
 
 const dragOverInvite = ref(false)
+const dragOverQuote = ref(false)
 const dragOverDrawings = ref(false)
 
-function onPickFile(ev: Event) {
-  const input = ev.target as HTMLInputElement
-  const file = input.files?.[0] ?? null
+function assignInviteFile(file: File) {
+  const name = file.name.trim().toLowerCase()
+  if (!name.endsWith('.doc') && !name.endsWith('.docx')) {
+    error.value = '投标邀请书只支持 .doc 和 .docx'
+    if (fileInput.value) fileInput.value.value = ''
+    return
+  }
+  error.value = ''
   if (file !== inviteFile.value) {
     hasParsed.value = false
+    followAdvice.value = false
     parseNotes.value = []
     parseOcr.value = null
     attachmentMatch.value = null
     result.value = null
+    knownFiles.value = { docx: false, tech: false }
     qaReport.value = null
     form.invitationId = ''
+    clearFormatPreview()
     techDrawingSlot.value = blankTechDrawings()
+    drawingFill.value = ''
   }
   inviteFile.value = file
+}
+
+function onPickFile(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) assignInviteFile(file)
 }
 
 function onInviteDrop(ev: DragEvent) {
   ev.preventDefault()
   dragOverInvite.value = false
   const file = ev.dataTransfer?.files?.[0]
-  if (file) {
-    if (file !== inviteFile.value) {
-      hasParsed.value = false
-      parseNotes.value = []
-      parseOcr.value = null
-      attachmentMatch.value = null
-      result.value = null
-      qaReport.value = null
-      form.invitationId = ''
-      techDrawingSlot.value = blankTechDrawings()
-    }
-    inviteFile.value = file
-  }
+  if (file) assignInviteFile(file)
 }
 
 function mergeSlotStatus(payload: SlotStatus) {
@@ -1424,6 +1847,7 @@ async function refreshTechDrawings() {
   const invitationId = String(form.invitationId || '').trim()
   if (!invitationId) {
     techDrawingSlot.value = blankTechDrawings()
+    drawingFill.value = ''
     return
   }
   try {
@@ -1447,6 +1871,7 @@ async function refreshTechDrawings() {
       }
     } else {
       techDrawingSlot.value = blankTechDrawings()
+      drawingFill.value = ''
     }
   } catch {
     /* 图纸槽位读取失败不打断表单 */
@@ -1499,6 +1924,7 @@ function applyBriefToForm(brief: BidBrief) {
   if (!Array.isArray(form.outlineItems)) form.outlineItems = []
   if (!Array.isArray(form.bidRequirements)) form.bidRequirements = []
   if (!form.layoutMode) form.layoutMode = 'chapter5'
+  if (!form.structureMode) form.structureMode = form.layoutMode === 'outline' ? 'outline' : 'fixed'
   ensureDocumentFormat()
   ensurePerformanceRequirement()
   if (!Array.isArray(form.extraPlaceholders)) form.extraPlaceholders = []
@@ -1521,7 +1947,10 @@ async function loadRecordForm(item: TenderRecordItem) {
       return
     }
     applyBriefToForm(detail.brief)
+    knownFiles.value = { docx: Boolean(detail.docxFile), tech: Boolean(detail.techDocxFile) }
+    followAdvice.value = false
     hasParsed.value = true
+    vetoListOpen.value = false
     closeRecords()
     setPreviewFullscreen(false)
     advanceStep(1)
@@ -1581,6 +2010,7 @@ async function confirmDeleteRecord() {
     recordsTotal.value = Math.max(0, recordsTotal.value - 1)
     if (result.value?.id === item.id) {
       result.value = null
+      knownFiles.value = { docx: false, tech: false }
       if (currentStepIndex.value >= 2) {
         currentStepIndex.value = 1
       }
@@ -1611,6 +2041,7 @@ async function confirmClearMineRecords() {
     const deletedIds = new Set(data.ids || [])
     if (result.value?.id && deletedIds.has(result.value.id)) {
       result.value = null
+      knownFiles.value = { docx: false, tech: false }
       if (currentStepIndex.value >= 2) {
         currentStepIndex.value = 1
       }
@@ -1662,20 +2093,29 @@ onMounted(async () => {
     return
   }
   try {
-    const [data, bases, prompts, library] = await Promise.all([
+    const [data, bases, prompts, library, templates] = await Promise.all([
       fetchTenderDefaults(),
       listKnowledgeBases({ access: 'use' }).catch(() => [] as KnowledgeBaseItem[]),
       listPromptOptions().catch(() => []),
       fetchTenderLibrary().catch(() => null),
+      fetchFixedTemplates().catch(() => [] as FixedTemplate[]),
     ])
     qualification.value = data.qualification
     layoutTemplate.value = data.chapter5Template || null
+    fixedTemplates.value = templates.length ? templates : data.fixedTemplates || []
     catalogSlots.value = library?.slots?.length ? library.slots : data.slots || []
     slotStatuses.value = catalogSlots.value
     kbList.value = bases as KnowledgeBaseItem[]
     promptOptions.value = (prompts as import('@/lib/prompts-api').PromptOption[]) || []
-    const { qualification: _q, slots: _s, chapter5Template: _t, docPreview: _p, ...rest } =
-      data as TenderDefaultsLoose
+    const {
+      qualification: _q,
+      slots: _s,
+      chapter5Template: _t,
+      docPreview: _p,
+      fixedTemplates: _ft,
+      structureModes: _sm,
+      ...rest
+    } = data as TenderDefaultsLoose
     mergeBriefIntoForm(rest as Partial<BidBrief>)
     if (!Array.isArray(form.extraPlaceholders)) form.extraPlaceholders = []
     if (!Array.isArray(form.requiredSlotKeys)) form.requiredSlotKeys = []
@@ -1690,11 +2130,13 @@ onMounted(async () => {
     if (!Array.isArray(form.outlineItems)) form.outlineItems = []
     if (!Array.isArray(form.bidRequirements)) form.bidRequirements = []
     if (!form.layoutMode) form.layoutMode = 'chapter5'
+    if (!form.structureMode) form.structureMode = form.layoutMode === 'outline' ? 'outline' : 'fixed'
     ensureDocumentFormat()
     ensurePerformanceRequirement()
     if (form.includePlaceholders == null) form.includePlaceholders = false
     if (form.includeCommitment == null) form.includeCommitment = true
     form.techPlanNote = hydrateTechPlanNote(form)
+    formBaseline = JSON.parse(JSON.stringify(form)) as BidBrief
     void loadRecords()
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '加载默认值失败'
@@ -1731,6 +2173,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  window.clearInterval(parseClock)
   window.removeEventListener('keydown', onPreviewFullscreenKey, true)
   setPreviewFullscreen(false)
 })
@@ -1740,20 +2183,37 @@ type TenderDefaultsLoose = BidBrief & {
   slots?: SlotStatus[]
   chapter5Template?: Chapter5TemplateStatus
   docPreview?: string
+  fixedTemplates?: FixedTemplate[]
+  structureModes?: string[]
+}
+
+function assignQuoteFile(file: File) {
+  const name = file.name.trim().toLowerCase()
+  const ok = ['.xlsx', '.xlsm', '.docx', '.csv', '.pdf'].some((ext) => name.endsWith(ext))
+  if (!ok) {
+    error.value = '报价清单支持 Excel、Word、CSV 或 PDF'
+    if (quoteInput.value) quoteInput.value.value = ''
+    return
+  }
+  error.value = ''
+  if (file !== quoteFile.value) {
+    hasParsed.value = false
+  }
+  quoteFile.value = file
+  quoteRecordIds.value = []
+  quoteRecordItems.value = []
 }
 
 function onPickQuote(ev: Event) {
   const input = ev.target as HTMLInputElement
-  const file = input.files?.[0] ?? null
-  if (file !== quoteFile.value) {
-    // 补传/更换清单后必须重新识别，否则「识别并继续」会因 hasParsed 跳过解析
-    hasParsed.value = false
-  }
-  quoteFile.value = file
-  if (file) {
-    quoteRecordIds.value = []
-    quoteRecordItems.value = []
-  }
+  const file = input.files?.[0]
+  if (file) assignQuoteFile(file)
+}
+
+function onQuoteDrop(ev: DragEvent) {
+  dragOverQuote.value = false
+  const file = ev.dataTransfer?.files?.[0]
+  if (file) assignQuoteFile(file)
 }
 
 const quoteSourceLabel = computed(() => {
@@ -1880,6 +2340,118 @@ const techChapterItems = computed(() =>
   form.outlineItems.filter((item) => !item.skipped && isTechChapterKind(item.kind)),
 )
 
+function isOrgChapter(item: { title?: string }) {
+  return /施工组织/.test(item.title || '')
+}
+
+const boqInput = ref<HTMLInputElement | null>(null)
+const boqTargetId = ref('')
+const boqBusyId = ref('')
+const drawingPdfInput = ref<HTMLInputElement | null>(null)
+const drawingFill = ref('')
+const drawingBusy = ref(false)
+const dragOverBoqId = ref('')
+
+function pickBoq(item: { id?: string }) {
+  boqTargetId.value = item.id || ''
+  boqInput.value?.click()
+}
+
+async function onBoqFile(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  const id = boqTargetId.value
+  input.value = ''
+  if (!file || !id) return
+  const item = form.outlineItems.find((row) => row.id === id)
+  if (!item) return
+  error.value = ''
+  boqBusyId.value = id
+  try {
+    const data = await fillTechBoq(file)
+    item.draftBody = data.draftBody || ''
+    item.draftStatus = 'drafted'
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '工程量清单识别失败'
+  } finally {
+    boqBusyId.value = ''
+  }
+}
+
+async function onBoqDrop(item: { id?: string }, ev: DragEvent) {
+  dragOverBoqId.value = ''
+  const file = ev.dataTransfer?.files?.[0]
+  if (!file || !item.id) return
+  const row = form.outlineItems.find((it) => it.id === item.id)
+  if (!row) return
+  error.value = ''
+  boqBusyId.value = item.id
+  try {
+    const data = await fillTechBoq(file)
+    row.draftBody = data.draftBody || ''
+    row.draftStatus = 'drafted'
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '工程量清单识别失败'
+  } finally {
+    boqBusyId.value = ''
+  }
+}
+
+function pickDrawingPdf(replace: boolean) {
+  if (!String(form.invitationId || '').trim()) {
+    error.value = '请先识别邀请书，再上传图纸'
+    return
+  }
+  pendingSlotReplace.value = replace
+  drawingPdfInput.value?.click()
+}
+
+async function takeDrawingPdf(file: File, replace: boolean) {
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    error.value = '图纸只支持 PDF'
+    return
+  }
+  const invitationId = String(form.invitationId || '').trim()
+  if (!invitationId) {
+    error.value = '请先识别邀请书，再上传图纸'
+    return
+  }
+  error.value = ''
+  drawingBusy.value = true
+  try {
+    const data = await fillTechDrawing(file, invitationId, replace)
+    drawingFill.value = data.draftBody || ''
+    if (data.slot) {
+      techDrawingSlot.value = {
+        ...techDrawingSlot.value,
+        ...data.slot,
+        files: data.slot.files || [],
+      }
+      mergeSlotStatus(techDrawingSlot.value)
+    }
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '图纸识别失败'
+  } finally {
+    drawingBusy.value = false
+  }
+}
+
+async function onDrawingPdfFile(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  const replace = pendingSlotReplace.value
+  input.value = ''
+  if (!file) return
+  await takeDrawingPdf(file, replace)
+}
+
+function onDrawingPdfDrop(ev: DragEvent) {
+  dragOverDrawings.value = false
+  const file = ev.dataTransfer?.files?.[0]
+  if (!file) return
+  void takeDrawingPdf(file, !techDrawingSlot.value.fileCount)
+}
+
 const openTechExcerpt = ref<string>('')
 
 function applyDraftBrief(brief: BidBrief) {
@@ -1971,6 +2543,74 @@ function removePerformanceRow(index: number) {
   form.performanceLines.splice(index, 1)
 }
 
+function isPerfPlaceholder(row: PerformanceLine) {
+  return String(row.projectName || '').trim().startsWith('待补充类似业绩')
+}
+
+function isAutoPerfPlaceholder(row: PerformanceLine) {
+  if (!isPerfPlaceholder(row) || row.includeInBid === false) return false
+  if (
+    String(row.client || '').trim() ||
+    String(row.spec || '').trim() ||
+    String(row.contact || '').trim() ||
+    String(row.location || '').trim()
+  ) {
+    return false
+  }
+  if (Number(row.amountYuan) > 0) return false
+  const summary = String(row.summary || '').trim()
+  if (summary && summary !== '待补充') return false
+  const note = String(row.note || '').trim()
+  if (note && !note.includes('资料库未匹配')) return false
+  return true
+}
+
+function padPerformancePlaceholders() {
+  if (!Array.isArray(form.performanceLines)) form.performanceLines = []
+  const req = form.performanceRequirement
+  const kept = form.performanceLines.filter((row) => !isAutoPerfPlaceholder(row))
+  if (!performanceRequirementActive(req)) {
+    form.performanceLines = kept
+    return
+  }
+  const need = Number(req.minCount) || 0
+  let passed = 0
+  let held = 0
+  for (const row of kept) {
+    if (isPerfPlaceholder(row)) {
+      if (row.includeInBid !== false) held += 1
+      continue
+    }
+    const name = String(row.projectName || '').trim()
+    if (!name || isWeakPerfTitle(name) || row.includeInBid === false) continue
+    if (matchPerformanceLine(row, req).passed) passed += 1
+  }
+  let gap = 0
+  if (need > 0) gap = Math.max(0, need - passed - held)
+  else if (passed === 0 && held === 0) gap = 1
+  const label = formatPerformanceRequirement(req)
+  const used = new Set(kept.map((row) => String(row.projectName || '').trim()))
+  let n = 1
+  for (let i = 0; i < gap; i++) {
+    let name = ''
+    while (!name || used.has(name)) {
+      name = `待补充类似业绩${n}`
+      n += 1
+    }
+    let note = '资料库未匹配到符合门槛的合同，生成时先占位，可手工补。'
+    if (label) note = `招标要求：${label}。${note}`
+    kept.push({
+      ...emptyPerformanceLine(),
+      projectName: name,
+      summary: '待补充',
+      note,
+      includeInBid: true,
+    })
+    used.add(name)
+  }
+  form.performanceLines = kept
+}
+
 function ensurePerformanceRequirement() {
   if (!Array.isArray(form.performanceLines)) form.performanceLines = []
   for (const row of form.performanceLines) {
@@ -1978,11 +2618,10 @@ function ensurePerformanceRequirement() {
   }
   if (!form.performanceRequirement || typeof form.performanceRequirement !== 'object') {
     form.performanceRequirement = emptyPerformanceRequirement()
-    return
-  }
-  if (!Array.isArray(form.performanceRequirement.keywords)) {
+  } else if (!Array.isArray(form.performanceRequirement.keywords)) {
     form.performanceRequirement.keywords = []
   }
+  padPerformancePlaceholders()
 }
 
 function performanceRowMatch(row: PerformanceLine) {
@@ -1995,8 +2634,14 @@ const performanceMatchPassed = computed(
   () =>
     form.performanceLines.filter(
       (row) =>
-        row.includeInBid !== false && matchPerformanceLine(row, form.performanceRequirement).passed,
+        row.includeInBid !== false &&
+        !isPerfPlaceholder(row) &&
+        matchPerformanceLine(row, form.performanceRequirement).passed,
     ).length,
+)
+
+const performancePlaceholderCount = computed(
+  () => form.performanceLines.filter((row) => row.includeInBid !== false && isPerfPlaceholder(row)).length,
 )
 
 const performanceSelectedCount = computed(
@@ -2005,13 +2650,18 @@ const performanceSelectedCount = computed(
 
 const performanceMatchSummary = computed(() => {
   const total = form.performanceLines.length
-  if (!total) return '尚未填写，上传资料库合同或识别邀请书后会抽出项目、买方、金额'
+  const ph = performancePlaceholderCount.value
+  if (!total) return '尚未填写。邀请书写了业绩要求时，没对上的会先占位'
   if (!performanceRequirementActive(form.performanceRequirement)) {
     return `${total} 条 · 未抽出本标业绩门槛 · 写入本标 ${performanceSelectedCount.value}`
   }
-  const passed = performanceMatchPassed.value
+  const bits = [
+    `${total} 条`,
+    `资料库符合 ${performanceMatchPassed.value}`,
+    `写入本标 ${performanceSelectedCount.value}`,
+  ]
+  if (ph) bits.push(`未匹配 ${ph} 条已占位`)
   const need = form.performanceRequirement.minCount
-  const bits = [`${total} 条`, `符合 ${passed}`, `写入本标 ${performanceSelectedCount.value}`]
   if (need > 0) bits.push(`招标要求至少 ${need} 个`)
   return bits.join(' · ')
 })
@@ -2124,6 +2774,11 @@ async function onParseInvitation() {
   }
   error.value = ''
   parsing.value = true
+  parseElapsed.value = 0
+  window.clearInterval(parseClock)
+  parseClock = window.setInterval(() => {
+    parseElapsed.value += 1
+  }, 1000)
   try {
     const data = await parseTenderInvitation(inviteFile.value, {
       kbIds: selectedKbIds.value,
@@ -2149,12 +2804,17 @@ async function onParseInvitation() {
     if (!Array.isArray(form.outlineItems)) form.outlineItems = []
     if (!Array.isArray(form.bidRequirements)) form.bidRequirements = []
     if (!form.layoutMode) form.layoutMode = 'chapter5'
+    if (!form.structureMode) form.structureMode = form.layoutMode === 'outline' ? 'outline' : 'fixed'
+    form.formatConfirmed = false
+    formatPreviewFile.value = ''
+    formatPreviewOpen.value = false
     ensureDocumentFormat()
     ensurePerformanceRequirement()
     parseNotes.value = data.notes || []
     parseNotesEpoch.value += 1
     parseExtraOpen.value = false
     parseMatchListOpen.value = false
+    vetoListOpen.value = false
     attachmentMatch.value = data.attachmentMatch || null
     parseOcr.value = {
       pageCount: data.pageCount || 0,
@@ -2167,13 +2827,24 @@ async function onParseInvitation() {
     await refreshLibrary()
     refreshAttachmentMatch()
     hasParsed.value = true
+    followAdvice.value = true
     volumeHint.value = ''
     techDrawingSlot.value = blankTechDrawings()
+    drawingFill.value = ''
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '识别邀请书失败'
   } finally {
+    window.clearInterval(parseClock)
     parsing.value = false
   }
+}
+
+function parseWaitLabel() {
+  const n = parseElapsed.value
+  const m = Math.floor(n / 60)
+  const s = n % 60
+  if (m <= 0) return `${s} 秒`
+  return `${m} 分 ${s} 秒`
 }
 
 function pickSlotFile(slot: SlotStatus, replace: boolean) {
@@ -2283,6 +2954,7 @@ async function onClearSlot(slot: SlotStatus) {
       fileCount: 0,
       files: [],
     })
+    if (slot.key === TECH_DRAWING_KEY) drawingFill.value = ''
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '清除失败'
   } finally {
@@ -2317,10 +2989,38 @@ async function onUploadStepNext() {
   document.getElementById('tender-parse-notes')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+function withDrawingNote(items: typeof form.outlineItems) {
+  const note = drawingFill.value.trim()
+  if (activeVolume.value !== 'technical' || !note) return items
+  if (items.some((item) => (item.draftBody || '').includes(note.slice(0, 40)))) return items
+  return [
+    ...items,
+    {
+      id: 'drawing-fill',
+      title: '图纸说明',
+      kind: 'tech_chapter',
+      source: 'generate',
+      required: false,
+      skipped: false,
+      body: '',
+      inviteExcerpt: '',
+      draftBody: note,
+      draftStatus: 'drafted',
+      level: 1,
+      rawTitle: '',
+    },
+  ]
+}
+
 async function doGenerate() {
   error.value = ''
   if (workflowLocked.value) {
     error.value = '当前任务已进入审批或已定稿，仅可预览'
+    return
+  }
+  // 轨道B：按本标生成前必须先确认大纲，避免抽取错了照样出稿
+  if (form.structureMode === 'outline' && !form.formatConfirmed) {
+    error.value = '按本标生成前请先预览并确认使用这份模板'
     return
   }
   generating.value = true
@@ -2331,8 +3031,16 @@ async function doGenerate() {
       includePlaceholders: false,
       requiredSlotKeys: effectiveRequiredKeys.value,
       includeSlotKeys: effectiveIncludeKeys.value,
-      outlineItems: pruneUnknownOutline(form.outlineItems),
-      generateVolume: activeVolume.value,
+      outlineItems: withDrawingNote(pruneUnknownOutline(form.outlineItems)),
+      generateVolume: activeVolume.value as string,
+      generateBoth: pendingBoth.value,
+      structureMode: form.structureMode,
+      layoutMode: form.structureMode === 'outline' ? 'outline' : 'chapter5',
+      contentTemplateId: form.contentTemplateId,
+    }
+    if (followAdvice.value && !payload.generateBoth) {
+      if (form.volumeAdvice === 'full') payload.generateVolume = 'full'
+      else if (form.volumeAdvice === 'split') payload.generateBoth = true
     }
     if (result.value?.id) {
       result.value = await regenerateTenderRecord(result.value.id, payload)
@@ -2348,6 +3056,7 @@ async function doGenerate() {
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '生成预览失败'
   } finally {
+    pendingBoth.value = false
     generating.value = false
   }
 }
@@ -2400,12 +3109,24 @@ watch(currentStepIndex, (index) => {
   void runTenderQa()
 })
 
+async function onGenerateCurrent() {
+  pendingBoth.value = false
+  await onFormStepNext()
+}
+
+async function onGenerateBoth() {
+  pendingBoth.value = true
+  await onFormStepNext()
+}
+
 async function onFormStepNext() {
   if (generateBlockers.value.length) {
+    pendingBoth.value = false
     error.value = `请先完善：${generateBlockers.value.join('、')}`
     return
   }
   if (workflowLocked.value) {
+    pendingBoth.value = false
     error.value = '当前任务已进入审批或已定稿，仅可预览'
     return
   }
@@ -2417,7 +3138,10 @@ async function onFormStepNext() {
 }
 
 function onConfirmDateOpen(open: boolean) {
-  if (!open && !generating.value) confirmDateOpen.value = false
+  if (!open && !generating.value) {
+    confirmDateOpen.value = false
+    pendingBoth.value = false
+  }
 }
 
 async function confirmBidDate() {
@@ -2439,6 +3163,7 @@ function onConfirmGenerateOpen(open: boolean) {
   if (!open && !generating.value) {
     confirmGenerateOpen.value = false
     pendingRegenItem.value = null
+    pendingBoth.value = false
   }
 }
 
@@ -2453,26 +3178,154 @@ async function confirmGenerateAgain() {
   await doGenerate()
 }
 
-function onPreviewStepNext() {
+async function flushBidEdit(): Promise<boolean> {
+  if (!bidEditorRef.value) return true
+  if (bidSaveBusy.value) return false
+  bidSaveBusy.value = true
+  error.value = ''
+  try {
+    await bidEditorRef.value.flushSave()
+    return true
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '文稿保存失败'
+    return false
+  } finally {
+    bidSaveBusy.value = false
+  }
+}
+
+async function switchPreviewVolume(vol: BidVolume) {
+  if (vol === previewVolume.value) return
+  if (!(await flushBidEdit())) return
+  previewVolume.value = vol
+}
+
+async function onPreviewStepNext() {
+  if (!(await flushBidEdit())) return
   setPreviewFullscreen(false)
   advanceStep(3)
 }
 
-function onQaStepNext() {
-  advanceStep(4)
+async function leavePreviewToTasks() {
+  if (!(await flushBidEdit())) return
+  setPreviewFullscreen(false)
+  await router.push('/work-tasks')
 }
 
-function onStepBack() {
-  if (currentStepIndex.value > 0) {
-    if (currentStepIndex.value === 2) setPreviewFullscreen(false)
-    currentStepIndex.value -= 1
-    error.value = ''
+const reachedDownload = computed(() => maxStepReached.value >= 4)
+
+const wizardDirty = computed(
+  () =>
+    currentStepIndex.value > 0 ||
+    hasParsed.value ||
+    !!inviteFile.value ||
+    !!quoteFile.value ||
+    quoteRecordIds.value.length > 0 ||
+    !!result.value,
+)
+
+const canResetWizard = computed(
+  () =>
+    !reachedDownload.value &&
+    wizardDirty.value &&
+    !resetting.value &&
+    !parsing.value &&
+    !generating.value &&
+    !publishing.value,
+)
+
+function askResetWizard() {
+  if (!canResetWizard.value) return
+  confirmResetOpen.value = true
+}
+
+function onConfirmResetOpen(open: boolean) {
+  if (!open && !resetting.value) confirmResetOpen.value = false
+}
+
+function applyWizardReset() {
+  if (formBaseline) applyBriefToForm(formBaseline)
+  else applyBriefToForm(emptyBrief())
+  inviteFile.value = null
+  quoteFile.value = null
+  quoteRecordIds.value = []
+  quoteRecordItems.value = []
+  parseNotes.value = []
+  parseOcr.value = null
+  attachmentMatch.value = null
+  result.value = null
+  knownFiles.value = { docx: false, tech: false }
+  qaReport.value = null
+  qaError.value = ''
+  hasParsed.value = false
+  volumeHint.value = ''
+  success.value = ''
+  techDrawingSlot.value = blankTechDrawings()
+  drawingFill.value = ''
+  clearFormatPreview()
+  setPreviewFullscreen(false)
+  showRecords.value = false
+  currentStepIndex.value = 0
+  maxStepReached.value = 0
+  if (fileInput.value) fileInput.value.value = ''
+  if (quoteInput.value) quoteInput.value.value = ''
+}
+
+async function confirmResetWizard() {
+  if (reachedDownload.value) {
+    confirmResetOpen.value = false
+    return
   }
+  resetting.value = true
+  error.value = ''
+  const draftId = result.value?.status === 'draft' ? result.value.id || '' : ''
+  try {
+    if (draftId) await deleteTenderRecord(draftId)
+    applyWizardReset()
+    confirmResetOpen.value = false
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '重置失败'
+  } finally {
+    resetting.value = false
+  }
+}
+
+async function onQaStepNext() {
+  const id = result.value?.id
+  const status = result.value?.status || ''
+  if (id && status === 'draft') {
+    publishing.value = true
+    error.value = ''
+    try {
+      const published = await publishTenderRecord(id)
+      if (result.value && result.value.id === id) {
+        result.value = { ...result.value, ...published }
+      }
+    } catch (e) {
+      error.value = e instanceof ApiError || e instanceof Error ? e.message : '写入生成记录失败'
+      return
+    } finally {
+      publishing.value = false
+    }
+  }
+  advanceStep(4)
+  void loadRecords()
+}
+
+async function onStepBack() {
+  if (currentStepIndex.value <= 0) return
+  if (currentStepIndex.value === 2) {
+    if (!(await flushBidEdit())) return
+    setPreviewFullscreen(false)
+  }
+  currentStepIndex.value -= 1
+  error.value = ''
 }
 
 async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   const r = result.value
   if (!r) return
+  if (currentStepIndex.value === 2 && !(await flushBidEdit())) return
   const picked =
     kind === 'tech'
       ? volumeDocx(r, 'technical')
@@ -2501,7 +3354,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     class="tender-page-header"
     :class="{ 'tender-page-header--preview': currentStepIndex === 2 }"
     title="AI标书生成"
-    :description="currentStepIndex === 2 ? '' : '缺扫描件仍可生成：Word 附件区用虚线框占位，补齐后重新生成即可。公司名称、报价清单等基本信息仍需先填。'"
+    :description="currentStepIndex === 2 ? '' : '缺扫描件仍可生成：Word 附件区用虚线框占位，补齐后重新生成即可。公司名称等基本信息仍需先填。未上传报价清单时不填写报价分项。'"
   >
     <template #badges>
       <div
@@ -2532,6 +3385,16 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       </div>
     </template>
     <template #actions>
+      <button
+        type="button"
+        class="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        :disabled="!canResetWizard"
+        :title="reachedDownload ? '已到下载定稿，记录已保留' : '回到上传邀请书，本次未定稿不会写入生成记录'"
+        @click.stop="askResetWizard"
+      >
+        <RotateCcw class="size-3.5" :class="{ 'animate-spin': resetting }" />
+        重置
+      </button>
       <button
         type="button"
         class="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[12px] transition-colors"
@@ -2572,7 +3435,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       <div class="min-w-0">
         <h2 id="tender-records-title" class="text-[14px] font-semibold">我的生成记录</h2>
         <p class="text-[11px] text-muted-foreground mt-0.5">
-          首次生成会创建一条工作任务；编制中再次生成会覆盖同一条，不改变审批状态。
+          走到「下载定稿」后才会出现在这里。之后再次生成会覆盖同一条，不改变审批状态。
         </p>
       </div>
       <div class="flex shrink-0 items-center gap-2">
@@ -2613,7 +3476,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       <Loader2 class="inline size-4 animate-spin mr-2" />加载记录…
     </div>
     <p v-else-if="!records.length" class="mt-4 text-[12px] text-muted-foreground text-center py-6">
-      暂无记录。在「填表生成」点「生成并预览」后会出现在这里。
+      暂无记录。走到「下载定稿」后才会出现在这里。
     </p>
     <ul v-else class="mt-3 divide-y divide-border/70">
       <li
@@ -2759,7 +3622,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       ref="fileInput"
       type="file"
       class="hidden"
-      accept=".pdf,.docx,.xlsx,.txt,.md,.csv,.png,.jpg,.jpeg,.webp"
+      accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       @change="onPickFile"
     />
     <input
@@ -2777,6 +3640,20 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,application/pdf,image/*"
       @change="onSlotFileChange"
     />
+    <input
+      ref="boqInput"
+      type="file"
+      class="hidden"
+      accept=".xlsx,.xlsm,.docx,.csv,.pdf"
+      @change="onBoqFile"
+    />
+    <input
+      ref="drawingPdfInput"
+      type="file"
+      class="hidden"
+      accept=".pdf,application/pdf"
+      @change="onDrawingPdfFile"
+    />
 
     <!-- 步骤 1：上传邀请书 -->
     <section v-if="currentStepIndex === 0" class="tender-step-panel">
@@ -2789,7 +3666,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <div class="min-w-0">
               <h2 class="text-[14px] font-semibold text-foreground">甲方邀请书</h2>
               <p class="text-[11px] text-muted-foreground mt-0.5">
-                支持 PDF、Word、图片；报价清单可上传 Excel，或勾选「AI报价智能体」记录
+                只支持 Word（.doc / .docx）。未上传邀请书时不能识别。
               </p>
             </div>
           </div>
@@ -2809,16 +3686,33 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             {{ inviteFile ? inviteFile.name : '点击或拖拽上传投标邀请书' }}
           </p>
           <p class="text-[11px] text-muted-foreground mt-1">
-            {{ inviteFile ? '点击可更换文件' : `PDF / DOCX / 图片，单文件最大 ${fmtSize(KB_UPLOAD_MAX_BYTES)}` }}
+            {{ inviteFile ? '点击可更换文件' : `仅 .doc / .docx，单文件最大 ${fmtSize(KB_UPLOAD_MAX_BYTES)}` }}
           </p>
         </button>
 
-        <div v-if="inviteFile" class="mt-3 space-y-2">
-          <div class="flex flex-wrap items-center gap-2">
-            <button type="button" class="tender-ghost-btn" @click="quoteInput?.click()">
-              <Upload class="size-3.5" />
-              上传清单
-            </button>
+        <div class="mt-4">
+          <p class="text-[13px] font-medium text-foreground">报价清单</p>
+          <p class="text-[11px] text-muted-foreground mt-0.5">
+            可选。Excel / Word，或从报价记录选择。未上传则生成时不填写报价分项。
+          </p>
+          <button
+            type="button"
+            class="tender-dropzone w-full mt-2"
+            :class="{ 'tender-dropzone--active': dragOverQuote, 'tender-dropzone--filled': hasQuoteSource }"
+            @click="quoteInput?.click()"
+            @dragover.prevent="dragOverQuote = true"
+            @dragleave.prevent="dragOverQuote = false"
+            @drop.prevent="onQuoteDrop"
+          >
+            <Upload class="size-8 text-muted-foreground/70 mb-2" />
+            <p class="text-[13px] font-medium text-foreground">
+              {{ quoteSourceLabel || '点击或拖拽上传报价清单' }}
+            </p>
+            <p class="text-[11px] text-muted-foreground mt-1">
+              {{ hasQuoteSource ? '点击可更换文件' : '可不传。支持 .xlsx / .docx / .csv / .pdf' }}
+            </p>
+          </button>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
             <button type="button" class="tender-ghost-btn" @click="openQuotePicker">
               <FileSpreadsheet class="size-3.5" />
               从报价记录选
@@ -2832,10 +3726,6 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               清除
             </button>
           </div>
-          <p class="text-[11px] text-muted-foreground truncate">
-            <template v-if="quoteSourceLabel">已选：{{ quoteSourceLabel }}</template>
-            <template v-else>报价清单（生成必填）：本地 Excel/Word，或勾选一条/多条 AI 报价记录</template>
-          </p>
         </div>
 
         <div v-if="kbList.length" class="mt-4 pt-4 border-t border-border/60">
@@ -2873,13 +3763,14 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         <span />
         <button
           type="button"
-          class="tender-primary-btn min-w-[160px]"
+          class="tender-primary-btn min-w-[220px]"
           :disabled="parsing || !inviteFile"
+          :title="inviteFile ? '' : '请先上传投标邀请书'"
           @click="onUploadStepNext"
         >
           <Loader2 v-if="parsing" class="size-3.5 animate-spin" />
           <Sparkles v-else class="size-3.5" />
-          {{ parsing ? '正在识别…' : '识别并继续' }}
+          {{ parsing ? `正在读取招标文件… ${parseWaitLabel()}` : '识别并继续' }}
           <ChevronRight v-if="!parsing" class="size-3.5" />
         </button>
       </footer>
@@ -2938,9 +3829,9 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       <Panel
         title="组卷模板"
         :subtitle="
-          form.layoutMode === 'outline'
-            ? `当前只列出${activeVolume === 'technical' ? '技术标' : '商务标'}条目；生成仍按整份大纲分卷，不改另一卷`
-            : '用公司固定投标文件格式组卷；下面清单只作对照，生成时不按这些条目排目录'
+          form.structureMode === 'outline'
+            ? `截出的格式章需预览并确认后才能生成`
+            : '按公司固定投标文件格式组卷'
         "
         collapsible
         :default-open="true"
@@ -2950,21 +3841,90 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           本标识别到格式章：{{ form.outlineChapter }}
         </p>
         <div class="mb-3 space-y-2 text-[11px]">
-          <div v-if="form.outlineItems.length" class="flex flex-wrap gap-3">
+          <div class="flex flex-wrap gap-3">
             <label class="inline-flex items-center gap-1.5">
-              <input v-model="form.layoutMode" type="radio" value="chapter5" class="accent-current" />
-              公司固定模板
+              <input
+                type="radio"
+                name="structure-mode"
+                :checked="form.structureMode === 'fixed'"
+                class="accent-current"
+                @change="setStructureMode('fixed')"
+              />
+              按固定模板生成
             </label>
             <label class="inline-flex items-center gap-1.5">
-              <input v-model="form.layoutMode" type="radio" value="outline" class="accent-current" />
-              按本标招标书大纲
+              <input
+                type="radio"
+                name="structure-mode"
+                :checked="form.structureMode === 'outline'"
+                class="accent-current"
+                @change="setStructureMode('outline')"
+              />
+              按本标招标书要求生成
             </label>
           </div>
           <div
-            v-if="form.layoutMode === 'chapter5'"
+            v-if="form.structureMode === 'fixed'"
             class="flex flex-wrap items-center gap-2 text-muted-foreground"
           >
-            <span>{{ layoutTemplate?.label || '内置投标文件格式' }}</span>
+            <label>接标模板</label>
+            <select v-model="form.contentTemplateId" class="h-7 rounded-md border border-border bg-background px-2 text-[11px]">
+              <option
+                v-for="t in fixedTemplates"
+                :key="t.id"
+                :value="t.id"
+                :disabled="!t.found"
+              >
+                {{ t.label }}{{ t.found ? '' : '（缺少空白稿）' }}
+              </option>
+            </select>
+            <span v-if="fixedTemplateLabel || layoutTemplate?.label" class="text-foreground/80">
+              {{ fixedTemplateLabel || layoutTemplate?.label || '内置投标文件格式' }}，章节直接进卷，不按本标目录重排
+            </span>
+            <ul
+              v-if="!activeFixedTemplate?.sections?.length"
+              class="basis-full flex flex-wrap items-center gap-1 text-muted-foreground"
+            >
+              <li>投标函</li>
+              <li>法定代表人身份证明</li>
+              <li>授权委托书</li>
+              <li>分项报价表</li>
+              <li>商务偏离表</li>
+              <li>企业业绩</li>
+              <li>原厂生产承诺</li>
+              <li>技术偏差表</li>
+              <li>技术方案</li>
+            </ul>
+            <ul
+              v-if="activeFixedTemplate?.sections?.length"
+              class="basis-full flex flex-wrap items-center gap-1 text-muted-foreground"
+            >
+              <li v-for="s in activeFixedTemplate.sections" :key="s">{{ s }}</li>
+              <li v-if="activeFixedTemplate.techTitle" class="text-foreground/70">
+                技术标：{{ activeFixedTemplate.techTitle }}
+              </li>
+              <li v-if="activeFixedTemplate.factoryRole">
+                原厂角色：{{ activeFixedTemplate.factoryRole }}
+              </li>
+              <li v-for="n in activeFixedTemplate.notes || []" :key="n" class="text-sulfur">
+                {{ n }}
+              </li>
+            </ul>
+            <ul
+              v-if="activeFixedTemplate?.health"
+              class="basis-full flex flex-wrap items-center gap-1"
+              :class="activeFixedTemplate.health.ok ? 'text-muted-foreground' : 'text-sulfur'"
+            >
+              <li v-if="activeFixedTemplate.health.ok">
+                标题体检通过，已识别锚点：{{ activeFixedTemplate.health.found.join('、') }}
+              </li>
+              <li v-else>
+                标题体检未通过，生成会被拦下。缺少：{{ activeFixedTemplate.health.missingRequired.join('、') }}
+              </li>
+              <li v-if="activeFixedTemplate.health.missingOptional?.length">
+                未识别可选章节：{{ activeFixedTemplate.health.missingOptional.join('、') }}
+              </li>
+            </ul>
             <input
               ref="layoutTemplateInput"
               type="file"
@@ -2974,217 +3934,86 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             />
             <button
               type="button"
-              class="text-[11px] underline underline-offset-2 hover:text-foreground"
+              class="text-[11px] underline underline-offset-2 hover:text-foreground disabled:opacity-50"
               :disabled="uploadingLayoutTemplate"
               @click="layoutTemplateInput?.click()"
             >
-              {{ uploadingLayoutTemplate ? '上传中…' : '更换 Word 空白稿' }}
+              {{ uploadingLayoutTemplate ? '上传中…' : '更换该模板空白稿' }}
             </button>
             <button
               v-if="layoutTemplate?.custom"
               type="button"
-              class="text-[11px] underline underline-offset-2 hover:text-foreground"
+              class="text-[11px] underline underline-offset-2 hover:text-foreground disabled:opacity-50"
               :disabled="uploadingLayoutTemplate"
               @click="onRestoreLayoutTemplate"
             >
               恢复内置
             </button>
           </div>
-        </div>
-        <div class="mb-3 rounded-md border border-border/60 px-2.5 py-2 space-y-2 text-[11px]" @change="form.documentFormat.specified = true">
-          <p class="text-muted-foreground leading-relaxed">
-            {{
-              form.documentFormat.specified
-                ? '已按邀请书抽出排版要求，生成时写入封面、目录和页码。可再改。'
-                : '邀请书未写明页边距/字体/页码时，用默认 A4、宋体；封面不编页码，从目录起页底居中连续编码。'
-            }}
-          </p>
-          <p v-if="form.documentFormat.notes.length" class="text-foreground/80 leading-relaxed">
-            {{ form.documentFormat.notes.join('；') }}
-          </p>
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">左边距 cm</span>
-              <input v-model.number="form.documentFormat.marginLeftCm" type="number" min="1" max="5" step="0.1" class="kb-input font-sans !py-1" />
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">右边距 cm</span>
-              <input v-model.number="form.documentFormat.marginRightCm" type="number" min="1" max="5" step="0.1" class="kb-input font-sans !py-1" />
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">上边距 cm</span>
-              <input v-model.number="form.documentFormat.marginTopCm" type="number" min="1" max="5" step="0.1" class="kb-input font-sans !py-1" />
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">下边距 cm</span>
-              <input v-model.number="form.documentFormat.marginBottomCm" type="number" min="1" max="5" step="0.1" class="kb-input font-sans !py-1" />
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">正文字体</span>
-              <select v-model="form.documentFormat.fontName" class="kb-input font-sans !py-1">
-                <option value="宋体">宋体</option>
-                <option value="仿宋">仿宋</option>
-                <option value="仿宋_GB2312">仿宋_GB2312</option>
-                <option value="黑体">黑体</option>
-                <option value="楷体">楷体</option>
-              </select>
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">正文磅值</span>
-              <input v-model.number="form.documentFormat.bodySizePt" type="number" min="8" max="26" step="0.5" class="kb-input font-sans !py-1" />
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">标题磅值</span>
-              <input v-model.number="form.documentFormat.headingSizePt" type="number" min="10" max="26" step="0.5" class="kb-input font-sans !py-1" />
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">目录编号</span>
-              <select v-model="form.documentFormat.tocNumbering" class="kb-input font-sans !py-1">
-                <option value="cn">一、二、三</option>
-                <option value="arabic">1. 2. 3.</option>
-                <option value="paren">(1) (2)</option>
-                <option value="attach">附件一、二</option>
-              </select>
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">页码位置</span>
-              <select v-model="form.documentFormat.pageNumberPos" class="kb-input font-sans !py-1">
-                <option value="bottom-center">页底居中</option>
-                <option value="bottom-right">右下角</option>
-                <option value="none">不编页码</option>
-              </select>
-            </label>
-            <label class="space-y-0.5">
-              <span class="text-muted-foreground">起编位置</span>
-              <select v-model="form.documentFormat.pageNumberStart" class="kb-input font-sans !py-1">
-                <option value="toc">封面不编，从目录起</option>
-                <option value="body">封面目录不编，从正文起</option>
-                <option value="cover">自封面连续编</option>
-              </select>
-            </label>
-          </div>
-          <div class="flex flex-wrap gap-x-3 gap-y-1">
-            <label class="inline-flex items-center gap-1 text-muted-foreground">
-              <input v-model="form.documentFormat.coverShowTenderNo" type="checkbox" class="accent-current" />
-              封面印招标编号
-            </label>
-            <label class="inline-flex items-center gap-1 text-muted-foreground">
-              <input v-model="form.documentFormat.coverShowCopyMark" type="checkbox" class="accent-current" />
-              封面印正本/副本
-            </label>
-            <label class="inline-flex items-center gap-1 text-muted-foreground">
-              <input v-model="form.documentFormat.coverNeedSeal" type="checkbox" class="accent-current" />
-              封面预留公章
-            </label>
-            <label class="inline-flex items-center gap-1 text-muted-foreground">
-              <input v-model="form.documentFormat.tocNeedPageNos" type="checkbox" class="accent-current" />
-              目录带页码（打开 Word 后可更新域）
-            </label>
-          </div>
-          <div v-if="form.documentFormat.coverShowCopyMark" class="flex items-center gap-2">
-            <span class="text-muted-foreground">封面份次</span>
-            <select v-model="form.documentFormat.coverCopyMark" class="kb-input font-sans !py-1 w-24">
-              <option value="正本">正本</option>
-              <option value="副本">副本</option>
-            </select>
+          <div
+            v-else
+            class="rounded-md border border-border/60 px-2.5 py-2 space-y-2"
+          >
+            <p class="text-muted-foreground leading-relaxed">
+              生成使用截出的格式章。先点「预览模板」修改或核对，再确认。确认后的这份（含改过的内容）才会用于生成。下面的目录只供核对。
+            </p>
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="h-7 px-2.5 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="formatPreviewBusy || !form.invitationId"
+                @click="openFormatPreview"
+              >
+                {{ formatPreviewBusy ? '打开中…' : '预览模板' }}
+              </button>
+              <button
+                type="button"
+                class="h-7 px-2.5 rounded-md border border-foreground/40 text-[11px] hover:bg-accent disabled:opacity-50"
+                :disabled="!formatPreviewFile || form.formatConfirmed || formatConfirmBusy"
+                @click="confirmFormatTemplate"
+              >
+                {{ formatConfirmBusy ? '保存中…' : '确认使用这份模板' }}
+              </button>
+              <span v-if="form.formatConfirmed" class="text-emerald-700 dark:text-emerald-400">
+                已确认使用这份模板，可生成
+              </span>
+              <span v-else-if="!form.invitationId" class="text-muted-foreground">
+                请先上传并识别 Word 招标文件
+              </span>
+              <span v-else-if="!formatPreviewFile" class="text-muted-foreground">
+                先预览，再确认
+              </span>
+            </div>
           </div>
         </div>
+        <template v-if="form.structureMode === 'outline'">
         <p v-if="!visibleOutlineItems.length" class="text-[11px] text-muted-foreground">
           {{
             form.outlineItems.length
               ? `当前${activeVolume === 'technical' ? '技术标' : '商务标'}没有对应目录。切到另一卷可看其余条目。`
-              : '未抽出格式章节。可换一份带「投标/响应文件格式」的招标书再识别，或继续用公司固定模板生成。'
+              : '未抽出格式章节。请上传带「投标/响应文件格式」的 Word 原件再识别，或继续用公司固定模板生成。'
           }}
-        </p>
-        <p
-          v-else-if="form.layoutMode === 'chapter5'"
-          class="mb-2 text-[11px] text-muted-foreground"
-        >
-          当前不会按下列条目组卷。若本标目录与公司模板不一致，请改选「按本标招标书大纲」。
         </p>
         <p
           v-else
           class="mb-2 text-[11px] text-muted-foreground"
         >
-          拖动手柄或点箭头可调整顺序；生成目录与正文按此顺序，跳过项不入卷。清单/模板按招标书原文复制。
+          下面是本标识别到的目录，只供核对，不参与组卷。
         </p>
         <ul
           v-if="visibleOutlineItems.length"
-          class="space-y-2"
-          :class="form.layoutMode === 'chapter5' ? 'opacity-60' : ''"
+          class="space-y-1"
         >
           <li
             v-for="(item, index) in visibleOutlineItems"
             :key="item.id || item.title"
-            class="flex flex-wrap items-center gap-2 rounded-md border border-border/60 px-2 py-1.5"
-            :class="{
-              'opacity-60': item.skipped,
-              'border-foreground/40': outlineDragOver === index,
-            }"
-            @dragover="onOutlineDragOver(index, $event)"
-            @drop.prevent="onOutlineDrop(index)"
+            class="flex items-baseline gap-2 px-1 py-0.5 text-[12px]"
           >
-            <span
-              class="inline-flex shrink-0 items-center text-muted-foreground"
-              :class="form.layoutMode === 'outline' ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed'"
-              :draggable="form.layoutMode === 'outline'"
-              title="拖动调整顺序"
-              @dragstart="onOutlineDragStart(index, $event)"
-              @dragend="onOutlineDragEnd"
-            >
-              <GripVertical class="size-3.5" />
-            </span>
             <span class="w-4 shrink-0 text-center text-[11px] tabular-nums text-muted-foreground">{{ index + 1 }}</span>
-            <span class="inline-flex shrink-0 flex-col">
-              <button
-                type="button"
-                class="inline-flex h-3.5 items-center justify-center text-muted-foreground hover:text-foreground disabled:opacity-30"
-                :disabled="form.layoutMode !== 'outline' || index === 0"
-                title="上移"
-                @click="moveVisibleOutline(index, index - 1)"
-              >
-                <ChevronUp class="size-3" />
-              </button>
-              <button
-                type="button"
-                class="inline-flex h-3.5 items-center justify-center text-muted-foreground hover:text-foreground disabled:opacity-30"
-                :disabled="form.layoutMode !== 'outline' || index === visibleOutlineItems.length - 1"
-                title="下移"
-                @click="moveVisibleOutline(index, index + 1)"
-              >
-                <ChevronDown class="size-3" />
-              </button>
-            </span>
-            <span class="min-w-0 flex-1 text-[12px] font-medium leading-snug">{{ item.title }}</span>
-            <select
-              class="kb-input outline-kind-select"
-              :value="item.kind"
-              @change="setOutlineKind(item, ($event.target as HTMLSelectElement).value)"
-            >
-              <option
-                v-for="opt in OUTLINE_KIND_OPTIONS"
-                :key="opt.value"
-                :value="opt.value"
-              >
-                {{ opt.label }}
-              </option>
-            </select>
-            <label class="inline-flex items-center gap-1 text-[11px] text-muted-foreground whitespace-nowrap">
-              <input
-                type="checkbox"
-                class="accent-current"
-                :checked="item.skipped"
-                :disabled="item.kind === 'auth' && form.authEnabled"
-                :title="item.kind === 'auth' && form.authEnabled ? '已启用授权委托，不可跳过' : '跳过则不入卷'"
-                @change="setOutlineSkipped(item, ($event.target as HTMLInputElement).checked)"
-              />
-              跳过
-            </label>
-            <span class="text-[11px] text-muted-foreground whitespace-nowrap">
-              {{ outlineSourceLabel(item.source, item) }}{{ (item.body || '').trim() ? ' · 已抽原文' : '' }}{{ outlineAuthHint(item) ? ` · ${outlineAuthHint(item)}` : '' }}
-            </span>
+            <span class="min-w-0 flex-1 leading-snug">{{ item.title }}</span>
           </li>
         </ul>
+        </template>
       </Panel>
       <div v-if="matchHasRows && attachmentMatch" class="tender-card">
         <p class="text-[12px] font-medium text-foreground mb-2">资料库对照</p>
@@ -3225,6 +4054,94 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         >
           去资料库上传
         </button>
+      </div>
+      <div v-if="form.invitationId" class="tender-card">
+        <div class="flex items-center justify-between gap-2 mb-1">
+          <p class="text-[12px] font-medium text-foreground">否决项</p>
+          <button
+            v-if="vetoItems.length"
+            type="button"
+            class="text-[11px] text-muted-foreground underline underline-offset-2 shrink-0"
+            @click="vetoListOpen = !vetoListOpen"
+          >
+            {{ vetoListOpen ? '收起' : '展开' }}
+          </button>
+        </div>
+        <p class="text-[11px] text-muted-foreground leading-relaxed" :class="vetoListOpen ? 'mb-2' : ''">
+          当前{{ activeVolume === 'technical' ? '技术标' : '商务标' }}
+          <template v-if="vetoItems.length"> {{ vetoItems.length }} 条。</template>
+          <template v-else>没有否决项。</template>
+          <template v-if="vetoOtherCount">另一卷还有 {{ vetoOtherCount }} 条，切换左上角查看。</template>
+          重新识别会整份替换，这里的删除不会保留。不拦生成和下载。
+        </p>
+        <ul v-if="vetoListOpen && vetoItems.length" class="space-y-2">
+          <li
+            v-for="item in vetoItems"
+            :key="item.id"
+            class="text-[11px] leading-snug"
+          >
+            <p class="text-foreground">{{ item.text }}</p>
+            <p class="mt-0.5 text-muted-foreground">
+              {{ vetoStatusLabel(item.matchStatus) }}
+              <template v-if="item.matchNote"> · {{ item.matchNote }}</template>
+              <template v-if="item.sourceChapter"> · {{ item.sourceChapter }}</template>
+              <template v-if="item.sourcePage"> · 第{{ item.sourcePage }}页</template>
+            </p>
+            <p class="mt-0.5">
+              <button
+                type="button"
+                class="text-muted-foreground underline underline-offset-2"
+                @click="dropVeto(item.id)"
+              >
+                删除误报
+              </button>
+              <button
+                type="button"
+                class="ml-3 text-muted-foreground underline underline-offset-2"
+                @click="easeVeto(item.id)"
+              >
+                降为一般
+              </button>
+            </p>
+          </li>
+        </ul>
+      </div>
+      <div v-if="form.invitationId && compareItems.length" class="tender-card">
+        <p class="text-[12px] font-medium text-foreground mb-1">要求对照</p>
+        <p class="text-[11px] text-muted-foreground mb-2 leading-relaxed">
+          当前{{ activeVolume === 'technical' ? '技术标' : '商务标' }} {{ compareItems.length }} 条。只在本页核对，不写入投标文件。
+        </p>
+        <ul class="max-h-72 space-y-2 overflow-y-auto">
+          <li
+            v-for="item in compareItems"
+            :key="'cmp-' + item.id"
+            class="text-[11px] leading-snug"
+          >
+            <p class="text-foreground">{{ item.text }}</p>
+            <p class="mt-0.5 text-muted-foreground">
+              {{ compareAnswer(item) }}
+              <template v-if="item.respond && item.respond !== compareAnswer(item)"> · {{ item.respond }}</template>
+              <template v-if="item.attachToSection || item.sourceChapter">
+                · {{ item.attachToSection || item.sourceChapter }}
+              </template>
+            </p>
+          </li>
+        </ul>
+      </div>
+      <div v-if="form.invitationId" class="tender-card">
+        <p class="text-[12px] font-medium text-foreground mb-1">本卷版式</p>
+        <p class="text-[11px] text-muted-foreground mb-2 leading-relaxed">
+          当前{{ activeVolume === 'technical' ? '技术标' : '商务标' }}。标书写明的才改范本副本，没写的保持范本。
+        </p>
+        <ul v-if="activeFormatNotes.length" class="space-y-1 text-[11px] text-foreground">
+          <li v-for="(line, i) in activeFormatNotes" :key="'fmt-' + i">{{ line }}</li>
+        </ul>
+        <p v-else class="text-[11px] text-muted-foreground">
+          本卷未写页边距、字体、页码，生成时不改范本版式。
+        </p>
+        <p v-if="activeVolume === 'technical'" class="mt-1 text-[11px] text-muted-foreground">
+          技术标只保留格式章里的技术部分；没有单独技术标题时仍用整份截件。
+        </p>
       </div>
       <Panel
         v-if="showFormGenerateHints"
@@ -3348,7 +4265,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 若总价与清单含税不同，生成时只折算单价。
               </template>
               <template v-else>
-                尚未解析到工程量。请在下方上传 Excel/Word 或勾选报价记录并点「识别清单」，没有报价清单不能生成。
+                未上传报价清单。生成时不填写报价分项；需要填写可在上方或此处上传后点「识别清单」。
               </template>
             </span>
           </label>
@@ -3473,7 +4390,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <div class="flex flex-wrap items-center gap-1.5 shrink-0">
               <button type="button" class="tender-ghost-btn" @click="quoteInput?.click()">
                 <Upload class="size-3.5" />
-                {{ quoteFile ? '更换清单' : '上传清单' }}
+                {{ quoteFile ? '更换报价清单' : '报价清单' }}
               </button>
               <button type="button" class="tender-ghost-btn" @click="openQuotePicker">
                 <FileSpreadsheet class="size-3.5" />
@@ -3487,7 +4404,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                   !inviteFile
                     ? '请返回上一步重新上传邀请书'
                     : !hasQuoteSource
-                      ? '请先上传清单或勾选报价记录'
+                      ? '请先上传报价清单或勾选报价记录'
                       : ''
                 "
                 @click="reparseQuoteFromForm"
@@ -3550,7 +4467,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
 
       <Panel
         title="类似业绩"
-        subtitle="按本标邀请书抽出的业绩门槛预选；份数不够时不能生成"
+        subtitle="资料库对上的预选写入；没对上的先占位，不拦截生成"
       >
         <div class="flex items-center justify-between mb-2 gap-2">
           <p class="text-[12px] text-muted-foreground min-w-0">
@@ -3564,18 +4481,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             增行
           </button>
         </div>
-        <p
-          v-if="performanceReqLabel"
-          class="mb-2 text-[11px] leading-relaxed"
-          :class="
-            form.performanceLines.length &&
-            ((form.performanceRequirement.minCount > 0 &&
-              performanceMatchPassed < form.performanceRequirement.minCount) ||
-              performanceMatchPassed === 0)
-              ? 'text-sulfur'
-              : 'text-muted-foreground'
-          "
-        >
+        <p v-if="performanceReqLabel" class="mb-2 text-[11px] leading-relaxed text-muted-foreground">
           招标要求：{{ performanceReqLabel }}
         </p>
         <p v-else class="mb-2 text-[11px] text-muted-foreground leading-relaxed">
@@ -3600,7 +4506,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <tbody>
               <tr v-if="!form.performanceLines.length">
                 <td colspan="10" class="px-2 py-3 text-muted-foreground">
-                  资料库上传合同/发票时会识别项目名称、规格型号、买方、联系人、合同额、概况和是否在建。识别招标书后按本标门槛对照；也可在此手工改。
+                  邀请书写了类似业绩、资料库没对上时，会先占几行空位，可直接改。资料库合同识别后会按门槛勾选。
                 </td>
               </tr>
               <tr
@@ -3634,8 +4540,9 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                   <input v-model="row.ongoing" type="checkbox" title="勾选表示在建未竣工" />
                 </td>
                 <td class="px-1 py-1">
+                  <span v-if="isPerfPlaceholder(row)" class="text-muted-foreground">待补充</span>
                   <span
-                    v-if="performanceRequirementActive(form.performanceRequirement)"
+                    v-else-if="performanceRequirementActive(form.performanceRequirement)"
                     class="inline-block leading-snug"
                     :class="
                       performanceRowMatch(row).passed
@@ -3728,6 +4635,45 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           {{ form.legalPersonIdNo || '身份证未填' }}
           <template v-if="form.authEnabled"> · 授权委托已开</template>
         </template>
+        <div class="mb-3">
+          <label class="text-[12px] space-y-1 block">
+            <span class="text-muted-foreground">
+              本标法定代表人
+              <span v-if="legalPersonOptions.length > 1" class="tender-req" aria-hidden="true">*</span>
+            </span>
+            <select
+              v-model="form.legalPersonKey"
+              class="kb-input font-sans"
+              @change="applyLegalPerson"
+            >
+              <option value="">
+                {{ legalPersonOptions.length ? '请选择资料库中的身份证' : '资料库还没有识别出身份证' }}
+              </option>
+              <option v-for="person in legalPersonOptions" :key="person.key" :value="person.key">
+                {{ person.name || '未识别姓名' }} · {{ person.idNo }}{{ person.hasBack ? '' : '（缺反面）' }}
+              </option>
+            </select>
+          </label>
+          <p class="text-[11px] text-muted-foreground mt-1.5 leading-relaxed">
+            <template v-if="!legalPersonOptions.length">
+              请到投标资料库「法定代表人身份证正反面」上传正面和反面。同一人先传正面再传反面，可放多位，这里再选本标用谁。
+            </template>
+            <template v-else-if="legalPickMissing">
+              有多位法人证件。选定后填入姓名、性别、年龄、身份证号，生成时只贴这一人的正反面。
+            </template>
+            <template v-else>
+              生成时只贴所选这位的身份证。职务仍在下面手填，证上没有。
+            </template>
+            <button
+              v-if="canEditLibrary"
+              type="button"
+              class="text-foreground underline underline-offset-2 ml-0.5"
+              @click="router.push('/tender-library')"
+            >
+              去资料库上传
+            </button>
+          </p>
+        </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
           <label class="text-[12px] space-y-1">
             <span class="text-muted-foreground">法人姓名<span class="tender-req" aria-hidden="true">*</span></span>
@@ -3807,13 +4753,6 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             </button>
           </p>
         </div>
-
-        <p
-          v-if="!form.quoteLines.length"
-          class="text-[12px] p-2.5 rounded-md bg-sulfur/10 border border-sulfur/30 text-sulfur"
-        >
-          还没有报价清单。请在上方「报价与承诺」上传工程量 Excel 或勾选报价记录并点「识别清单」，否则不能生成。
-        </p>
 
         <div class="mt-3 rounded-lg border border-border/60 overflow-hidden">
           <button
@@ -4059,8 +4998,11 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             class="rounded-md border border-border/70 px-2.5 py-2 space-y-1.5"
           >
             <div class="flex items-center justify-between gap-2">
-              <p class="text-[12px] font-medium">{{ item.title }}</p>
+              <p class="text-[12px] font-medium">
+                {{ isOrgChapter(item) ? '上传工程量清单' : item.title }}
+              </p>
               <button
+                v-if="!isOrgChapter(item)"
                 type="button"
                 class="h-6 px-1.5 rounded border border-border text-[11px] hover:bg-accent disabled:opacity-50"
                 :disabled="draftingTech || Boolean(redraftingId)"
@@ -4068,6 +5010,23 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               >
                 {{ redraftingId === item.id ? '重写中…' : '重写本章' }}
               </button>
+            </div>
+            <div
+              v-if="isOrgChapter(item)"
+              class="tender-dropzone w-full cursor-pointer"
+              :class="{ 'tender-dropzone--active': dragOverBoqId === item.id }"
+              @click="pickBoq(item)"
+              @dragover.prevent="dragOverBoqId = item.id || ''"
+              @dragleave.prevent="dragOverBoqId = ''"
+              @drop.prevent="onBoqDrop(item, $event)"
+            >
+              <FileSpreadsheet class="size-6 text-muted-foreground/70 mb-1" />
+              <p class="text-[13px] font-medium">
+                {{ boqBusyId === item.id ? '正在识别工程量清单…' : '点击或拖拽上传工程量清单' }}
+              </p>
+              <p class="text-[11px] text-muted-foreground mt-1">
+                Excel / Word / CSV / PDF。识别后填入下方，不写入商务标报价。
+              </p>
             </div>
             <button
               v-if="item.inviteExcerpt || item.body"
@@ -4094,60 +5053,66 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         </div>
       </Panel>
 
-      <Panel title="本项目图纸" subtitle="写入技术标。换一份邀请书请重新上传，不要用其他项目图纸">
+      <Panel title="上传图纸" subtitle="只收 PDF。识别文字写入技术标，页图仍会贴上。换一份邀请书请重新上传">
         <div class="space-y-3">
           <div class="space-y-1.5">
-            <span class="text-[12px] text-muted-foreground">上传图纸</span>
             <div
               class="tender-dropzone w-full cursor-pointer"
               :class="{
                 'tender-dropzone--active': dragOverDrawings,
                 'tender-dropzone--filled': techDrawingSlot.fileCount > 0,
               }"
-              @click="pickSlotFile(techDrawingSlot, !techDrawingSlot.fileCount)"
+              @click="pickDrawingPdf(!techDrawingSlot.fileCount)"
               @dragover.prevent="dragOverDrawings = true"
               @dragleave.prevent="dragOverDrawings = false"
-              @drop.prevent="onDrawingsDrop"
+              @drop.prevent="onDrawingPdfDrop"
             >
               <ImagePlus class="size-7 text-muted-foreground/70 mb-2" />
               <p class="text-[13px] font-medium text-foreground">
                 {{
-                  uploadingKey === TECH_DRAWING_KEY
-                    ? '正在上传…'
+                  drawingBusy
+                    ? '正在识别图纸…'
                     : techDrawingSlot.fileCount
-                      ? `${techDrawingSlot.fileCount} 张图纸`
-                      : '点击或拖拽上传本项目图纸'
+                      ? `${techDrawingSlot.fileCount} 份图纸 PDF`
+                      : '点击或拖拽上传图纸 PDF'
                 }}
               </p>
               <p class="text-[11px] text-muted-foreground mt-1">
                 {{
                   techDrawingSlot.fileCount
                     ? slotFileLabel(techDrawingSlot) || '点击可继续追加'
-                    : 'PDF / PNG / JPG，仅用于本次技术标，不进投标资料库'
+                    : '仅 PDF，用于本次技术标，不进投标资料库'
                 }}
               </p>
             </div>
+            <textarea
+              v-if="drawingFill"
+              v-model="drawingFill"
+              rows="4"
+              class="kb-input font-sans min-h-[80px]"
+              placeholder="图纸识别结果。可直接改，生成技术标时写入。"
+            />
             <div v-if="techDrawingSlot.fileCount" class="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
                 class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent disabled:opacity-50"
-                :disabled="uploadingKey === TECH_DRAWING_KEY"
-                @click.stop="pickSlotFile(techDrawingSlot, true)"
+                :disabled="drawingBusy"
+                @click.stop="pickDrawingPdf(true)"
               >
                 覆盖
               </button>
               <button
                 type="button"
                 class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent disabled:opacity-50"
-                :disabled="uploadingKey === TECH_DRAWING_KEY"
-                @click.stop="pickSlotFile(techDrawingSlot, false)"
+                :disabled="drawingBusy"
+                @click.stop="pickDrawingPdf(false)"
               >
                 追加
               </button>
               <button
                 type="button"
                 class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent disabled:opacity-50"
-                :disabled="uploadingKey === TECH_DRAWING_KEY"
+                :disabled="drawingBusy"
                 @click.stop="onClearSlot(techDrawingSlot)"
               >
                 清除
@@ -4173,6 +5138,14 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           <ChevronLeft class="size-3.5" />
           上一步
         </button>
+        <button
+          type="button"
+          class="tender-ghost-btn"
+          :disabled="generateButtonDisabled"
+          @click="onGenerateBoth"
+        >
+          同时生成两卷
+        </button>
         <div
           class="tender-generate-wrap"
           :class="{ 'tender-generate-wrap--hint': !!generateButtonTooltip }"
@@ -4182,7 +5155,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             class="tender-primary-btn min-w-[180px]"
             :disabled="generateButtonDisabled"
             :aria-describedby="generateButtonTooltip ? 'tender-form-next-tip' : undefined"
-            @click="onFormStepNext"
+            @click="onGenerateCurrent"
           >
             <Loader2 v-if="generating" class="size-3.5 animate-spin" />
             <ChevronRight v-else class="size-3.5" />
@@ -4199,15 +5172,19 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         </div>
       </footer>
       <p class="mt-1 text-center text-[11px] text-muted-foreground">
-        当前将只生成{{ activeVolume === 'technical' ? '技术标' : '商务标' }} Word。左上角切换后再生成另一本。
+        {{ volumeStatusHint }}
       </p>
       <p v-if="generating" class="mt-2 text-[11px] text-muted-foreground text-center">
         {{
-          activeVolume === 'technical'
-            ? '正在生成技术标 Word…'
-            : form.attachQualifications
-              ? '正在写入商务标（资质已限页加速）…'
-              : '正在生成商务标 Word…'
+          followAdvice && form.volumeAdvice === 'full'
+            ? '正在生成投标文件…'
+            : followAdvice && form.volumeAdvice === 'split'
+              ? '正在按分册生成两卷…'
+              : activeVolume === 'technical'
+                ? '正在生成技术标 Word…'
+                : form.attachQualifications
+                  ? '正在写入商务标（资质已限页加速）…'
+                  : '正在生成商务标 Word…'
         }}
       </p>
     </section>
@@ -4217,9 +5194,9 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       <div class="tender-preview-shell" :class="{ 'tender-preview-shell--fs': previewFullscreen }">
         <div class="tender-card-head shrink-0 pb-3">
           <div class="min-w-0">
-            <h2 class="text-[14px] font-semibold text-foreground">Word 在线预览</h2>
+            <h2 class="text-[14px] font-semibold text-foreground">Word 在线改稿</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
-              当前预览格式基于本地 WPS。如果本机未装 WPS，请忽略预览格式问题，直接进行下一步，或点下载查看。
+              可直接修改。停笔后自动保存，离开本步也会再存一次。自检、下载和工作任务都用这份稿。
             </p>
           </div>
           <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
@@ -4235,7 +5212,8 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 :aria-selected="previewVolume === 'business'"
                 class="tender-volume-btn"
                 :class="{ 'tender-volume-btn--active': previewVolume === 'business' }"
-                @click="previewVolume = 'business'"
+                :disabled="bidSaveBusy"
+                @click="switchPreviewVolume('business')"
               >
                 商务标
               </button>
@@ -4245,7 +5223,8 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
                 :aria-selected="previewVolume === 'technical'"
                 class="tender-volume-btn"
                 :class="{ 'tender-volume-btn--active': previewVolume === 'technical' }"
-                @click="previewVolume = 'technical'"
+                :disabled="bidSaveBusy"
+                @click="switchPreviewVolume('technical')"
               >
                 技术标
               </button>
@@ -4323,14 +5302,15 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         </div>
 
         <TenderDocEditor
-          :key="`${previewDoc.file}-view`"
+          ref="bidEditorRef"
+          :key="`${previewDoc.file}-edit`"
           class="tender-preview-editor"
           :docx-file="previewDoc.file"
           :download-name="previewDoc.name"
           :fullscreen="previewFullscreen"
           :layout-tick="previewLayoutTick"
-          mode="view"
-          engine="browser"
+          mode="edit"
+          engine="onlyoffice"
         />
 
         <footer class="tender-step-footer tender-step-footer--preview shrink-0 pt-2">
@@ -4341,12 +5321,18 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           <button
             type="button"
             class="tender-ghost-btn"
-            @click="router.push('/work-tasks')"
+            :disabled="bidSaveBusy"
+            @click="leavePreviewToTasks"
           >
             去工作任务
           </button>
-          <button type="button" class="tender-primary-btn min-w-[160px]" @click="onPreviewStepNext">
-            去 AI 自检
+          <button
+            type="button"
+            class="tender-primary-btn min-w-[160px]"
+            :disabled="bidSaveBusy"
+            @click="onPreviewStepNext"
+          >
+            {{ bidSaveBusy ? '保存中…' : '去 AI 自检' }}
             <ChevronRight class="size-3.5" />
           </button>
         </footer>
@@ -4375,9 +5361,15 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         >
           去工作任务
         </button>
-        <button type="button" class="tender-primary-btn min-w-[160px]" @click="onQaStepNext">
-          去下载定稿
-          <ChevronRight class="size-3.5" />
+        <button
+          type="button"
+          class="tender-primary-btn min-w-[160px]"
+          :disabled="publishing"
+          @click="onQaStepNext"
+        >
+          <Loader2 v-if="publishing" class="size-3.5 animate-spin" />
+          {{ publishing ? '写入记录中…' : '去下载定稿' }}
+          <ChevronRight v-if="!publishing" class="size-3.5" />
         </button>
       </footer>
     </section>
@@ -4590,6 +5582,49 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     @update:open="onConfirmDateOpen"
     @confirm="confirmBidDate"
   />
+
+  <AppDialog
+    :open="formatPreviewOpen"
+    size="xl"
+    title="预览模板"
+    :description="`从上传的 Word 里截出的「${form.outlineChapter || '投标文件格式'}」。可直接删改，关闭或确认时写回。生成用这份。`"
+    @update:open="onFormatPreviewOpen"
+  >
+    <div class="flex min-h-0 flex-1 flex-col gap-2">
+      <TenderDocEditor
+        v-if="formatPreviewFile"
+        ref="formatEditorRef"
+        :key="formatPreviewFile"
+        class="min-h-0 flex-1"
+        :docx-file="formatPreviewFile"
+        download-name="招标文件格式章.docx"
+        mode="edit"
+        engine="onlyoffice"
+        :layout-tick="formatPreviewTick"
+      />
+    </div>
+    <template #footer>
+      <p v-if="formatSaveError" class="mr-auto max-w-[60%] truncate text-[11px] text-iron">
+        {{ formatSaveError }}
+      </p>
+      <button
+        type="button"
+        class="h-8 px-3 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-50"
+        :disabled="formatConfirmBusy"
+        @click="onFormatPreviewOpen(false)"
+      >
+        {{ formatConfirmBusy ? '保存中…' : '关闭' }}
+      </button>
+      <button
+        type="button"
+        class="h-8 px-3 text-xs rounded-md bg-foreground text-background hover:opacity-90 disabled:opacity-50"
+        :disabled="!formatPreviewFile || form.formatConfirmed || formatConfirmBusy"
+        @click="confirmFormatTemplate"
+      >
+        {{ form.formatConfirmed ? '已确认这份模板' : formatConfirmBusy ? '保存中…' : '确认使用这份模板' }}
+      </button>
+    </template>
+  </AppDialog>
   <AppAlertDialog
     :open="confirmGenerateOpen"
     :title="confirmGenerateTitle"
@@ -4612,6 +5647,16 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     :loading="!!deletingId"
     @update:open="onConfirmDeleteOpen"
     @confirm="confirmDeleteRecord"
+  />
+  <AppAlertDialog
+    :open="confirmResetOpen"
+    title="重置当前标书"
+    description="尚未走到下载定稿，重置后回到上传邀请书，本次进度不会写入生成记录。"
+    confirm-label="确认重置"
+    destructive
+    :loading="resetting"
+    @update:open="onConfirmResetOpen"
+    @confirm="confirmResetWizard"
   />
   <AppAlertDialog
     :open="confirmClearOpen"

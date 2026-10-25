@@ -209,6 +209,18 @@ function formatPerfAmount(amount: number): string {
   return `${Math.round(amount)}元`
 }
 
+export type LibraryFactField = {
+  name: string
+  value: string
+  conf?: number
+}
+
+export type LibraryFacts = {
+  role: string
+  fields: LibraryFactField[]
+  source?: string
+}
+
 export type SlotFileInfo = {
   id?: string
   fileId?: string
@@ -218,6 +230,15 @@ export type SlotFileInfo = {
   fileType?: string
   kind?: 'image' | 'pdf' | 'file'
   performance?: PerformanceLine
+  idCard?: {
+    side?: string
+    name?: string
+    gender?: string
+    idNo?: string
+    age?: string
+    personKey?: string
+  }
+  facts?: LibraryFacts
 }
 
 export type SlotStatus = {
@@ -266,6 +287,36 @@ export type OutlineKind =
 
 export type OutlineSource = 'generate' | 'copy' | 'skip'
 
+export type ContentTemplateId = 'general' | 'project' | 'material' | 'charger_cabinet' | string
+
+export type StructureMode = 'fixed' | 'outline'
+
+export type CopyPolicy = 'rewrite' | 'verbatim'
+
+export type TemplateHealth = {
+  ok: boolean
+  missingRequired: string[]
+  missingOptional: string[]
+  found: string[]
+  notes: string[]
+}
+
+export type FixedTemplate = {
+  id: string
+  label: string
+  source: string
+  found: boolean
+  sizeBytes: number
+  /** 标题体检结果：缺必需锚点时生成会被拦下。 */
+  health?: TemplateHealth
+  /** 画像摘要：四份固定模板的差异点。 */
+  techTitle?: string
+  sections?: string[]
+  quoteHeaders?: string[]
+  factoryRole?: string
+  notes?: string[]
+}
+
 export type OutlineItem = {
   id: string
   title: string
@@ -277,7 +328,32 @@ export type OutlineItem = {
   inviteExcerpt?: string
   draftBody?: string
   draftStatus?: string
+  /** 单节覆盖整单策略：空=跟整单。Phase0 冻结口径。 */
+  copyPolicy?: CopyPolicy | string
   level?: number
+  /** 1:1 忠实渲染：招标书里的原始序号（如「一、」「（一）」）。 */
+  label?: string
+  /** 1:1 忠实渲染：招标书里的原始标题文字（含序号），照抄不改。 */
+  rawTitle?: string
+}
+
+export type OutlinePreviewRow = {
+  id: string
+  title: string
+  kind: string
+  level: number
+  copyPolicy: string
+  excerptPreview: string
+  hasOriginal: boolean
+  needsConfirm: boolean
+  missing: string[]
+}
+
+export type OutlinePreview = {
+  chapter: string
+  structureMode: string
+  items: OutlinePreviewRow[]
+  warnings: string[]
 }
 
 export type BidRequirement = {
@@ -286,11 +362,61 @@ export type BidRequirement = {
   category: string
   targetKind: string
   targetTitle?: string
+  /** general 原分类；mandatory 否决项。这期不抽评分项。 */
+  strength?: 'mandatory' | 'general' | string
+  scoreWeight?: number | null
+  sourceChapter?: string
+  sourcePage?: string
+  /** matched 有证据；gap 有落点未填；unbound 格式章无此空；format 只提示 */
+  matchStatus?: 'matched' | 'gap' | 'unbound' | 'format' | string
+  slotKey?: string
+  matchNote?: string
+  /** 否决项必须是 business 或 technical，空的不进任何一卷 */
+  volume?: 'business' | 'technical' | string
+  respond?: string
+  attachToSection?: string
+  display?: string
+}
+
+export type RequirementCoverage = {
+  redLine: boolean
+  mandatoryCovered: number
+  mandatoryTotal: number
+  formatCount: number
+  rows: Array<{
+    id: string
+    text: string
+    volume?: string
+    matchStatus: string
+    matchNote: string
+    sourceChapter?: string
+    sourcePage?: string
+    slotKey?: string
+  }>
+}
+
+export type VolumeFormat = {
+  marginSet: boolean
+  marginLeftCm: number
+  marginRightCm: number
+  marginTopCm: number
+  marginBottomCm: number
+  fontSet: boolean
+  fontName: string
+  bodySizeSet: boolean
+  bodySizePt: number
+  pagePosSet: boolean
+  pageStartSet: boolean
+  pageNumberPos: string
+  pageNumberStart: string
+  notes: string[]
 }
 
 export type DocumentFormat = {
   specified: boolean
   notes: string[]
+  businessFormat?: VolumeFormat
+  technicalFormat?: VolumeFormat
   marginLeftCm: number
   marginRightCm: number
   marginTopCm: number
@@ -346,6 +472,7 @@ export type BidBrief = {
   legalPersonAge: string
   legalPersonTitle: string
   legalPersonIdNo: string
+  legalPersonKey?: string
   agentName: string
   agentIdNo: string
   agentAuthUntil: string
@@ -389,12 +516,26 @@ export type BidBrief = {
   schedulePlan: string
   techPlanNote: string
   layoutMode: string
+  contentTemplateId?: string
+  structureMode?: StructureMode | string
+  copyPolicy?: CopyPolicy | string
+  /** outline 轨渲染风格：verbatim=1:1 照抄招标书序号/标题/顺序；curated=系统重排重编号。 */
+  outlineRender?: 'verbatim' | 'curated' | string
+  outlineConfirmed?: boolean
+  /** 按本标：预览并确认截出的格式章后才允许生成。 */
+  formatConfirmed?: boolean
   outlineChapter: string
   outlineItems: OutlineItem[]
   bidRequirements?: BidRequirement[]
   documentFormat: DocumentFormat
   invitationId?: string
-  generateVolume?: 'business' | 'technical'
+  generateVolume?: 'business' | 'technical' | 'full'
+  /** 为 true 时同时出商务标和技术标。默认 false，只出当前卷。 */
+  generateBoth?: boolean
+  /** 解析结果：full 不强制分卷，split 分商务/技术。 */
+  volumeAdvice?: 'full' | 'split' | ''
+  techAnonymous?: boolean
+  volumeNote?: string
 }
 
 export type QualificationStatus = {
@@ -423,6 +564,12 @@ export type TenderDefaults = BidBrief & {
   slots: SlotStatus[]
   chapter5Template?: Chapter5TemplateStatus
   docPreview?: TenderDocPreview | string
+  /** 轨道A：固定模板下拉（Phase1）。 */
+  fixedTemplates?: FixedTemplate[]
+  contentTemplateId?: string
+  structureMode?: string
+  structureModes?: string[]
+  outlineConfirmed?: boolean
 }
 
 export type AttachmentMatchItem = {
@@ -482,6 +629,7 @@ export type QaReport = {
   hasInvitation: boolean
   llmUsed: boolean
   coverage: Record<string, QaCoverageBucket>
+  requirementCoverage?: RequirementCoverage
   missing: QaGap[]
   letterChecklist?: string[]
   checkedAt?: number
@@ -563,6 +711,10 @@ export type GenerateResult = {
   decidedAt?: number | null
   workflowLocked?: boolean
   userId?: number
+  generateVolume?: 'business' | 'technical' | string
+  otherVolume?: 'business' | 'technical' | string
+  otherVolumeReady?: boolean
+  otherVolumeNote?: string
   lastAction?: string
   lastComment?: string
   lastActor?: string
@@ -607,6 +759,10 @@ export type TenderRecordItem = {
   decidedAt?: number | null
   workflowLocked?: boolean
   userId?: number
+  generateVolume?: 'business' | 'technical' | string
+  otherVolume?: 'business' | 'technical' | string
+  otherVolumeReady?: boolean
+  otherVolumeNote?: string
   lastAction?: string
   lastComment?: string
   lastActor?: string
@@ -659,6 +815,42 @@ function token(): string {
 
 export async function fetchTenderDefaults(): Promise<TenderDefaults> {
   return apiRequest<TenderDefaults>('/api/v1/tenders/defaults', { token: token() })
+}
+
+/** 轨道A：固定模板列表。 */
+export async function fetchFixedTemplates(): Promise<FixedTemplate[]> {
+  const data = await apiRequest<{ items: FixedTemplate[] }>('/api/v1/tenders/fixed-templates', {
+    token: token(),
+  })
+  return data.items || []
+}
+
+/** 固定模板标题体检：上传自定义空白稿后可单独复检。 */
+export async function fetchFixedTemplateHealth(templateId: string): Promise<TemplateHealth> {
+  return apiRequest<TemplateHealth>(`/api/v1/tenders/fixed-templates/${templateId}/health`, {
+    token: token(),
+  })
+}
+
+/** 轨道B：大纲确认页数据，每节建议 rewrite/verbatim + 缺件提示。 */
+export async function previewTenderOutline(brief: BidBrief): Promise<OutlinePreview> {
+  return apiRequest<OutlinePreview>('/api/v1/tenders/outline/preview', {
+    method: 'POST',
+    token: token(),
+    body: { brief },
+  })
+}
+
+/** 用户确认大纲：回写 outlineItems 并置 outlineConfirmed，生成接口据此放行 outline 轨。 */
+export async function confirmTenderOutline(
+  brief: BidBrief,
+  items: OutlineItem[],
+): Promise<{ brief: BidBrief }> {
+  return apiRequest<{ brief: BidBrief }>('/api/v1/tenders/outline/confirm', {
+    method: 'POST',
+    token: token(),
+    body: { brief, items },
+  })
 }
 
 export async function uploadTenderLayoutTemplate(file: File): Promise<Chapter5TemplateStatus> {
@@ -817,6 +1009,17 @@ export async function clearTenderSlot(
   })
 }
 
+export async function updateLibraryFileFacts(
+  docId: string,
+  body: { role: string; fields: { name: string; value: string }[] },
+): Promise<SlotStatus> {
+  return apiRequest(`/api/v1/tenders/library/files/${encodeURIComponent(docId)}/facts`, {
+    method: 'PATCH',
+    token: token(),
+    body,
+  })
+}
+
 export async function deleteTenderLibraryFile(docId: string): Promise<SlotStatus> {
   return apiRequest(`/api/v1/tenders/library/files/${encodeURIComponent(docId)}`, {
     method: 'DELETE',
@@ -868,6 +1071,32 @@ export async function draftTenderTech(
       promptId: options.promptId || null,
       materialIds: options.materialIds || [],
     },
+  })
+}
+
+export async function fillTechBoq(file: File): Promise<{ draftBody: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  return apiRequest('/api/v1/tenders/tech/boq', {
+    method: 'POST',
+    token: token(),
+    body: form,
+  })
+}
+
+export async function fillTechDrawing(
+  file: File,
+  invitationId: string,
+  replace = true,
+): Promise<{ draftBody: string; slot: SlotStatus }> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('invitationId', invitationId)
+  form.append('replace', replace ? 'true' : 'false')
+  return apiRequest('/api/v1/tenders/tech/drawing-pdf', {
+    method: 'POST',
+    token: token(),
+    body: form,
   })
 }
 
@@ -1009,6 +1238,13 @@ export async function markTenderRecord(
   })
 }
 
+export async function publishTenderRecord(recordId: string): Promise<TenderRecordItem> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/publish`, {
+    method: 'POST',
+    token: token(),
+  })
+}
+
 export async function deleteTenderRecord(
   recordId: string,
 ): Promise<{ deleted: boolean; id: string; removedFiles: string[] }> {
@@ -1056,6 +1292,48 @@ export async function downloadTenderFile(fileName: string, downloadName: string)
 
 export async function fetchTenderDocxBlob(fileName: string): Promise<Blob> {
   return apiFetchBlob(`/api/v1/tenders/files/${encodeURIComponent(fileName)}`, { token: token() })
+}
+
+export async function prepareInvitationFormatDocx(invitationId: string): Promise<string> {
+  const data = await apiRequest<{ fileName?: string }>(
+    `/api/v1/tenders/invitations/${encodeURIComponent(invitationId)}/format-docx`,
+    { token: token() },
+  )
+  return String(data.fileName || '').trim()
+}
+
+export type HistoryChapter = {
+  volume: 'business' | 'technical' | string
+  chapterTitle: string
+  docId: string
+  verdict: 'good' | 'bad' | 'none' | string
+  problemTags: string[]
+  note: string
+  source: string
+}
+
+export async function fetchHistoryChapters(recordId: string): Promise<{
+  recordId: string
+  chapters: HistoryChapter[]
+}> {
+  const q = new URLSearchParams({ recordId })
+  return apiRequest(`/api/v1/tenders/history-bids/chapters?${q}`, { token: token() })
+}
+
+export async function saveHistoryMark(body: {
+  recordId?: string
+  docId?: string
+  volume: string
+  chapterTitle: string
+  verdict: 'good' | 'bad' | 'none'
+  problemTags?: string[]
+  note?: string
+}): Promise<HistoryChapter> {
+  return apiRequest('/api/v1/tenders/history-marks', {
+    method: 'PUT',
+    token: token(),
+    body,
+  })
 }
 
 export async function fetchTenderPreviewPdfBlob(fileName: string): Promise<Blob> {

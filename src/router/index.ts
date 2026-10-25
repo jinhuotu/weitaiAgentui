@@ -29,6 +29,7 @@ const MIGRATED_VIEWS: Record<string, () => Promise<{ default: Component }>> = {
   '/quotes-cost': () => import('@/views/QuotesView.vue'),
   '/quotes-budget': () => import('@/views/QuotesView.vue'),
   '/tender-library': () => import('@/views/TenderLibraryView.vue'),
+  '/history-bids': () => import('@/views/HistoryBidsView.vue'),
   '/work-tasks': () => import('@/views/WorkTasksView.vue'),
   '/tender-tasks': () => import('@/views/AllTenderTasksView.vue'),
   '/approval': () => import('@/views/ApprovalFlowView.vue'),

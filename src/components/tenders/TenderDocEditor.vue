@@ -23,6 +23,7 @@ const props = defineProps<{
 
 const loading = ref(true)
 const error = ref('')
+const dirty = ref(false)
 const activeEngine = ref<TenderDocPreview>('browser')
 const editorHost = ref<HTMLElement | null>(null)
 const editorRoot = ref<HTMLElement | null>(null)
@@ -30,11 +31,13 @@ const userZoom = ref(1)
 const MIN_ZOOM = 0.5
 const MAX_ZOOM = 2.2
 const ZOOM_STEP = 0.1
-let docEditor: { destroyEditor?: () => void } | null = null
+let docEditor: { destroyEditor?: () => void; forceSave?: () => void } | null = null
 let resizeObserver: ResizeObserver | null = null
 let notifyingResize = false
 let bootGen = 0
 let pdfObjectUrl = ''
+let saveWait: (() => void) | null = null
+let autoSaveTimer = 0
 
 declare global {
   interface Window {
@@ -42,7 +45,7 @@ declare global {
       DocEditor: (
         id: string,
         config: Record<string, unknown>,
-      ) => { destroyEditor?: () => void }
+      ) => { destroyEditor?: () => void; forceSave?: () => void }
     }
   }
 }
@@ -163,12 +166,10 @@ function destroyEditor() {
 
 function loadScript(src: string): Promise<void> {
   const existing = document.querySelector(`script[data-onlyoffice="1"]`) as HTMLScriptElement | null
-  if (existing?.src === src) {
+  if (existing?.src === src && window.DocsAPI) {
     return Promise.resolve()
   }
-  if (existing) {
-    existing.remove()
-  }
+  existing?.remove()
   return new Promise((resolve, reject) => {
     const script = document.createElement('script')
     script.src = src
@@ -284,6 +285,21 @@ async function bootOnlyOffice(gen: number) {
   const config = {
     ...(data.config as Record<string, unknown>),
     events: {
+      onDocumentStateChange(event: { data?: boolean } | boolean) {
+        const changed = typeof event === 'boolean' ? event : !!event?.data
+        dirty.value = changed
+        if (!changed && saveWait) {
+          const done = saveWait
+          saveWait = null
+          done()
+        }
+        window.clearTimeout(autoSaveTimer)
+        if (changed) {
+          autoSaveTimer = window.setTimeout(() => {
+            if (dirty.value) docEditor?.forceSave?.()
+          }, 1500)
+        }
+      },
       onError(event: { data?: { errorCode?: number; errorDescription?: string } }) {
         const detail = event?.data?.errorDescription || ''
         error.value = detail
@@ -354,6 +370,8 @@ async function boot() {
   const gen = ++bootGen
   loading.value = true
   error.value = ''
+  dirty.value = false
+  saveWait = null
   userZoom.value = 1
   destroyEditor()
 
@@ -448,8 +466,50 @@ watch(
   },
 )
 
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function readDocKey(): Promise<string> {
+  const data = await fetchTenderEditorConfig(props.docxFile, props.downloadName, undefined, 'edit')
+  const doc = (data.config || {}) as { document?: { key?: string } }
+  return String(doc.document?.key || '')
+}
+
+/** 有改动时先强制存盘，并等到回调写回文件（文档 key 会变）。没改动直接返回。 */
+async function flushSave(): Promise<void> {
+  window.clearTimeout(autoSaveTimer)
+  if (activeEngine.value !== 'onlyoffice' || !docEditor) return
+  if (!dirty.value) return
+  const beforeKey = await readDocKey()
+  docEditor.forceSave?.()
+  if (dirty.value) {
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        saveWait = null
+        reject(new Error('文档还在保存，请再试一次'))
+      }, 8000)
+      saveWait = () => {
+        window.clearTimeout(timer)
+        resolve()
+      }
+    })
+  }
+  const deadline = Date.now() + 8000
+  while (Date.now() < deadline) {
+    const key = await readDocKey()
+    if (key && beforeKey && key !== beforeKey) return
+    await sleep(400)
+  }
+  throw new Error('修改还没写回，请再试一次')
+}
+
+defineExpose({ flushSave })
+
 onBeforeUnmount(() => {
   bootGen += 1
+  saveWait = null
+  window.clearTimeout(autoSaveTimer)
   destroyEditor()
 })
 </script>
