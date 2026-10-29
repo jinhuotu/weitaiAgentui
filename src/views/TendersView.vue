@@ -33,6 +33,7 @@ import { listPromptOptions, type PromptOption } from '@/lib/prompts-api'
 import { fetchQuoteRecords, type QuoteRecordItem } from '@/lib/quotes-api'
 import {
   clearMineTenderRecords,
+  confirmInvitationFormatDocx,
   clearTenderSlot,
   deleteTenderRecord,
   downloadTenderFile,
@@ -56,6 +57,7 @@ import {
   restoreTenderLayoutTemplate,
   uploadTenderLayoutTemplate,
   uploadTenderSlot,
+  uploadTechPlanSource,
   emptyPerformanceRequirement,
   formatPerformanceRequirement,
   isTenderWorkflowLocked,
@@ -208,6 +210,7 @@ function emptyBrief(): BidBrief {
     quoteHeaders: [],
     quoteRoles: [],
     deviationLines: [],
+    bizDeviationLines: [],
     bizDevHeaders: [],
     techDevHeaders: [],
     performanceLines: [],
@@ -218,6 +221,11 @@ function emptyBrief(): BidBrief {
     omPlan: '',
     schedulePlan: '',
     techPlanNote: '',
+    autoDraftTechPlan: true,
+    autoDraftBizResp: true,
+    techPlanSourceIds: [],
+    techPlanKbIds: [],
+    bizRespKbIds: [],
     layoutMode: 'chapter5',
     // Phase1-3 双轨：内容模板 / 结构来源 / 复制策略
     contentTemplateId: 'general',
@@ -227,8 +235,8 @@ function emptyBrief(): BidBrief {
     copyPolicy: '' as CopyPolicy | '',
     // 1:1 忠实渲染：默认照抄招标书序号/标题/顺序/原文
     outlineRender: 'verbatim' as 'verbatim' | 'curated',
-    outlineConfirmed: false,
-    formatConfirmed: false,
+    outlineConfirmed: true,
+    formatConfirmed: true,
     outlineChapter: '',
     outlineItems: [],
     bidRequirements: [],
@@ -355,6 +363,18 @@ function prettyOutlineTitle(title: string) {
   return title
 }
 
+function isFormatChapterTitle(title: string) {
+  const n = (title || '')
+    .replace(/\s+/g, '')
+    .replace(/^第[一二三四五六七八九十0-9]+部分/, '')
+    .replace(/^[一二三四五六七八九十]{1,3}、/, '')
+    .replace(/^[（(][一二三四五六七八九十0-9]+[)）]/, '')
+    .replace(/^\d{1,2}[.．、]/, '')
+  return /^(投标函及投标函附录|投标函附录|投标函|响应函及响应函附录|法定代表人身份证明|授权委托书|投标保证金|已标价工程量清单|已标价的工程量清单|项目管理机构|项目管理机构组成表|主要人员简历表|主要项目管理人员简历表|项目经理简历表|拟分包项目情况表|拟分包项目情况|资格审查资料|投标人基本情况表|近年财务状况表|近年完成的类似项目情况表|正在施工的和新承接的项目情况表|正在施工和新承接的项目情况表|近年发生的诉讼及仲裁情况|其他资料|其他材料|施工组织格式|施工组织设计)$/.test(
+    n,
+  )
+}
+
 function pruneUnknownOutline(items: OutlineItem[] | undefined) {
   return (items || [])
     .map((item) => {
@@ -372,6 +392,8 @@ function pruneUnknownOutline(items: OutlineItem[] | undefined) {
       const raw = item.title || ''
       const title = raw.replace(/\s+/g, '')
       if (!title) return false
+      // 格式章目录原条目没有 rawTitle 时也不能当噪声删掉。
+      if (isFormatChapterTitle(title) || item.tocEligible === true) return true
       if (/[：:]\s*[/／]\s*$/.test(raw) || /[：:][/／]+$/.test(title)) return false
       if (/计分规则|计分办法|评分细则|基准价/.test(title)) return false
       if (/见下表|如下表/.test(title)) return false
@@ -515,6 +537,19 @@ function junkPmName(name: string): boolean {
 }
 
 /** 合并 brief：空字符串不覆盖已有公司默认；其它字段照常写入 */
+/** 原版格式章优先，旧记录的结构来源标记不能覆盖已识别的范本。 */
+function hasOriginalFormat(brief: Partial<BidBrief> = form): boolean {
+  if (!brief.invitationId) return false
+  const chapter = String(brief.outlineChapter || '').replace(/\s+/g, '')
+  const named = /^(?:第[一二三四五六七八九十百0-9]+(?:部分|章节|章|节)[、.．]?)?(?:投标|响应)文件(?:格式|组成)$/.test(chapter)
+  return named || brief.layoutMode === 'outline' || Boolean(brief.formatConfirmed && !brief.requirementsDriven)
+}
+
+function generationLayoutMode(): string {
+  if (hasOriginalFormat()) return 'outline'
+  return form.requirementsDriven ? 'requirements' : (form.structureMode === 'outline' ? 'outline' : 'chapter5')
+}
+
 function mergeBriefIntoForm(brief: Partial<BidBrief>) {
   const defaults = emptyBrief()
   const next: Record<string, unknown> = { ...form }
@@ -530,6 +565,11 @@ function mergeBriefIntoForm(brief: Partial<BidBrief>) {
     next[key] = value
   }
   if (junkPmName(String(next.pmName || ''))) next.pmName = ''
+  if (hasOriginalFormat(next as Partial<BidBrief>)) {
+    next.layoutMode = 'outline'
+    next.structureMode = 'outline'
+    next.requirementsDriven = false
+  } else if (brief.requirementsDriven) next.structureMode = 'outline'
   Object.assign(form, next)
   ensureCompanyDefaults(form)
   if (brief.authEnabled === undefined) {
@@ -579,6 +619,22 @@ const loading = ref(true)
 const generating = ref(false)
 const pendingBoth = ref(false)
 const followAdvice = ref(false)
+type GenerationMode = 'full' | 'split' | 'single'
+const generationMode = ref<GenerationMode | null>(null)
+const effectiveGenerationMode = computed<GenerationMode>(() => {
+  if (generationMode.value) return generationMode.value
+  if (followAdvice.value && form.volumeAdvice === 'full') return 'full'
+  if (followAdvice.value && form.volumeAdvice === 'split') return 'split'
+  return 'single'
+})
+const draftPreference = reactive<{ business?: boolean; technical?: boolean }>({})
+
+function syncFullDrafts() {
+  if (effectiveGenerationMode.value !== 'full') return
+  form.autoDraftBizResp = draftPreference.business ?? true
+  form.autoDraftTechPlan = draftPreference.technical ?? true
+}
+
 const parsing = ref(false)
 const parseElapsed = ref(0)
 let parseClock = 0
@@ -608,6 +664,26 @@ const quotePickerQuery = ref('')
 const quotePickerDraft = ref<string[]>([])
 const kbList = ref<KnowledgeBaseItem[]>([])
 const selectedKbIds = ref<string[]>([])
+const techSourceNames = ref<string[]>([])
+const uploadingTechSource = ref(false)
+
+async function onTechSourceChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || uploadingTechSource.value) return
+  uploadingTechSource.value = true
+  error.value = ''
+  try {
+    const source = await uploadTechPlanSource(file)
+    form.techPlanSourceIds = [...(form.techPlanSourceIds || []), source.sourceId]
+    techSourceNames.value.push(source.filename)
+  } catch (e) {
+    error.value = e instanceof ApiError || e instanceof Error ? e.message : '技术资料上传失败'
+  } finally {
+    uploadingTechSource.value = false
+    input.value = ''
+  }
+}
 const promptOptions = ref<PromptOption[]>([])
 const selectedPromptId = ref<string>('')
 const parseNotes = ref<string[]>([])
@@ -675,6 +751,8 @@ const pendingRegenItem = ref<TenderRecordItem | null>(null)
 const confirmDateOpen = ref(false)
 const formatPreviewOpen = ref(false)
 const formatPreviewFile = ref('')
+const formatPreviewOnly = ref(false)
+const formatPreviewMessage = ref('')
 const formatPreviewBusy = ref(false)
 const formatPreviewTick = ref(0)
 const formatConfirmBusy = ref(false)
@@ -693,6 +771,12 @@ const paySum = computed(
 const previewDoc = computed(() => {
   const r = result.value
   if (!r) return { file: '', name: '' }
+  if ((effectiveGenerationMode.value === 'full' || r.generateVolume === 'full') && r.docxFile) {
+    return {
+      file: r.docxFile,
+      name: r.downloadName || `${r.projectName || 'bid'}-综合标.docx`,
+    }
+  }
   return volumeDocx(r, previewVolume.value)
 })
 
@@ -740,7 +824,7 @@ const GENERATE_NOISE_RE =
   /生成耗时|目录独占一页|更新域|附件区已处理|另有 \d+ 处无扫描件|已匹配资料库扫描件|已附「投标承诺书」|为加快生成未写入|未嵌入 Word|已插入资质文件|分项报价来自|装订时请|已纳入本标但未上传|资料库新建空项|邀请书未抽出资料清单|已有 \d+ 类附件|以下资料未上传|未上传（虚线框|已按组卷大纲用模块填写|已按组卷大纲复制|实施方案图纸用虚线框|报价表表头已按招标书|商务\/技术偏离表共用/
 
 function isGenerateRiskWarning(note: string) {
-  return /未解析到本次|暂用内置模板|请确认使用哪一档|投标总价为 0|未填写法定代表人|支付比例合计|单价为空|未识别到报价清单|未能插入报价|资质 PDF|未找到资质|文字说明待补|实施方案文字描述未写|尚未上传图纸|尚未填写技术偏差|类似业绩为空|尚未抽出摘要|请上传招标工程量|折算|会大量扣分|可能扣分|类似业绩符合|均未达到招标|未从招标书复制|未使用充电桩固定承诺书/.test(
+  return /未解析到本次|暂用内置模板|请确认使用哪一档|投标总价为 0|未填写法定代表人|支付比例合计|单价为空|未识别到报价清单|未能插入报价|资质 PDF|未找到资质|文字说明待补|实施方案文字描述未写|尚未上传图纸|尚未填写技术偏差|类似业绩为空|尚未抽出摘要|请上传招标工程量|折算|会大量扣分|可能扣分|类似业绩符合|均未达到招标|未从招标书复制|未使用充电桩固定承诺书|邀请书正文为空|大纲无.*对应章节|无可填章节/.test(
     note,
   )
 }
@@ -842,6 +926,10 @@ async function loadOutlinePreview() {
 }
 
 async function confirmFormatTemplate() {
+  if (formatPreviewOnly.value) {
+    formatPreviewOpen.value = false
+    return
+  }
   if (!formatPreviewFile.value) {
     error.value = '请先点「预览模板」核对截出的格式章'
     return
@@ -850,7 +938,9 @@ async function confirmFormatTemplate() {
   formatConfirmBusy.value = true
   formatSaveError.value = ''
   try {
-    await formatEditorRef.value?.flushSave?.()
+    if (!formatEditorRef.value) throw new Error('模板编辑器尚未就绪，请稍后再试')
+    await formatEditorRef.value.flushSave()
+    await confirmInvitationFormatDocx(String(form.invitationId || '').trim())
     form.formatConfirmed = true
     formatPreviewOpen.value = false
     error.value = ''
@@ -869,11 +959,18 @@ async function onFormatPreviewOpen(open: boolean) {
     formatPreviewOpen.value = true
     return
   }
+  if (formatPreviewOnly.value) {
+    formatPreviewOpen.value = false
+    formatSaveError.value = ''
+    return
+  }
   if (formatConfirmBusy.value) return
   formatConfirmBusy.value = true
   formatSaveError.value = ''
   try {
-    await formatEditorRef.value?.flushSave?.()
+    if (!formatEditorRef.value) throw new Error('模板编辑器尚未就绪，请稍后再试')
+    await formatEditorRef.value.flushSave()
+    await confirmInvitationFormatDocx(String(form.invitationId || '').trim())
     formatPreviewOpen.value = false
   } catch (e) {
     formatSaveError.value = e instanceof Error ? e.message : '模板保存失败'
@@ -886,6 +983,8 @@ async function onFormatPreviewOpen(open: boolean) {
 function clearFormatPreview() {
   form.formatConfirmed = false
   formatPreviewFile.value = ''
+  formatPreviewOnly.value = false
+  formatPreviewMessage.value = ''
   formatPreviewOpen.value = false
 }
 
@@ -899,9 +998,24 @@ async function loadFormatFile(openDialog: boolean) {
   formatPreviewBusy.value = true
   error.value = ''
   try {
-    const fileName = await prepareInvitationFormatDocx(invitationId)
-    if (!fileName) throw new Error('未生成预览文件')
-    formatPreviewFile.value = fileName
+    const preview = await prepareInvitationFormatDocx(invitationId, {
+      ...form,
+      layoutMode: generationLayoutMode(),
+      generateVolume: effectiveGenerationMode.value === 'full' ? 'full' : activeVolume.value,
+    })
+    if (!preview.fileName) throw new Error('未生成预览文件')
+    formatPreviewFile.value = preview.fileName
+    formatPreviewOnly.value = preview.previewOnly
+    formatPreviewMessage.value = preview.message
+    if (preview.source === 'invitation') {
+      form.requirementsDriven = false
+      form.structureMode = 'outline'
+      form.layoutMode = 'outline'
+    } else if (preview.previewOnly) {
+      form.requirementsDriven = preview.source === 'requirements'
+      form.structureMode = preview.source === 'requirements' ? 'outline' : 'fixed'
+      form.layoutMode = preview.source === 'requirements' ? 'requirements' : 'chapter5'
+    }
     formatPreviewTick.value += 1
     if (openDialog) formatPreviewOpen.value = true
   } catch (e) {
@@ -917,6 +1031,7 @@ async function openFormatPreview() {
 
 /** 双轨结构来源。fixed=按固定模板，outline=按本标招标书大纲。 */
 function setStructureMode(mode: StructureMode) {
+  if (hasOriginalFormat()) mode = 'outline'
   form.structureMode = mode
   form.layoutMode = mode === 'outline' ? 'outline' : 'chapter5'
   clearFormatPreview()
@@ -954,7 +1069,9 @@ const outlineSummary = computed(() => {
   const volLabel = activeVolume.value === 'technical' ? '技术标' : '商务标'
   if (!items.length) return `${volLabel}无对应条目`
   const parts = [`${volLabel} ${items.length} 条`]
-  if (form.structureMode === 'outline') {
+  if (form.requirementsDriven) {
+    parts.push('按招标要求综合组卷')
+  } else if (form.structureMode === 'outline') {
     parts.push(form.formatConfirmed ? '模板已确认' : '模板待确认')
   } else {
     parts.push(fixedTemplateLabel.value || '固定模板')
@@ -1157,7 +1274,7 @@ const generateBlockers = computed(() => {
   if (isBlank(form.tenderer)) issues.push('招标人')
   if (isBlank(form.bidderName)) issues.push('投标人全称')
   if (legalPickMissing.value) issues.push('本标法定代表人')
-  if (form.structureMode === 'outline' && !form.formatConfirmed) issues.push('确认格式章模板')
+  if (form.structureMode === 'outline' && !form.requirementsDriven && !form.formatConfirmed) issues.push('确认格式章模板')
   if (activeVolume.value === 'technical') return issues
   if (!(Number(form.bidPriceYuan) > 0)) issues.push('投标总价')
   if (isBlank(form.bidderAddress)) issues.push('地址')
@@ -1248,10 +1365,10 @@ const softGenerateNotes = computed(() => {
 const formStepNextLabel = computed(() => {
   if (generating.value) return '正在生成…'
   if (workflowLocked.value) return '当前任务只读'
-  if (followAdvice.value && form.volumeAdvice === 'full') {
-    return result.value?.docxFile ? '覆盖生成投标文件' : '生成投标文件并预览'
+  if (effectiveGenerationMode.value === 'full') {
+    return result.value?.docxFile ? '覆盖生成完整投标文件（综合标）' : '生成完整投标文件（综合标）'
   }
-  if (followAdvice.value && form.volumeAdvice === 'split') return '按分册生成两卷'
+  if (effectiveGenerationMode.value === 'split') return '按分册生成两卷'
   const volLabel = activeVolume.value === 'technical' ? '技术标' : '商务标'
   const hasThis =
     activeVolume.value === 'technical' ? Boolean(result.value?.techDocxFile) : Boolean(result.value?.docxFile)
@@ -1259,6 +1376,8 @@ const formStepNextLabel = computed(() => {
 })
 
 const volumeStatusHint = computed(() => {
+  if (effectiveGenerationMode.value === 'full') return '将生成一本综合标，包含商务响应和技术方案，使用连续目录。'
+  if (effectiveGenerationMode.value === 'split') return '将分别生成商务标、技术标两本 Word。'
   if (followAdvice.value && form.volumeNote) return form.volumeNote
   if (result.value?.generateVolume === 'full') return '本次生成的是完整投标文件。'
   const cur = activeVolume.value === 'technical' ? '技术标' : '商务标'
@@ -1517,8 +1636,17 @@ function advanceStep(index: number) {
 }
 
 async function selectVolume(volume: BidVolume) {
-  followAdvice.value = false
+  // 顶部卷别切换：点商务/技术即切成单卷，并把预览同步到对应卷。
+  if (currentStepIndex.value === 2 && result.value && previewVolume.value !== volume) {
+    if (!(await flushBidEdit())) return
+  }
+  if (effectiveGenerationMode.value !== 'single') {
+    generationMode.value = 'single'
+    followAdvice.value = false
+    pendingBoth.value = false
+  }
   activeVolume.value = volume
+  previewVolume.value = volume
   volumeHint.value = ''
   if (showRecords.value) closeRecords()
 
@@ -1539,6 +1667,23 @@ async function selectVolume(volume: BidVolume) {
     document
       .getElementById(`tender-volume-${volume}`)
       ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+}
+
+async function selectFullMode() {
+  // 综合标：不分卷，生成一本完整投标文件。
+  if (currentStepIndex.value === 2 && result.value && !(await flushBidEdit())) return
+  generationMode.value = 'full'
+  followAdvice.value = false
+  pendingBoth.value = false
+  activeVolume.value = 'business'
+  previewVolume.value = 'business'
+  syncFullDrafts()
+  volumeHint.value = ''
+  if (showRecords.value) closeRecords()
+  if (currentStepIndex.value === 0 && hasParsed.value) {
+    advanceStep(1)
+    await nextTick()
   }
 }
 
@@ -1764,10 +1909,14 @@ async function openRecordPreview(item: TenderRecordItem) {
       workflowLocked: item.workflowLocked,
       deadline: item.deadline,
       currentStep: item.currentStep,
+      generateVolume: item.generateVolume,
     }
     closeRecords()
+    generationMode.value = item.generateVolume === 'full' ? 'full' : 'single'
+    followAdvice.value = false
+    activeVolume.value = item.generateVolume === 'technical' ? 'technical' : 'business'
     previewVolume.value =
-      activeVolume.value === 'technical' && item.techDocxFile
+      item.generateVolume !== 'full' && activeVolume.value === 'technical' && item.techDocxFile
         ? 'technical'
         : item.docxFile
           ? 'business'
@@ -1821,10 +1970,14 @@ async function openRecordFromQuery() {
       workflowLocked: detail.workflowLocked,
       deadline: detail.deadline,
       currentStep: detail.currentStep,
+      generateVolume: detail.generateVolume,
     }
     closeRecords()
+    generationMode.value = detail.generateVolume === 'full' ? 'full' : 'single'
+    followAdvice.value = false
+    activeVolume.value = detail.generateVolume === 'technical' ? 'technical' : 'business'
     previewVolume.value =
-      activeVolume.value === 'technical' && detail.techDocxFile
+      detail.generateVolume !== 'full' && activeVolume.value === 'technical' && detail.techDocxFile
         ? 'technical'
         : detail.docxFile
           ? 'business'
@@ -1947,6 +2100,10 @@ async function loadRecordForm(item: TenderRecordItem) {
       return
     }
     applyBriefToForm(detail.brief)
+    generationMode.value = detail.brief.generateBoth ? 'split' : detail.brief.generateVolume === 'full' ? 'full' : 'single'
+    activeVolume.value = detail.brief.generateVolume === 'technical' ? 'technical' : 'business'
+    draftPreference.business = form.autoDraftBizResp
+    draftPreference.technical = form.autoDraftTechPlan
     knownFiles.value = { docx: Boolean(detail.docxFile), tech: Boolean(detail.techDocxFile) }
     followAdvice.value = false
     hasParsed.value = true
@@ -1969,6 +2126,8 @@ async function regenerateRecord(item: TenderRecordItem) {
   generating.value = true
   try {
     result.value = await regenerateTenderRecord(item.id)
+    generationMode.value = result.value?.generateVolume === 'full' ? 'full' : 'single'
+    followAdvice.value = false
     previewVolume.value =
       result.value?.techDocxFile && !result.value?.docxFile ? 'technical' : 'business'
     closeRecords()
@@ -2807,6 +2966,8 @@ async function onParseInvitation() {
     if (!form.structureMode) form.structureMode = form.layoutMode === 'outline' ? 'outline' : 'fixed'
     form.formatConfirmed = false
     formatPreviewFile.value = ''
+    formatPreviewOnly.value = false
+    formatPreviewMessage.value = ''
     formatPreviewOpen.value = false
     ensureDocumentFormat()
     ensurePerformanceRequirement()
@@ -2827,7 +2988,8 @@ async function onParseInvitation() {
     await refreshLibrary()
     refreshAttachmentMatch()
     hasParsed.value = true
-    followAdvice.value = true
+    followAdvice.value = generationMode.value === null
+    syncFullDrafts()
     volumeHint.value = ''
     techDrawingSlot.value = blankTechDrawings()
     drawingFill.value = ''
@@ -2991,7 +3153,7 @@ async function onUploadStepNext() {
 
 function withDrawingNote(items: typeof form.outlineItems) {
   const note = drawingFill.value.trim()
-  if (activeVolume.value !== 'technical' || !note) return items
+  if ((effectiveGenerationMode.value === 'single' && activeVolume.value !== 'technical') || !note) return items
   if (items.some((item) => (item.draftBody || '').includes(note.slice(0, 40)))) return items
   return [
     ...items,
@@ -3019,28 +3181,29 @@ async function doGenerate() {
     return
   }
   // 轨道B：按本标生成前必须先确认大纲，避免抽取错了照样出稿
-  if (form.structureMode === 'outline' && !form.formatConfirmed) {
+  if (form.structureMode === 'outline' && !form.requirementsDriven && !form.formatConfirmed) {
     error.value = '按本标生成前请先预览并确认使用这份模板'
     return
   }
   generating.value = true
   try {
-    const payload = {
+    syncFullDrafts()
+    const payload: BidBrief = {
       ...form,
       includeCommitment: true,
       includePlaceholders: false,
       requiredSlotKeys: effectiveRequiredKeys.value,
       includeSlotKeys: effectiveIncludeKeys.value,
       outlineItems: withDrawingNote(pruneUnknownOutline(form.outlineItems)),
-      generateVolume: activeVolume.value as string,
-      generateBoth: pendingBoth.value,
-      structureMode: form.structureMode,
-      layoutMode: form.structureMode === 'outline' ? 'outline' : 'chapter5',
+      techPlanKbIds: form.autoDraftTechPlan ? selectedKbIds.value : (form.techPlanKbIds || []),
+      bizRespKbIds: form.autoDraftBizResp ? selectedKbIds.value : (form.bizRespKbIds || []),
+      generateVolume: effectiveGenerationMode.value === 'full' ? 'full' : activeVolume.value,
+      generateBoth: effectiveGenerationMode.value === 'split' || pendingBoth.value,
+      splitSlice: effectiveGenerationMode.value === 'split' || pendingBoth.value,
+      structureMode: hasOriginalFormat() ? 'outline' : form.structureMode,
+      requirementsDriven: hasOriginalFormat() ? false : form.requirementsDriven,
+      layoutMode: generationLayoutMode(),
       contentTemplateId: form.contentTemplateId,
-    }
-    if (followAdvice.value && !payload.generateBoth) {
-      if (form.volumeAdvice === 'full') payload.generateVolume = 'full'
-      else if (form.volumeAdvice === 'split') payload.generateBoth = true
     }
     if (result.value?.id) {
       result.value = await regenerateTenderRecord(result.value.id, payload)
@@ -3050,7 +3213,7 @@ async function doGenerate() {
     if (result.value.attachmentMatch) {
       attachmentMatch.value = result.value.attachmentMatch
     }
-    previewVolume.value = activeVolume.value
+    previewVolume.value = payload.generateVolume === 'technical' ? 'technical' : 'business'
     void loadRecords()
     advanceStep(2)
   } catch (e) {
@@ -3061,9 +3224,11 @@ async function doGenerate() {
   }
 }
 
+const qaVolume = computed(() => result.value?.generateVolume === 'full' ? 'full' : previewVolume.value)
+
 async function loadSavedQa(recordId: string) {
   try {
-    const data = await fetchTenderQa(recordId, { volume: previewVolume.value })
+    const data = await fetchTenderQa(recordId, { volume: qaVolume.value })
     qaReport.value = data.report || null
   } catch {
     qaReport.value = null
@@ -3079,7 +3244,7 @@ async function runTenderQa() {
   qaLoading.value = true
   qaError.value = ''
   try {
-    qaReport.value = await inspectTenderQa(id, { volume: previewVolume.value })
+    qaReport.value = await inspectTenderQa(id, { volume: qaVolume.value })
   } catch (e) {
     qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '自检失败'
   } finally {
@@ -3093,7 +3258,7 @@ watch(
       result.value?.id,
       result.value?.docxFile,
       result.value?.techDocxFile,
-      previewVolume.value,
+      qaVolume.value,
     ] as const,
   ([id]) => {
     qaError.value = ''
@@ -3115,6 +3280,8 @@ async function onGenerateCurrent() {
 }
 
 async function onGenerateBoth() {
+  generationMode.value = 'split'
+  followAdvice.value = false
   pendingBoth.value = true
   await onFormStepNext()
 }
@@ -3179,8 +3346,11 @@ async function confirmGenerateAgain() {
 }
 
 async function flushBidEdit(): Promise<boolean> {
+  if (bidSaveBusy.value) {
+    error.value = '正在保存，请稍候'
+    return false
+  }
   if (!bidEditorRef.value) return true
-  if (bidSaveBusy.value) return false
   bidSaveBusy.value = true
   error.value = ''
   try {
@@ -3258,6 +3428,10 @@ function applyWizardReset() {
   qaReport.value = null
   qaError.value = ''
   hasParsed.value = false
+  generationMode.value = null
+  followAdvice.value = false
+  delete draftPreference.business
+  delete draftPreference.technical
   volumeHint.value = ''
   success.value = ''
   techDrawingSlot.value = blankTechDrawings()
@@ -3324,18 +3498,32 @@ async function onStepBack() {
 
 async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
   const r = result.value
-  if (!r) return
-  if (currentStepIndex.value === 2 && !(await flushBidEdit())) return
-  const picked =
-    kind === 'tech'
-      ? volumeDocx(r, 'technical')
-      : kind === 'docx'
-        ? volumeDocx(r, 'business')
-        : { file: r.pdfFile || '', name: r.pdfDownloadName || '' }
-  if (!picked.file || !picked.name) return
+  if (!r) {
+    error.value = '请先生成投标文件后再下载'
+    return
+  }
+  if (downloading.value) {
+    error.value = bidSaveBusy.value ? '正在保存，请稍候' : '正在下载，请稍候'
+    return
+  }
   downloading.value = kind
   error.value = ''
   try {
+    if (currentStepIndex.value === 2 && !(await flushBidEdit())) return
+    const fullMode = r.generateVolume === 'full' || effectiveGenerationMode.value === 'full'
+    const picked =
+      kind === 'tech'
+        ? volumeDocx(r, 'technical')
+        : kind === 'docx'
+          ? fullMode
+            ? volumeDocx(r, 'full')
+            : volumeDocx(r, 'business')
+          : { file: r.pdfFile || '', name: r.pdfDownloadName || '' }
+    if (!picked.file.trim() || !picked.name.trim()) {
+      error.value = '下载文件或文件名缺失，请重新生成投标文件后再试'
+      return
+    }
+    error.value = ''
     await downloadTenderFile(picked.file, picked.name)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '下载失败'
@@ -3343,6 +3531,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     downloading.value = null
   }
 }
+
 </script>
 
 <template>
@@ -3360,14 +3549,14 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       <div
         class="tender-volume-switch"
         role="tablist"
-        aria-label="填写商务标或技术标"
+        aria-label="填写商务标、技术标或综合标"
       >
         <button
           type="button"
           role="tab"
-          :aria-selected="activeVolume === 'business'"
+          :aria-selected="effectiveGenerationMode !== 'full' && activeVolume === 'business'"
           class="tender-volume-btn"
-          :class="{ 'tender-volume-btn--active': activeVolume === 'business' }"
+          :class="{ 'tender-volume-btn--active': effectiveGenerationMode !== 'full' && activeVolume === 'business' }"
           @click="selectVolume('business')"
         >
           商务标
@@ -3375,12 +3564,22 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         <button
           type="button"
           role="tab"
-          :aria-selected="activeVolume === 'technical'"
+          :aria-selected="effectiveGenerationMode !== 'full' && activeVolume === 'technical'"
           class="tender-volume-btn"
-          :class="{ 'tender-volume-btn--active': activeVolume === 'technical' }"
+          :class="{ 'tender-volume-btn--active': effectiveGenerationMode !== 'full' && activeVolume === 'technical' }"
           @click="selectVolume('technical')"
         >
           技术标
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="effectiveGenerationMode === 'full'"
+          class="tender-volume-btn"
+          :class="{ 'tender-volume-btn--active': effectiveGenerationMode === 'full' }"
+          @click="selectFullMode()"
+        >
+          综合标
         </button>
       </div>
     </template>
@@ -3841,12 +4040,13 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           本标识别到格式章：{{ form.outlineChapter }}
         </p>
         <div class="mb-3 space-y-2 text-[11px]">
-          <div class="flex flex-wrap gap-3">
+          <div v-if="!form.requirementsDriven" class="flex flex-wrap gap-3">
             <label class="inline-flex items-center gap-1.5">
               <input
                 type="radio"
                 name="structure-mode"
                 :checked="form.structureMode === 'fixed'"
+                :disabled="hasOriginalFormat()"
                 class="accent-current"
                 @change="setStructureMode('fixed')"
               />
@@ -3863,11 +4063,35 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               按本标招标书要求生成
             </label>
           </div>
+          <p v-if="hasOriginalFormat()" class="text-muted-foreground">
+            优先沿用原版封面和章节格式，仅用内置格式补齐缺少的章节。
+          </p>
+          <div v-if="form.requirementsDriven" class="space-y-2">
+            <p class="text-muted-foreground leading-relaxed">
+              已按全文投标要求综合大纲，自动生成封面、目录和完整正文结构。缺少的资料及响应内容会标为【待补充】，请在生成后核对。
+            </p>
+            <button
+              type="button"
+              class="h-7 px-2.5 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+              :disabled="formatPreviewBusy || !form.invitationId"
+              @click="loadFormatFile(true)"
+            >
+              {{ formatPreviewBusy ? '打开中…' : '预览模板' }}
+            </button>
+          </div>
           <div
-            v-if="form.structureMode === 'fixed'"
+            v-else-if="form.structureMode === 'fixed'"
             class="flex flex-wrap items-center gap-2 text-muted-foreground"
           >
             <label>接标模板</label>
+            <button
+              type="button"
+              class="h-7 px-2.5 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+              :disabled="formatPreviewBusy || !form.invitationId"
+              @click="loadFormatFile(true)"
+            >
+              {{ formatPreviewBusy ? '打开中…' : '预览模板' }}
+            </button>
             <select v-model="form.contentTemplateId" class="h-7 rounded-md border border-border bg-background px-2 text-[11px]">
               <option
                 v-for="t in fixedTemplates"
@@ -4974,7 +5198,24 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         </div>
       </Panel>
 
+      <Panel title="商务响应起草" subtitle="对招标商务条款逐项生成偏离表及既有承诺章节正文，缺少证据标【待补充】">
+        <label class="flex items-center gap-2 text-[12px]">
+          <input v-model="form.autoDraftBizResp" type="checkbox" @change="draftPreference.business = form.autoDraftBizResp" />生成商务标或综合标时起草商务响应
+        </label>
+      </Panel>
+
       <Panel title="技术章节草稿" subtitle="按邀请书目录分章写，缺事实会标【待补充】。有历史技术标知识库时会参考写法">
+        <div class="mb-3 space-y-2 text-[12px]">
+          <label class="flex items-center gap-2">
+            <input v-model="form.autoDraftTechPlan" type="checkbox" @change="draftPreference.technical = form.autoDraftTechPlan" />生成技术标或综合标时为现有空章节起草正文
+          </label>
+          <textarea v-model="form.techPlanNote" rows="3" class="kb-input font-sans w-full" placeholder="本项目技术路线、施工部署、人员设备等要点（优先采用）" />
+          <label class="block">
+            <span>上传本项目方案资料（docx/pdf）</span>
+            <input type="file" accept=".docx,.pdf" :disabled="uploadingTechSource" class="block mt-1" @change="onTechSourceChange" />
+          </label>
+          <p v-if="techSourceNames.length" class="text-muted-foreground">已加入：{{ techSourceNames.join('、') }}</p>
+        </div>
         <div class="flex items-center justify-between mb-2">
           <p class="text-[12px] text-muted-foreground">
             {{ techChapterItems.length ? `${techChapterItems.length} 章` : '识别邀请书后出现，也可直接起草补空章' }}
@@ -5176,9 +5417,9 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       </p>
       <p v-if="generating" class="mt-2 text-[11px] text-muted-foreground text-center">
         {{
-          followAdvice && form.volumeAdvice === 'full'
+          effectiveGenerationMode === 'full'
             ? '正在生成投标文件…'
-            : followAdvice && form.volumeAdvice === 'split'
+            : effectiveGenerationMode === 'split'
               ? '正在按分册生成两卷…'
               : activeVolume === 'technical'
                 ? '正在生成技术标 Word…'
@@ -5201,7 +5442,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           </div>
           <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
             <div
-              v-if="result.docxFile && result.techDocxFile"
+              v-if="effectiveGenerationMode !== 'full' && result.generateVolume !== 'full' && result.docxFile && result.techDocxFile"
               class="tender-volume-switch"
               role="tablist"
               aria-label="预览商务标或技术标"
@@ -5230,7 +5471,18 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               </button>
             </div>
             <button
-              v-if="result.docxFile"
+              v-if="(effectiveGenerationMode === 'full' || result.generateVolume === 'full') && result.docxFile"
+              type="button"
+              class="tender-ghost-btn"
+              :disabled="downloading === 'docx'"
+              @click="onDownload('docx')"
+            >
+              <Loader2 v-if="downloading === 'docx'" class="size-3.5 animate-spin" />
+              <Download v-else class="size-3.5" />
+              下载综合标
+            </button>
+            <button
+              v-if="effectiveGenerationMode !== 'full' && result.generateVolume !== 'full' && result.docxFile"
               type="button"
               class="tender-ghost-btn"
               :disabled="downloading === 'docx'"
@@ -5241,7 +5493,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               商务标
             </button>
             <button
-              v-if="result.techDocxFile"
+              v-if="effectiveGenerationMode !== 'full' && result.techDocxFile"
               type="button"
               class="tender-ghost-btn"
               :disabled="downloading === 'tech'"
@@ -5264,6 +5516,14 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             </button>
           </div>
         </div>
+
+        <p
+          v-if="bidSaveBusy || error"
+          class="shrink-0 rounded-md border border-sulfur/30 bg-sulfur/10 px-3 py-2 text-[12px] text-sulfur"
+          :role="bidSaveBusy ? 'status' : 'alert'"
+        >
+          {{ bidSaveBusy ? '正在保存，请稍候' : error }}
+        </p>
 
         <div
           v-if="generateShownWarnings.length && !previewFullscreen"
@@ -5343,7 +5603,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     <section v-else-if="currentStepIndex === 3 && result" class="tender-step-panel space-y-4">
       <TenderQaPanel
         page
-        :title="previewVolume === 'technical' ? 'AI 自检 · 技术标' : 'AI 自检 · 商务标'"
+        :title="qaVolume === 'full' ? 'AI 自检 · 完整投标文件（综合标）' : previewVolume === 'technical' ? 'AI 自检 · 技术标' : 'AI 自检 · 商务标'"
         :report="qaReport"
         :loading="qaLoading"
         :error="qaError"
@@ -5406,7 +5666,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           >
             <Loader2 v-if="downloading === 'docx'" class="size-3.5 animate-spin" />
             <Download v-else class="size-3.5" />
-            下载商务标
+            下载{{ effectiveGenerationMode === 'full' || result.generateVolume === 'full' ? '综合标' : '商务标' }}
           </button>
           <button
             v-if="result.techDocxFile"
@@ -5587,7 +5847,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     :open="formatPreviewOpen"
     size="xl"
     title="预览模板"
-    :description="`从上传的 Word 里截出的「${form.outlineChapter || '投标文件格式'}」。可直接删改，关闭或确认时写回。生成用这份。`"
+    :description="formatPreviewMessage || `从上传的 Word 里截出的「${form.outlineChapter || '投标文件格式'}」。可直接删改，关闭或确认时写回。生成用这份。`"
     @update:open="onFormatPreviewOpen"
   >
     <div class="flex min-h-0 flex-1 flex-col gap-2">
@@ -5597,9 +5857,9 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         :key="formatPreviewFile"
         class="min-h-0 flex-1"
         :docx-file="formatPreviewFile"
-        download-name="招标文件格式章.docx"
-        mode="edit"
-        engine="onlyoffice"
+        :download-name="formatPreviewOnly ? '模板骨架预览.docx' : '招标文件格式章.docx'"
+        :mode="formatPreviewOnly ? 'view' : 'edit'"
+        :engine="formatPreviewOnly ? 'browser' : 'onlyoffice'"
         :layout-tick="formatPreviewTick"
       />
     </div>
@@ -5616,6 +5876,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         {{ formatConfirmBusy ? '保存中…' : '关闭' }}
       </button>
       <button
+        v-if="!formatPreviewOnly"
         type="button"
         class="h-8 px-3 text-xs rounded-md bg-foreground text-background hover:opacity-90 disabled:opacity-50"
         :disabled="!formatPreviewFile || form.formatConfirmed || formatConfirmBusy"

@@ -267,6 +267,7 @@ export type DeviationLine = {
   requirement: string
   response: string
   deviation: string
+  explanation?: string
 }
 
 export type OutlineKind =
@@ -331,6 +332,8 @@ export type OutlineItem = {
   /** 单节覆盖整单策略：空=跟整单。Phase0 冻结口径。 */
   copyPolicy?: CopyPolicy | string
   level?: number
+  /** 格式章目录条目。为 true 时生成目录保留该节，不当成表格标签丢掉。 */
+  tocEligible?: boolean | null
   /** 1:1 忠实渲染：招标书里的原始序号（如「一、」「（一）」）。 */
   label?: string
   /** 1:1 忠实渲染：招标书里的原始标题文字（含序号），照抄不改。 */
@@ -505,6 +508,7 @@ export type BidBrief = {
   quoteHeaders: string[]
   quoteRoles: string[]
   deviationLines: DeviationLine[]
+  bizDeviationLines?: DeviationLine[]
   bizDevHeaders: string[]
   techDevHeaders: string[]
   performanceLines: PerformanceLine[]
@@ -515,7 +519,13 @@ export type BidBrief = {
   omPlan: string
   schedulePlan: string
   techPlanNote: string
+  autoDraftTechPlan?: boolean
+  autoDraftBizResp?: boolean
+  techPlanSourceIds?: string[]
+  techPlanKbIds?: string[]
+  bizRespKbIds?: string[]
   layoutMode: string
+  requirementsDriven?: boolean
   contentTemplateId?: string
   structureMode?: StructureMode | string
   copyPolicy?: CopyPolicy | string
@@ -532,6 +542,7 @@ export type BidBrief = {
   generateVolume?: 'business' | 'technical' | 'full'
   /** 为 true 时同时出商务标和技术标。默认 false，只出当前卷。 */
   generateBoth?: boolean
+  splitSlice?: boolean
   /** 解析结果：full 不强制分卷，split 分商务/技术。 */
   volumeAdvice?: 'full' | 'split' | ''
   techAnonymous?: boolean
@@ -1074,6 +1085,16 @@ export async function draftTenderTech(
   })
 }
 
+export async function uploadTechPlanSource(file: File): Promise<{ sourceId: string; filename: string; chars: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  return apiRequest('/api/v1/tenders/tech/plan-source', {
+    method: 'POST',
+    token: token(),
+    body: form,
+  })
+}
+
 export async function fillTechBoq(file: File): Promise<{ draftBody: string }> {
   const form = new FormData()
   form.append('file', file)
@@ -1151,7 +1172,7 @@ export async function fetchTenderRecord(recordId: string): Promise<TenderRecordI
 
 export async function inspectTenderQa(
   recordId: string,
-  opts?: { volume?: 'business' | 'technical' },
+  opts?: { volume?: BidVolume | 'full' },
 ): Promise<QaReport> {
   const q = new URLSearchParams()
   if (opts?.volume) q.set('volume', opts.volume)
@@ -1168,7 +1189,7 @@ export async function inspectTenderQa(
 export async function inspectTenderQaUpload(
   recordId: string,
   file: File,
-  opts?: { volume?: 'business' | 'technical' },
+  opts?: { volume?: BidVolume | 'full' },
 ): Promise<QaReport> {
   const form = new FormData()
   form.append('file', file)
@@ -1187,7 +1208,7 @@ export async function inspectTenderQaUpload(
 
 export async function fetchTenderQa(
   recordId: string,
-  opts?: { volume?: 'business' | 'technical' },
+  opts?: { volume?: BidVolume | 'full' },
 ): Promise<{ report: QaReport | null }> {
   const q = new URLSearchParams()
   if (opts?.volume) q.set('volume', opts.volume)
@@ -1282,6 +1303,14 @@ export async function fetchTenderEditorConfig(
   )
 }
 
+export async function forceSaveTenderDocx(fileName: string, key: string): Promise<void> {
+  await apiRequest(`/api/v1/tenders/files/${encodeURIComponent(fileName)}/onlyoffice-forcesave`, {
+    method: 'POST',
+    token: token(),
+    body: { key },
+  })
+}
+
 export async function downloadTenderFile(fileName: string, downloadName: string): Promise<void> {
   const q = new URLSearchParams({ download_name: downloadName })
   await apiDownload(`/api/v1/tenders/files/${encodeURIComponent(fileName)}?${q}`, {
@@ -1294,15 +1323,42 @@ export async function fetchTenderDocxBlob(fileName: string): Promise<Blob> {
   return apiFetchBlob(`/api/v1/tenders/files/${encodeURIComponent(fileName)}`, { token: token() })
 }
 
-export async function prepareInvitationFormatDocx(invitationId: string): Promise<string> {
-  const data = await apiRequest<{ fileName?: string }>(
+export type InvitationFormatPreview = {
+  fileName: string
+  source: 'invitation' | 'builtin' | 'requirements'
+  previewOnly: boolean
+  message: string
+}
+
+export function prepareInvitationFormatDocx(invitationId: string): Promise<string>
+export function prepareInvitationFormatDocx(invitationId: string, brief: BidBrief): Promise<InvitationFormatPreview>
+export async function prepareInvitationFormatDocx(
+  invitationId: string, brief?: BidBrief,
+): Promise<string | InvitationFormatPreview> {
+  const data = await apiRequest<Partial<InvitationFormatPreview>>(
     `/api/v1/tenders/invitations/${encodeURIComponent(invitationId)}/format-docx`,
-    { token: token() },
+    { method: brief ? 'POST' : 'GET', body: brief, token: token() },
   )
-  return String(data.fileName || '').trim()
+  const preview: InvitationFormatPreview = {
+    fileName: String(data.fileName || '').trim(),
+    source: data.source || 'invitation',
+    previewOnly: Boolean(data.previewOnly),
+    message: String(data.message || ''),
+  }
+  return brief ? preview : preview.fileName
+}
+
+export async function confirmInvitationFormatDocx(invitationId: string): Promise<string> {
+  const data = await apiRequest<{ fileName: string; key: string }>(
+    `/api/v1/tenders/invitations/${encodeURIComponent(invitationId)}/format-docx/confirm`,
+    { method: 'POST', token: token() },
+  )
+  return data.key
 }
 
 export type HistoryChapter = {
+  displayTitle?: string
+  previewKey?: string
   volume: 'business' | 'technical' | string
   chapterTitle: string
   docId: string
@@ -1312,7 +1368,38 @@ export type HistoryChapter = {
   source: string
 }
 
-export async function fetchHistoryChapters(recordId: string): Promise<{
+export type HistoryArchiveState = {
+  status?: 'processing' | 'completed' | 'failed'
+  archiveNote?: string
+}
+
+export async function fetchHistoryChapterPreview(
+  recordId: string, chapter: HistoryChapter,
+): Promise<Blob> {
+  const q = new URLSearchParams({
+    recordId, chapterTitle: chapter.chapterTitle, volume: chapter.volume,
+    chapterKey: chapter.previewKey || '',
+  })
+  return apiFetchBlob(`/api/v1/tenders/history-bids/chapters/preview?${q}`, { token: token() })
+}
+
+export async function uploadHistoryBid(
+  file: File,
+  outcome: 'won' | 'lost' | '' = '',
+  recordId?: string,
+): Promise<HistoryArchiveState & { recordId: string; queued?: number }> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('outcome', outcome)
+  if (recordId) form.append('recordId', recordId)
+  return apiRequest('/api/v1/tenders/history-bids', {
+    method: 'POST',
+    token: token(),
+    body: form,
+  })
+}
+
+export async function fetchHistoryChapters(recordId: string): Promise<HistoryArchiveState & {
   recordId: string
   chapters: HistoryChapter[]
 }> {

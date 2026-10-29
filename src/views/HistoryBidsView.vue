@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { PageHeader, Panel, Tag } from '@/components/ui-kit'
+import HistoryChapterPreview from '@/components/tenders/HistoryChapterPreview.vue'
 import { ApiError } from '@/lib/api'
 import { TASK_STATUS_LABEL, TASK_STATUS_TONE, type TaskStatus } from '@/lib/tender-tasks'
 import {
   fetchHistoryChapters,
+  fetchTenderRecord,
   fetchTenderRecords,
   saveHistoryMark,
+  uploadHistoryBid,
   type HistoryChapter,
   type TenderRecordItem,
 } from '@/lib/tenders-api'
@@ -24,21 +27,51 @@ const loading = ref(false)
 const err = ref('')
 const selectedId = ref('')
 const chapters = ref<HistoryChapter[]>([])
+const previewChapter = ref<HistoryChapter | null>(null)
 const chapErr = ref('')
 const chapLoading = ref(false)
 const openKey = ref('')
 const draftTags = ref<string[]>([])
 const draftNote = ref('')
 const savingKey = ref('')
+const uploadFile = ref<File | null>(null)
+const uploadInput = ref<HTMLInputElement | null>(null)
+const uploadOutcome = ref<'won' | 'lost' | ''>('')
+const uploading = ref(false)
+const archiving = ref(false)
+const uploadErr = ref('')
+const uploadNotice = ref('')
+const uploadedRecordId = ref('')
+const uploadBusy = computed(() => uploading.value || loading.value)
+let chapterRequest = 0
+let chapterLoad: Promise<void> = Promise.resolve()
+let cancelDelay: (() => void) | undefined
+
+function stopChapterLoad() {
+  chapterRequest++
+  cancelDelay?.()
+}
+
+onScopeDispose(stopChapterLoad)
+
+function pollDelay() {
+  return new Promise<void>((resolve) => {
+    const finish = () => { clearTimeout(timer); cancelDelay = undefined; resolve() }
+    const timer = setTimeout(finish, 1500)
+    cancelDelay = finish
+  })
+}
 
 const canSeeAll = computed(() => auth.isAdmin || (auth.menus || []).includes('/tender-tasks'))
 const selected = computed(() => items.value.find((it) => it.id === selectedId.value) || null)
 
-function statusLabel(status: string) {
+function statusLabel(status?: string) {
+  if (!status) return '未指定'
   return TASK_STATUS_LABEL[status as TaskStatus] || status
 }
 
-function statusTone(status: string) {
+function statusTone(status?: string) {
+  if (!status) return 'default'
   return TASK_STATUS_TONE[status as TaskStatus] || 'default'
 }
 
@@ -57,39 +90,135 @@ function msgOf(e: unknown, fallback: string) {
 }
 
 async function loadList() {
+  if (loading.value) return false
   loading.value = true
   err.value = ''
   const scope = canSeeAll.value ? 'all' : 'mine'
   try {
-    const [won, lost] = await Promise.all([
+    // 仅补充本页上传过的记录，避免“不指定”被 won/lost 查询漏掉。
+    const extraIds = new Set(items.value.filter((it) => !['won', 'lost'].includes(it.status || '')).map((it) => it.id))
+    if (uploadedRecordId.value) extraIds.add(uploadedRecordId.value)
+    const [won, lost, uploaded] = await Promise.all([
       fetchTenderRecords({ status: 'won', scope, limit: 100 }),
       fetchTenderRecords({ status: 'lost', scope, limit: 100 }),
+      Promise.all([...extraIds].map((id) => fetchTenderRecord(id))),
     ])
-    items.value = [...won.items, ...lost.items].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    const records = new Map([...uploaded, ...won.items, ...lost.items].map((it) => [it.id, it]))
+    items.value = [...records.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    return true
   } catch (e) {
     err.value = msgOf(e, '加载失败')
     items.value = []
+    return false
   } finally {
     loading.value = false
   }
 }
 
+function chooseUploadFile(event: Event) {
+  if (uploadBusy.value) return
+  uploadFile.value = (event.target as HTMLInputElement).files?.[0] || null
+  uploadErr.value = ''
+  uploadNotice.value = ''
+}
+
+async function refreshList() {
+  if (uploadBusy.value) return
+  if (await loadList()) {
+    if (uploadedRecordId.value) {
+      const unchanged = selectedId.value === uploadedRecordId.value
+      selectedId.value = uploadedRecordId.value
+      uploadNotice.value = '列表已刷新，已选中新标书'
+      if (unchanged) chapterLoad = loadChapters(selectedId.value)
+      await chapterLoad
+    }
+  }
+}
+
+async function upload() {
+  if (uploadBusy.value) return
+  if (!uploadFile.value) {
+    uploadErr.value = '请选择要上传的 docx 标书'
+    return
+  }
+  uploading.value = true
+  uploadErr.value = ''
+  uploadNotice.value = ''
+  try {
+    const data = await uploadHistoryBid(uploadFile.value, uploadOutcome.value)
+    // 文件已被接收后先清空选择；刷新失败时可单独重试，避免重复上传。
+    uploadFile.value = null
+    if (uploadInput.value) uploadInput.value.value = ''
+    if (!data.recordId) {
+      uploadErr.value = '文件已接收，但服务未返回历史记录编号，暂无法加入列表并选中。请联系管理员核对上传接口。'
+      return
+    }
+    uploadedRecordId.value = data.recordId
+    archiving.value = data.status !== 'failed'
+    uploadNotice.value = '标书入库中…'
+    if (await loadList()) {
+      selectedId.value = data.recordId
+      await chapterLoad
+      if (data.status === 'failed') uploadErr.value = `入库失败：${data.archiveNote || '请稍后重试'}`
+    } else {
+      uploadNotice.value = '上传成功，但列表刷新失败。请点击刷新列表，无需重新上传。'
+    }
+  } catch (e) {
+    uploadErr.value = msgOf(e, '上传失败，请稍后重试')
+  } finally {
+    archiving.value = false
+    uploading.value = false
+  }
+}
+
 async function loadChapters(id: string) {
+  stopChapterLoad()
+  const request = chapterRequest
   chapLoading.value = true
   chapErr.value = ''
   chapters.value = []
   openKey.value = ''
   try {
-    const data = await fetchHistoryChapters(id)
-    chapters.value = data.chapters || []
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const data = await fetchHistoryChapters(id)
+      if (request !== chapterRequest) return
+      chapters.value = data.chapters || []
+      if (data.status === 'failed') {
+        chapErr.value = `入库失败：${data.archiveNote || '请稍后重试'}`
+        if (id === uploadedRecordId.value) {
+          uploadErr.value = chapErr.value
+          uploadNotice.value = ''
+        }
+        return
+      }
+      if (chapters.value.length && data.status !== 'processing') {
+        if (id === uploadedRecordId.value) {
+          uploadErr.value = ''
+          uploadNotice.value = '入库成功，已加载章节，可进行章节标记'
+        }
+        return
+      }
+      if (data.status !== 'processing' && id !== uploadedRecordId.value) return
+      if (attempt < 14) await pollDelay()
+      if (request !== chapterRequest) return
+    }
+    chapErr.value = '标书入库中，请稍后刷新'
+    if (id === uploadedRecordId.value) uploadNotice.value = chapErr.value
   } catch (e) {
-    chapErr.value = msgOf(e, '章节加载失败')
+    if (request === chapterRequest) {
+      chapErr.value = msgOf(e, '章节加载失败')
+      if (id === uploadedRecordId.value) {
+        uploadErr.value = chapErr.value
+        uploadNotice.value = ''
+      }
+    }
   } finally {
-    chapLoading.value = false
+    if (request === chapterRequest) chapLoading.value = false
   }
 }
 
 function selectRecord(id: string) {
+  previewChapter.value = null
   selectedId.value = id
 }
 
@@ -134,11 +263,13 @@ async function save(ch: HistoryChapter, verdict: 'good' | 'bad' | 'none', tags: 
 
 watch(selectedId, (id) => {
   if (!id) {
+    stopChapterLoad()
     chapters.value = []
+    chapLoading.value = false
     return
   }
-  void loadChapters(id)
-})
+  chapterLoad = loadChapters(id)
+}, { flush: 'sync' })
 
 onMounted(async () => {
   await loadList()
@@ -155,8 +286,56 @@ onMounted(async () => {
 
   <div class="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(16rem,20rem)_1fr]">
     <Panel :title="canSeeAll ? '中标与失败' : '我的中标与失败'" :subtitle="`共 ${items.length} 条`" flush>
+      <form class="space-y-2 border-b border-border p-3" :aria-busy="uploadBusy" @submit.prevent="upload">
+        <div class="text-[12px] font-medium">上传中标/失败标书</div>
+        <input
+          id="history-bid-file"
+          ref="uploadInput"
+          type="file"
+          accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          class="sr-only"
+          :disabled="uploadBusy"
+          @change="chooseUploadFile"
+        />
+        <label
+          for="history-bid-file"
+          class="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-dashed border-border bg-background px-2 text-[12px] hover:border-iron/40 hover:bg-accent/40"
+          :class="uploadBusy ? 'pointer-events-none opacity-50' : ''"
+        >
+          <span class="shrink-0 rounded bg-iron/10 px-1.5 py-0.5 text-[11px] text-iron">docx</span>
+          <span class="min-w-0 flex-1 truncate" :class="uploadFile ? 'text-foreground' : 'text-muted-foreground'">
+            {{ uploadFile ? uploadFile.name : '选择历史标书' }}
+          </span>
+        </label>
+        <div class="flex items-center gap-2">
+          <label for="history-bid-outcome" class="text-[11px] text-muted-foreground">结果</label>
+          <select
+            id="history-bid-outcome"
+            v-model="uploadOutcome"
+            class="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-[12px]"
+            :disabled="uploadBusy"
+          >
+            <option value="">不指定</option>
+            <option value="won">已中标</option>
+            <option value="lost">已失败</option>
+          </select>
+          <button
+            type="submit"
+            class="h-8 rounded-md bg-iron px-3 text-[12px] text-white disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="uploadBusy || !uploadFile"
+          >{{ archiving ? '入库中…' : uploading ? '上传中…' : '上传' }}</button>
+        </div>
+        <button
+          type="button"
+          class="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+          :disabled="uploadBusy"
+          @click="refreshList"
+        >{{ loading ? '刷新中…' : '刷新列表' }}</button>
+        <p v-if="uploadErr" role="alert" class="text-xs text-iron">{{ uploadErr }}</p>
+        <p v-if="uploadNotice" role="status" class="text-[11px] text-muted-foreground">{{ uploadNotice }}</p>
+      </form>
       <div v-if="loading && !items.length" class="py-16 text-center text-xs text-muted-foreground">加载任务…</div>
-      <div v-else-if="!items.length" class="py-16 text-center text-xs text-muted-foreground">还没有已中标或已失败的标书。</div>
+      <div v-else-if="!items.length" class="py-16 text-center text-xs text-muted-foreground">还没有历史标书，可在上方上传。</div>
       <ul v-else class="max-h-[min(70vh,40rem)] overflow-y-auto">
         <li v-for="it in items" :key="it.id">
           <button
@@ -177,13 +356,13 @@ onMounted(async () => {
 
     <Panel v-if="!selected" title="章节标记">
       <p class="text-[12px] leading-relaxed text-muted-foreground">
-        左侧选一条已中标或已失败的标书。可参考的章节以后生成时优先借鉴，需规避的记下问题，避免再踩。
+        左侧选一份历史标书。可参考的章节以后生成时优先借鉴，需规避的记下问题，避免再踩。
       </p>
     </Panel>
 
     <Panel v-else :title="selected.projectName || '未命名项目'" :subtitle="selected.tenderer || '—'">
       <p v-if="chapErr" class="mb-3 text-xs text-iron">{{ chapErr }}</p>
-      <div v-if="chapLoading" class="py-10 text-center text-xs text-muted-foreground">加载章节…</div>
+      <div v-if="chapLoading && !chapters.length" class="py-10 text-center text-xs text-muted-foreground">加载章节，标书入库中请稍候…</div>
       <div v-else-if="!chapters.length" class="py-10 text-center text-xs text-muted-foreground">
         还没有可标记的章节。标书入库后会出现在这里。
       </div>
@@ -193,7 +372,7 @@ onMounted(async () => {
             <div class="min-w-0">
               <div class="text-[12px] font-medium">
                 <span class="mr-2 text-[11px] text-muted-foreground">{{ VOL_LABEL[ch.volume] || ch.volume }}</span>
-                {{ ch.chapterTitle }}
+                {{ ch.displayTitle || ch.chapterTitle }}
               </div>
               <div class="mt-1 flex flex-wrap items-center gap-1.5">
                 <Tag :tone="ch.verdict === 'good' ? 'patina' : ch.verdict === 'bad' ? 'iron' : 'default'">
@@ -204,6 +383,8 @@ onMounted(async () => {
               <p v-if="ch.note" class="mt-1 text-[11px] leading-relaxed text-muted-foreground">{{ ch.note }}</p>
             </div>
             <div class="flex shrink-0 gap-1.5">
+              <button type="button" class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent/40"
+                @click="previewChapter = ch">预览</button>
               <button
                 type="button"
                 class="h-7 rounded-md border border-border px-2 text-[11px] hover:bg-accent/40"
@@ -264,4 +445,6 @@ onMounted(async () => {
       </ul>
     </Panel>
   </div>
+  <HistoryChapterPreview v-if="previewChapter" :record-id="selectedId" :chapter="previewChapter"
+    @close="previewChapter = null" />
 </template>

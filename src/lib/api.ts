@@ -59,7 +59,20 @@ function friendlyMessage(status: number, msg?: string): string {
     )
   }
   if (status === 422) {
+    if (detail === '商务响应缺少条款或章节') {
+      return '商务响应暂未完整生成。可先关闭「起草商务响应」后重新生成投标文件，缺失内容请按【待补充】人工完善。'
+    }
+    if (
+      detail === '技术方案缺少章节列表' ||
+      detail === '技术方案未返回任何既有章节正文' ||
+      detail.startsWith('技术方案未完整返回既有章节正文')
+    ) {
+      return '技术方案暂未完整生成。可先关闭「起草技术方案」后重新生成投标文件，缺失章节请按【待补充】人工完善。'
+    }
     return detail || '提交内容未通过校验，请检查必填项'
+  }
+  if (status >= 500 && /^(internal server error|bad gateway|service unavailable|gateway timeout)$/i.test(detail)) {
+    return '服务处理请求失败，请稍后重试；若持续出现，请联系管理员。'
   }
   // 优先展示后端具体错误（如 MCP stdio 失败原因）
   if (msg && msg.trim()) {

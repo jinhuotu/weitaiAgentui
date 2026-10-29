@@ -7,6 +7,7 @@ import {
   fetchTenderDocxBlob,
   fetchTenderEditorConfig,
   fetchTenderPreviewPdfBlob,
+  forceSaveTenderDocx,
   type TenderDocPreview,
 } from '@/lib/tenders-api'
 
@@ -31,13 +32,13 @@ const userZoom = ref(1)
 const MIN_ZOOM = 0.5
 const MAX_ZOOM = 2.2
 const ZOOM_STEP = 0.1
-let docEditor: { destroyEditor?: () => void; forceSave?: () => void } | null = null
+let docEditor: { destroyEditor?: () => void } | null = null
 let resizeObserver: ResizeObserver | null = null
 let notifyingResize = false
 let bootGen = 0
 let pdfObjectUrl = ''
-let saveWait: (() => void) | null = null
-let autoSaveTimer = 0
+let hasEdits = false
+let openedDocKey = ''
 
 declare global {
   interface Window {
@@ -45,7 +46,7 @@ declare global {
       DocEditor: (
         id: string,
         config: Record<string, unknown>,
-      ) => { destroyEditor?: () => void; forceSave?: () => void }
+      ) => { destroyEditor?: () => void }
     }
   }
 }
@@ -176,7 +177,7 @@ function loadScript(src: string): Promise<void> {
     script.async = true
     script.dataset.onlyoffice = '1'
     script.onload = () => resolve()
-    script.onerror = () => reject(new Error('OnlyOffice 脚本加载失败，请确认 Document Server 已启动'))
+    script.onerror = () => reject(new Error(`OnlyOffice 脚本加载失败：${src}。请从这台电脑检查地址和 8082 端口`))
     document.head.appendChild(script)
   })
 }
@@ -288,17 +289,7 @@ async function bootOnlyOffice(gen: number) {
       onDocumentStateChange(event: { data?: boolean } | boolean) {
         const changed = typeof event === 'boolean' ? event : !!event?.data
         dirty.value = changed
-        if (!changed && saveWait) {
-          const done = saveWait
-          saveWait = null
-          done()
-        }
-        window.clearTimeout(autoSaveTimer)
-        if (changed) {
-          autoSaveTimer = window.setTimeout(() => {
-            if (dirty.value) docEditor?.forceSave?.()
-          }, 1500)
-        }
+        if (changed) hasEdits = true
       },
       onError(event: { data?: { errorCode?: number; errorDescription?: string } }) {
         const detail = event?.data?.errorDescription || ''
@@ -308,6 +299,7 @@ async function bootOnlyOffice(gen: number) {
       },
     },
   }
+  openedDocKey = String(((data.config || {}) as { document?: { key?: string } }).document?.key || '')
   docEditor = window.DocsAPI.DocEditor(editorId, config)
 
   watchHostResize(() => {
@@ -371,7 +363,8 @@ async function boot() {
   loading.value = true
   error.value = ''
   dirty.value = false
-  saveWait = null
+  hasEdits = false
+  openedDocKey = ''
   userZoom.value = 1
   destroyEditor()
 
@@ -473,43 +466,44 @@ function sleep(ms: number) {
 async function readDocKey(): Promise<string> {
   const data = await fetchTenderEditorConfig(props.docxFile, props.downloadName, undefined, 'edit')
   const doc = (data.config || {}) as { document?: { key?: string } }
-  return String(doc.document?.key || '')
+  const key = String(doc.document?.key || '')
+  if (!key) throw new Error('无法确认文稿保存版本，请稍后重试')
+  return key
 }
 
-/** 有改动时先强制存盘，并等到回调写回文件（文档 key 会变）。没改动直接返回。 */
+/** 曾编辑过就等待回调写回；dirty=false 也可能只是自动保存尚在路上。 */
 async function flushSave(): Promise<void> {
-  window.clearTimeout(autoSaveTimer)
   if (activeEngine.value !== 'onlyoffice' || !docEditor) return
-  if (!dirty.value) return
-  const beforeKey = await readDocKey()
-  docEditor.forceSave?.()
-  if (dirty.value) {
-    await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        saveWait = null
-        reject(new Error('文档还在保存，请再试一次'))
-      }, 8000)
-      saveWait = () => {
-        window.clearTimeout(timer)
-        resolve()
-      }
-    })
+  if (!hasEdits) return
+  if (!openedDocKey) throw new Error('无法确认模板版本，请重新打开预览')
+  if (await readDocKey() !== openedDocKey) {
+    hasEdits = false
+    return
   }
-  const deadline = Date.now() + 8000
+  const idleDeadline = Date.now() + 5000
+  while (dirty.value && Date.now() < idleDeadline) await sleep(300)
+  if (await readDocKey() !== openedDocKey) {
+    hasEdits = false
+    return
+  }
+  await forceSaveTenderDocx(props.docxFile, openedDocKey)
+  const deadline = Date.now() + 30000
   while (Date.now() < deadline) {
     const key = await readDocKey()
-    if (key && beforeKey && key !== beforeKey) return
+    if (key && key !== openedDocKey) {
+      hasEdits = false
+      return
+    }
     await sleep(400)
   }
-  throw new Error('修改还没写回，请再试一次')
+  throw new Error('修改还没写回，等待 OnlyOffice 保存回调超时。请检查文档服务与保存回调后重试，勿关闭当前预览。')
 }
 
 defineExpose({ flushSave })
 
 onBeforeUnmount(() => {
   bootGen += 1
-  saveWait = null
-  window.clearTimeout(autoSaveTimer)
+  hasEdits = false
   destroyEditor()
 })
 </script>
