@@ -5,6 +5,7 @@ import { ExternalLink, FileText, FolderOpen, Loader2, Pencil, Plus, Trash2, Uplo
 import { PageHeader, Panel, Tag } from '@/components/ui-kit'
 import AppAlertDialog from '@/components/ui/AppAlertDialog.vue'
 import TenderScanGallery from '@/components/tenders/TenderScanGallery.vue'
+import MaterialArchivePanel from '@/components/tenders/MaterialArchivePanel.vue'
 import { ApiError } from '@/lib/api'
 import { getAccessToken } from '@/lib/auth'
 import {
@@ -12,6 +13,7 @@ import {
   createTenderLibraryItem,
   deleteTenderLibraryFile,
   deleteTenderLibraryItem,
+  dismissTenderLibraryItem,
   fetchTenderLibrary,
   resolveLibraryFileId,
   reindexTenderLibrary,
@@ -47,7 +49,8 @@ const removingFileId = ref<string | null>(null)
 
 const CREDIT_SEARCH =
   'https://www.creditchina.gov.cn/xinyongxinxi/index.html?index=0&scenes=defaultScenario&tableName=credit_xyzx_tyshxydm&searchState=2&entityType=1,2,4,5,6,7,8&keyword='
-const DEFAULT_CREDIT_NAME = '河南伟泰光电科技有限公司'
+const DEFAULT_CREDIT_NAME = ''
+const materialCompany = ref('')
 const LS_CREDIT_NAME = 'tender.creditChinaName'
 
 const showCredit = ref(false)
@@ -70,7 +73,8 @@ function openCreditDialog() {
 }
 
 async function jumpCreditChina() {
-  const name = creditName.value.trim() || DEFAULT_CREDIT_NAME
+  const name = creditName.value.trim()
+  if (!name) { error.value = '请填写需要查询的公司名称'; return }
   creditName.value = name
   try {
     localStorage.setItem(LS_CREDIT_NAME, name)
@@ -151,19 +155,22 @@ async function saveItem() {
   error.value = ''
   try {
     if (editingKey.value) {
-      const item = await updateTenderLibraryItem(editingKey.value, {
-        title,
-        hint: editorHint.value.trim(),
-      })
-      const idx = slots.value.findIndex((s) => s.key === editingKey.value)
-      if (idx >= 0) slots.value.splice(idx, 1, { ...slots.value[idx], ...item })
+      const selected = slots.value.find((s) => s.key === editingKey.value)
+      if (isVirtualSlot(selected || null)) {
+        await createTenderLibraryItem({ key: editingKey.value, title, hint: editorHint.value.trim() })
+      } else {
+        await updateTenderLibraryItem(selected?.parentKey || editingKey.value, {
+          title,
+          hint: editorHint.value.trim(),
+        })
+      }
     } else {
-      const item = await createTenderLibraryItem({
+      await createTenderLibraryItem({
         title,
         hint: editorHint.value.trim(),
       })
-      slots.value.push(item)
     }
+    await reload(true)
     showEditor.value = false
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '保存资料项失败'
@@ -185,12 +192,11 @@ async function saveFacts(payload: { id: string; role: string; fields: { name: st
   savingFactsId.value = payload.id
   error.value = ''
   try {
-    const slot = await updateLibraryFileFacts(payload.id, {
+    await updateLibraryFileFacts(payload.id, {
       role: payload.role,
       fields: payload.fields,
     })
-    const idx = slots.value.findIndex((item) => item.key === slot.key)
-    if (idx >= 0) slots.value[idx] = slot
+    await reload(true)
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '保存识别结果失败'
   } finally {
@@ -242,8 +248,15 @@ async function confirmDeleteItem() {
   error.value = ''
   uploadingKey.value = slot.key
   try {
-    await deleteTenderLibraryItem(slot.key)
-    slots.value = slots.value.filter((s) => s.key !== slot.key)
+    if (isVirtualSlot(slot)) {
+      await dismissTenderLibraryItem(slot.key)
+      slots.value = slots.value.filter((s) => s.key !== slot.key)
+    } else {
+      await deleteTenderLibraryItem(slot.parentKey || slot.key)
+      // A merged row may contain several real parents. Refresh to retain
+      // remaining originals and their file IDs after the existing deletion.
+      slots.value = (await fetchTenderLibrary()).slots
+    }
     pendingDelete.value = null
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '删除失败'
@@ -251,6 +264,10 @@ async function confirmDeleteItem() {
     deleting.value = false
     uploadingKey.value = null
   }
+}
+
+function isVirtualSlot(slot: SlotStatus | null): boolean {
+  return Boolean(slot && slot.fileCount === 0 && !slot.docId)
 }
 
 function pickFiles(slot: SlotStatus, replace: boolean) {
@@ -273,7 +290,14 @@ async function onFileChange(ev: Event) {
   try {
     let last: SlotStatus | null = null
     for (let i = 0; i < files.length; i++) {
-      const data = await uploadTenderSlot(key, files[i], { replace: replace && i === 0 })
+      const selected = slots.value.find((s) => s.key === key)
+      const sourceKey = selected?.parentKey || key
+      const data = await uploadTenderSlot(sourceKey, files[i], {
+        replace: replace && i === 0,
+        bidderName: materialCompany.value.trim(),
+        materialTitle: selected?.title,
+        materialHint: selected?.hint,
+      })
       last = {
         key,
         title: data.title || slots.value.find((s) => s.key === key)?.title || key,
@@ -288,6 +312,7 @@ async function onFileChange(ev: Event) {
       const idx = slots.value.findIndex((s) => s.key === key)
       if (idx >= 0) slots.value.splice(idx, 1, last)
     }
+    await reload(true)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '上传失败'
   } finally {
@@ -300,7 +325,7 @@ async function onClear(slot: SlotStatus) {
   error.value = ''
   uploadingKey.value = slot.key
   try {
-    const data = await clearTenderSlot(slot.key)
+    const data = await clearTenderSlot(slot.parentKey || slot.key)
     const idx = slots.value.findIndex((s) => s.key === slot.key)
     if (idx >= 0) {
       slots.value.splice(idx, 1, {
@@ -310,6 +335,7 @@ async function onClear(slot: SlotStatus) {
         files: data.files || [],
       })
     }
+    await reload(true)
   } catch (e) {
     error.value = e instanceof ApiError || e instanceof Error ? e.message : '清除失败'
   } finally {
@@ -403,6 +429,10 @@ async function onReindex(force = false) {
   </div>
 
   <div v-else class="space-y-5 max-w-4xl">
+    <MaterialArchivePanel library-only />
+    <label class="block text-sm">本次上传资料所属投标人（请核对）
+      <input v-model="materialCompany" class="kb-input mt-2 w-full" placeholder="填写扫描件实际所属公司；不填写时需靠OCR或人工事实核验，不能自动用于组卷" />
+    </label>
     <Panel title="公司常备扫描件" :subtitle="hint || 'PDF / 图片，可多选；替换会覆盖该项全部文件'">
       <p class="mb-4 text-[12px] text-muted-foreground">
         已维护
@@ -435,7 +465,7 @@ async function onReindex(force = false) {
                 v-if="slot.key === 'perf'"
                 class="mt-1 text-[11px] text-muted-foreground leading-relaxed"
               >
-                上传后会扫描合同/发票，抽出项目名称、规格型号、买方、联系人、合同额、概况和是否在建。招标优先采用已竣工充电桩项目。
+                上传后会扫描合同/发票，抽出项目名称、规格型号、买方、联系人、合同额、概况和是否在建。按本次招标条款核对行业范围、金额、数量与履约状态。
               </p>
               <p
                 v-if="slot.key === 'id_legal'"
@@ -498,7 +528,7 @@ async function onReindex(force = false) {
                 @click="askDeleteItem(slot)"
               >
                 <Trash2 class="size-3" />
-                删除项
+                {{ isVirtualSlot(slot) ? '移除/忽略' : '删除项' }}
               </button>
             </div>
           </div>
@@ -540,7 +570,7 @@ async function onReindex(force = false) {
         class="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
         @click="creditName = DEFAULT_CREDIT_NAME"
       >
-        恢复默认：{{ DEFAULT_CREDIT_NAME }}
+        清空查询公司
       </button>
       <div class="mt-4 flex justify-end gap-2">
         <button type="button" class="h-8 px-3 rounded-md border border-border text-[12px]" @click="showCredit = false">
@@ -592,9 +622,9 @@ async function onReindex(force = false) {
 
   <AppAlertDialog
     :open="Boolean(pendingDelete)"
-    title="删除资料项"
-    :description="`确定删除「${pendingDelete?.title || ''}」及其扫描件？删除后生成投标文件时将不再引用该项。`"
-    confirm-label="确认删除"
+    :title="isVirtualSlot(pendingDelete) ? '移除虚拟资料项' : '删除资料项'"
+    :description="isVirtualSlot(pendingDelete) ? `忽略「${pendingDelete?.title || ''}」？刷新或重新生成后将不再显示此空项。` : `确定删除「${pendingDelete?.title || ''}」及其扫描件？删除后生成投标文件时将不再引用该项。`"
+    :confirm-label="isVirtualSlot(pendingDelete) ? '确认忽略' : '确认删除'"
     :loading="deleting"
     destructive
     @update:open="onDeleteOpen"

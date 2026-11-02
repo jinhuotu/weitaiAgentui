@@ -5,6 +5,7 @@ export type PlaceholderItem = {
   key: string
   title: string
   hint: string
+  demandIds?: string[]
 }
 
 export type PerformanceLine = {
@@ -17,6 +18,7 @@ export type PerformanceLine = {
   summary: string
   note: string
   ongoing: boolean
+  bidderName?: string
   chargerRelated?: boolean
   includeInBid?: boolean
 }
@@ -38,7 +40,6 @@ export type PerformanceMatchResult = {
   reasons: string[]
 }
 
-const CHARGER_SCOPE = new Set(['充电桩', '充电设施', '充电机', '直流桩', '交流桩', '群充'])
 const SCOPE_JUNK = [
   '所要求',
   '相符',
@@ -53,37 +54,7 @@ const SCOPE_JUNK = [
   '填写',
   '详见',
 ]
-const SCOPE_WORDS = [
-  'MES',
-  'MOM',
-  'WMS',
-  'TPM',
-  'QMS',
-  '数字化工厂',
-  '数智化',
-  '智能制造',
-  '制造执行',
-  '制造运营',
-  '充电桩',
-  '充电设施',
-  '充电机',
-  '直流桩',
-  '交流桩',
-  '群充',
-  '热力',
-  '供热',
-  '供暖',
-  '信息化',
-  '系统集成',
-  '软件开发',
-  'DICT',
-  '电缆',
-  '箱变',
-  '光伏',
-  '变电站',
-  '电力施工',
-  'EPC',
-]
+
 
 function wordInBlob(blob: string, word: string) {
   if (!word || !blob) return false
@@ -94,9 +65,7 @@ function wordInBlob(blob: string, word: string) {
 export function cleanPerformanceScope(text: string) {
   const s = (text || '').replace(/\s+/g, '')
   if (s.length < 2) return ''
-  const pickHits = () => SCOPE_WORDS.filter((w) => wordInBlob(s, w)).slice(0, 3).join('、')
-  if (SCOPE_JUNK.some((j) => s.includes(j))) return pickHits()
-  if (s.length > 16) return pickHits()
+  if (SCOPE_JUNK.some((j) => s.includes(j))) return ''
   return s.slice(0, 80)
 }
 
@@ -181,7 +150,7 @@ export function matchPerformanceLine(
     similarOk = tokens.some((word) => {
       if (!word) return false
       if (wordInBlob(blob, word)) return true
-      if (CHARGER_SCOPE.has(word) && (line.chargerRelated || /充电|直流桩|交流桩|群充/.test(blob))) return true
+
       return false
     })
     if (!similarOk) reasons.push('类型不符')
@@ -248,6 +217,7 @@ export type SlotStatus = {
   fileCount: number
   files: SlotFileInfo[]
   docId?: string
+  parentKey?: string
   pinned?: boolean
 }
 
@@ -446,6 +416,7 @@ export type DocumentFormat = {
 }
 
 export type BidBrief = {
+  materialSelections?: import('./tender-materials-api').MaterialSelections
   projectName: string
   tenderer: string
   bidContent: string
@@ -498,6 +469,10 @@ export type BidBrief = {
   includePlaceholders: boolean
   includeCommitment: boolean
   extraPlaceholders: PlaceholderItem[]
+  materialDemands?: MaterialDemand[]
+  materialIntentHash?: string
+  materialIntentComplete?: boolean
+  materialIntentNotes?: string[]
   requiredSlotKeys: string[]
   includeSlotKeys: string[]
   quoteTitle: string
@@ -519,6 +494,7 @@ export type BidBrief = {
   omPlan: string
   schedulePlan: string
   techPlanNote: string
+  techScorecard?: string
   autoDraftTechPlan?: boolean
   autoDraftBizResp?: boolean
   techPlanSourceIds?: string[]
@@ -650,25 +626,18 @@ export type QaReport = {
 }
 
 export function volumeDocx(
-  row: {
-    docxFile?: string
-    downloadName?: string
-    techDocxFile?: string | null
-    techDownloadName?: string | null
-    projectName?: string
-  },
-  volume: BidVolume,
+  row: { docxFile?: string; downloadName?: string; techDocxFile?: string | null;
+         techDownloadName?: string | null; projectName?: string; generateVolume?: string },
+  volume: BidVolume | 'full',
 ): { file: string; name: string } {
-  if (volume === 'technical' && row.techDocxFile) {
-    return {
-      file: row.techDocxFile,
-      name: row.techDownloadName || `${row.projectName || 'bid'}-技术标.docx`,
-    }
+  if (volume === 'full' || row.generateVolume === 'full') {
+    if (volume === 'technical' || (row.generateVolume && row.generateVolume !== 'full')) return { file: '', name: '' }
+    return { file: row.docxFile || '', name: row.downloadName || `${row.projectName || 'bid'}-综合标.docx` }
   }
-  return {
-    file: row.docxFile || '',
-    name: row.downloadName || `${row.projectName || 'bid'}-商务标.docx`,
+  if (volume === 'technical') {
+    return { file: row.techDocxFile || '', name: row.techDownloadName || `${row.projectName || 'bid'}-技术标.docx` }
   }
+  return { file: row.docxFile || '', name: row.downloadName || `${row.projectName || 'bid'}-商务标.docx` }
 }
 
 export type ApprovalStepDef = {
@@ -693,7 +662,28 @@ export type ApprovalReviewInput = {
   roleCode?: string | null
 }
 
+export type MaterialCoverageRow = {
+  id: string
+  title: string
+  text: string
+  section: string
+  level: number
+  slotKey: string
+  placement?: string
+  status: 'filled' | 'pasted' | 'placeholder'
+  reviewRequired: boolean
+}
+export type MaterialCoverage = Partial<Record<'business' | 'technical' | 'full', MaterialCoverageRow[]>>
+export type MaterialDemand = Omit<MaterialCoverageRow, 'status' | 'placement'> & {
+  condition: string
+  volume: string
+  outcomes: Partial<Record<'business' | 'technical' | 'full', MaterialCoverageRow['status']>>
+  placements?: Partial<Record<'business' | 'technical' | 'full', string>>
+}
+
 export type GenerateResult = {
+  materialCoverage?: MaterialCoverage
+  materialIntentComplete?: boolean
   id?: string
   projectName?: string
   tenderer?: string
@@ -742,6 +732,8 @@ export type TenderApprovalLogItem = {
 }
 
 export type TenderRecordItem = {
+  materialCoverage?: MaterialCoverage
+  materialIntentComplete?: boolean
   id: string
   projectName: string
   tenderer: string
@@ -977,6 +969,14 @@ export async function deleteTenderLibraryItem(key: string): Promise<{ key: strin
   })
 }
 
+export async function dismissTenderLibraryItem(key: string): Promise<{ key: string; dismissed: boolean }> {
+  return apiRequest('/api/v1/tenders/library/dismissed', {
+    method: 'POST',
+    token: token(),
+    body: { key },
+  })
+}
+
 export async function fetchTenderSlots(
   extras?: PlaceholderItem[],
   invitationId?: string,
@@ -994,12 +994,15 @@ export async function fetchTenderSlots(
 export async function uploadTenderSlot(
   key: string,
   file: File,
-  options: { replace?: boolean; invitationId?: string } = {},
+  options: { replace?: boolean; invitationId?: string; bidderName?: string; materialTitle?: string; materialHint?: string } = {},
 ): Promise<SlotStatus & { fileName: string }> {
   const form = new FormData()
   form.append('file', file)
   form.append('replace', options.replace === false ? 'false' : 'true')
   if (options.invitationId) form.append('invitationId', options.invitationId)
+  if (options.bidderName) form.append('bidderName', options.bidderName)
+  if (options.materialTitle) form.append('materialTitle',options.materialTitle)
+  if (options.materialHint) form.append('materialHint',options.materialHint)
   return apiRequest(`/api/v1/tenders/slots/${encodeURIComponent(key)}`, {
     method: 'POST',
     token: token(),

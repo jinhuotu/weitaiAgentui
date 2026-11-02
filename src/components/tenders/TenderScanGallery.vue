@@ -38,8 +38,12 @@ watch(
     const next: Record<string, { name: string; value: string }[]> = {}
     for (const file of files) {
       const id = resolveLibraryFileId(file)
-      if (!id || !file.facts?.fields?.length) continue
-      next[id] = file.facts.fields.map((item) => ({ name: item.name, value: item.value }))
+      if (!id) continue
+      const fields = file.facts?.fields || []
+      next[id] = fields.map((item) => ({ name: item.name, value: item.value }))
+      if ((file.idCard || file.facts?.role === 'person/legal') && !next[id].some((field) => field.name === '姓名')) {
+        next[id].unshift({ name: '姓名', value: file.idCard?.name || '' })
+      }
     }
     drafts.value = next
   },
@@ -207,6 +211,7 @@ onUnmounted(() => {
             v-model="field.value"
             class="h-6 min-w-0 flex-1 rounded border border-border bg-transparent px-1 text-[11px]"
             @click.stop
+            @change="saveFacts(it.id, it.file.facts?.role || 'person/legal')"
           />
         </div>
         <button
@@ -215,7 +220,7 @@ onUnmounted(() => {
           :disabled="savingId === it.id"
           @click.stop="saveFacts(it.id, it.file.facts?.role || '')"
         >
-          {{ savingId === it.id ? '保存中' : '保存识别' }}
+          {{ savingId === it.id ? '保存中' : '保存（修改后自动保存）' }}
         </button>
       </div>
     </li>

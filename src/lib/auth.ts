@@ -8,6 +8,7 @@ export type AuthUser = {
   username: string
   display_name: string | null
   email: string | null
+  phone: string | null
   is_superuser: boolean
   roles: string[]
   /** 后端下发的可访问菜单 href；缺省时前端仅按 adminOnly 过滤 */
