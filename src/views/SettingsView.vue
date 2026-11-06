@@ -11,7 +11,7 @@ import {
   TriangleAlert,
   UserRound,
 } from 'lucide-vue-next'
-import { Panel, PageHeader, Tag } from '@/components/ui-kit'
+import { Panel, PageHeader } from '@/components/ui-kit'
 import { ApiError } from '@/lib/api'
 import { fetchHealth } from '@/lib/health-api'
 import { applyQdrantSettings, getQdrantSettings, type QdrantSettings } from '@/lib/knowledge-api'
@@ -90,11 +90,7 @@ onMounted(async () => {
   <PageHeader
     title="系统设置"
     description="主题、账号信息与后端连通性。管理员可查看知识库向量集合并按 .env 重建量化。"
-  >
-    <template #badges>
-      <Tag tone="molybdenum">优祺智能 v0.1.0</Tag>
-    </template>
-  </PageHeader>
+  />
 
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
     <Panel title="外观" subtitle="仅保存在本机浏览器">

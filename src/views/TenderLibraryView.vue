@@ -476,6 +476,7 @@ async function onReindex(force = false) {
               <TenderScanGallery
                 v-if="slot.files?.length"
                 :files="slot.files"
+                :base-id="baseId"
                 removable
                 :removing-id="removingFileId"
                 :saving-id="savingFactsId"
@@ -540,7 +541,7 @@ async function onReindex(force = false) {
         type="file"
         class="hidden"
         multiple
-        accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,application/pdf,image/*"
+        accept=".doc,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf,image/*"
         @change="onFileChange"
       />
     </Panel>

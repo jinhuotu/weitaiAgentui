@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DocumentExpiry from '@/components/DocumentExpiry.vue'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, FileText, FolderOpen, ImageIcon, Trash2, X } from 'lucide-vue-next'
 import { getApiBaseUrl } from '@/lib/api'
@@ -10,6 +11,7 @@ import {
 } from '@/lib/tenders-api'
 
 const props = defineProps<{
+  baseId?: string
   files: SlotFileInfo[]
   removable?: boolean
   removingId?: string | null
@@ -179,6 +181,7 @@ onUnmounted(() => {
           }}</span>
           <span class="shrink-0 leading-5 opacity-70">{{ formatSize(it.file.sizeBytes) }}</span>
         </button>
+        <DocumentExpiry v-if="baseId && it.id" :doc="it.file" :base-id="baseId" :doc-id="it.id" :editable="removable" />
         <button
           v-if="removable && it.id"
           type="button"
@@ -292,7 +295,8 @@ onUnmounted(() => {
             class="h-full min-h-[70vh] w-full border-0 bg-white"
           />
           <p v-else class="px-6 py-10 text-center text-[12px] text-muted-foreground">
-            该类型暂不支持在线预览。资料库目前可预览图片和 PDF。
+            此文件可下载原件后查看和编辑。
+            <a v-if="current.id" :href="fileUrl(current.id)" class="ml-2 underline" download>下载原件</a>
           </p>
 
           <button

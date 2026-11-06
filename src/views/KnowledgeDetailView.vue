@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DocumentExpiry from "@/components/DocumentExpiry.vue"
 import { computed, onMounted, onUnmounted, ref, watch, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -1495,6 +1496,7 @@ async function openDocPreview(doc: KbItem) {
                         :title="it.name"
                       >
                         <span class="truncate">{{ it.name }}</span>
+                        <DocumentExpiry :doc="it" :base-id="baseId" :doc-id="it.id" :editable="canManage" />
                       </div>
                       <div
                         v-if="childCount"

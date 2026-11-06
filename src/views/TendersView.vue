@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import BidTableImportPanel from "@/components/tenders/BidTableImportPanel.vue"
+import RequirementComparison from "@/components/tenders/RequirementComparison.vue"
+import InviteZipPicker from "@/components/tenders/InviteZipPicker.vue"
+import ExpiryWarnings from "@/components/tenders/ExpiryWarnings.vue"
+import type { MaterialExpiryWarning } from "@/lib/tenders-api"
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -149,6 +154,7 @@ function todayYmd() {
 
 function emptyBrief(): BidBrief {
   return {
+    bidTableImportId: '',
     materialSelections: {},
     projectName: '',
     tenderer: '',
@@ -164,9 +170,9 @@ function emptyBrief(): BidBrief {
     warrantyPct: 0,
     bidDate: todayYmd(),
     tenderNo: '',
-    bidderName: '河南优祺计算机科技有限公司',
+    bidderName: '人民电缆集团有限公司',
     bidderNature: '私企',
-    bidderAddress: '博览中心',
+    bidderAddress: '河南省郑州市巩义市永定东路5号',
     bidderWebsite: '',
     bidderPhone: '17630567052',
     bidderFax: '',
@@ -695,8 +701,63 @@ watch(() => form.bidderName, (name, previous) => {
 const materialStageActive = ref(false)
 /** 进入页时的公司默认表单，重置时回到这里，不带本次邀请书 */
 let formBaseline: BidBrief | null = null
-const inviteFile = ref<File | null>(null)
-const quoteFile = ref<File | null>(null)
+const UPLOAD_MAX_FILES = 5
+const uploadOrder = new WeakMap<File, number>()
+let nextUploadOrder = 0
+const inviteFiles = ref<File[]>([])
+const quoteFiles = ref<File[]>([])
+const inviteFile = computed(() => inviteFiles.value[0] || null)
+const quoteFile = computed(() => quoteFiles.value[0] || null)
+function invalidateUploads() {
+  hasParsed.value = false
+  followAdvice.value = false
+  parseNotes.value = ['文件已变更，请重新点击识别']
+  parseOcr.value = null
+  attachmentMatch.value = null
+  result.value = null
+  knownFiles.value = { docx: false, tech: false }
+  qaReport.value = null
+  form.invitationId = ''
+  clearFormatPreview()
+}
+function addUpload(file: File, quote: boolean) {
+  if (parsing.value) return
+  const list = quote ? quoteFiles : inviteFiles
+  const extensions = quote ? ['.xlsx', '.xlsm', '.docx', '.csv', '.pdf'] : ['.doc', '.docx']
+  const name = file.name.toLowerCase()
+  if (!extensions.some(ext => name.endsWith(ext))) {
+    error.value = `《${file.name}》文件格式不支持：${extensions.join(' / ')}`
+    return
+  }
+  if (file.size > KB_UPLOAD_MAX_BYTES) {
+    error.value = `《${file.name}》单文件最大 ${fmtSize(KB_UPLOAD_MAX_BYTES)}`
+    return
+  }
+  if (list.value.some(f => f.name === file.name && f.size === file.size && f.lastModified === file.lastModified)) {
+    error.value = `《${file.name}》重复文件，未添加`
+    return
+  }
+  if (list.value.length >= UPLOAD_MAX_FILES) {
+    error.value = `最多上传 ${UPLOAD_MAX_FILES} 份文件`
+    return
+  }
+  uploadOrder.set(file, nextUploadOrder++)
+  list.value.push(file)
+  if (quote) { quoteRecordIds.value = []; quoteRecordItems.value = [] }
+  else { techDrawingSlot.value = blankTechDrawings(); drawingFill.value = '' }
+  invalidateUploads()
+}
+function changeUpload(quote: boolean, index: number, primary: boolean) {
+  const list = quote ? quoteFiles : inviteFiles
+  const file = list.value[index]
+  if (!file || parsing.value) return
+  list.value.splice(index, 1)
+  if (primary) {
+    list.value.sort((a, b) => (uploadOrder.get(a) || 0) - (uploadOrder.get(b) || 0))
+    list.value.unshift(file)
+  }
+  invalidateUploads()
+}
 const quoteRecordIds = ref<string[]>([])
 const quoteRecordItems = ref<QuoteRecordItem[]>([])
 const quotePickerOpen = ref(false)
@@ -771,7 +832,10 @@ const previewFullscreen = ref(false)
 const parseNotesEpoch = ref(0)
 const previewLayoutTick = ref(0)
 const showRecords = ref(false)
-const previewHintsOpen = ref(true)
+const tableImportPending = ref(false)
+const previewHintsOpen = ref(false)
+const uploadScoringReview = ref<import('@/lib/tenders-api').ScoringReview | null>(null)
+const uploadScoringInvitationId = ref('')
 const recordsLoading = ref(false)
 const records = ref<TenderRecordItem[]>([])
 const recordsTotal = ref(0)
@@ -869,7 +933,7 @@ const GENERATE_NOISE_RE =
   /生成耗时|目录独占一页|更新域|附件区已处理|另有 \d+ 处无扫描件|已匹配资料库扫描件|已附「投标承诺书」|为加快生成未写入|未嵌入 Word|已插入资质文件|分项报价来自|装订时请|已纳入本标但未上传|资料库新建空项|邀请书未抽出资料清单|已有 \d+ 类附件|以下资料未上传|未上传（虚线框|已按组卷大纲用模块填写|已按组卷大纲复制|实施方案图纸用虚线框|报价表表头已按招标书|商务\/技术偏离表共用/
 
 function isGenerateRiskWarning(note: string) {
-  return /未解析到本次|暂用内置模板|请确认使用哪一档|投标总价为 0|未填写法定代表人|支付比例合计|单价为空|未识别到报价清单|未能插入报价|资质 PDF|未找到资质|文字说明待补|实施方案文字描述未写|尚未上传图纸|尚未填写技术偏差|类似业绩为空|尚未抽出摘要|请上传招标工程量|折算|会大量扣分|可能扣分|类似业绩符合|均未达到招标|未从招标书复制|未使用固定承诺书|邀请书正文为空|大纲无.*对应章节|无可填章节/.test(
+  return /填报|格式表|单价分析|技术参数|组件配置|测试数据|未解析到本次|暂用内置模板|请确认使用哪一档|投标总价为 0|未填写法定代表人|支付比例合计|单价为空|未识别到报价清单|未能插入报价|资质 PDF|未找到资质|文字说明待补|实施方案文字描述未写|尚未上传图纸|尚未填写技术偏差|类似业绩为空|尚未抽出摘要|请上传招标工程量|折算|会大量扣分|可能扣分|类似业绩符合|均未达到招标|未从招标书复制|未使用固定承诺书|邀请书正文为空|大纲无.*对应章节|无可填章节/.test(
     note,
   )
 }
@@ -879,19 +943,22 @@ function isGenerateNoiseWarning(note: string) {
   return GENERATE_NOISE_RE.test(note) || note.length > 180
 }
 
+const generateTextWarnings = computed(() => (result.value?.warnings || []).filter((w): w is string => typeof w === 'string'))
+const generateExpiryWarnings = computed(() => (result.value?.warnings || []).filter((w): w is MaterialExpiryWarning => typeof w === 'object' && w?.type === 'material_expiry'))
+
 const generateRiskWarnings = computed(() =>
-  (result.value?.warnings || []).filter(isGenerateRiskWarning),
+  generateTextWarnings.value.filter(isGenerateRiskWarning),
 )
 
 const generateShownWarnings = computed(() => {
-  const all = result.value?.warnings || []
+  const all = generateTextWarnings.value
   const risks = all.filter(isGenerateRiskWarning)
   if (risks.length) return risks
   return all.filter((w) => !isGenerateNoiseWarning(w)).slice(0, 3)
 })
 
 const generateHintsSummary = computed(() => {
-  const risk = generateRiskWarnings.value.length
+  const risk = generateRiskWarnings.value.length + generateExpiryWarnings.value.length
   const shown = generateShownWarnings.value.length
   if (risk) return `${risk} 条需核对`
   if (shown) return `${shown} 条提示`
@@ -902,7 +969,7 @@ const showFormGenerateHints = computed(
   () =>
     Boolean(result.value) &&
     !generateHintsDismissed.value &&
-    generateShownWarnings.value.length > 0,
+    (generateShownWarnings.value.length > 0 || generateExpiryWarnings.value.length > 0),
 )
 
 function dismissGenerateHints() {
@@ -1312,13 +1379,17 @@ const missingMaterialTitles = computed(() => {
   return titles
 })
 
+const formatPending = computed(
+  () => form.structureMode === 'outline' && !form.requirementsDriven && !form.formatConfirmed,
+)
+
 const generateBlockers = computed(() => {
   const issues: string[] = []
   if (isBlank(form.projectName)) issues.push('项目名称')
   if (isBlank(form.tenderer)) issues.push('招标人')
   if (isBlank(form.bidderName)) issues.push('投标人全称')
   if (legalPickMissing.value) issues.push('本标法定代表人')
-  if (form.structureMode === 'outline' && !form.requirementsDriven && !form.formatConfirmed) issues.push('确认格式章模板')
+  if (formatPending.value) issues.push('确认格式章模板')
   if (activeVolume.value === 'technical') return issues
   // Missing identity details and unconfirmed amounts stay blank and are reported
   // in generation notes; they must not force a deployment-wide default profile.
@@ -1529,7 +1600,7 @@ const slotFilledCount = computed(
 const matchHasRows = computed(() => {
   const m = attachmentMatch.value
   if (!m) return false
-  return m.matched.length + m.missingFiles.length + m.createdItems.length > 0
+  return m.matched.length + m.missingFiles.length + m.createdItems.length + (m.wordMaterials?.length || 0) > 0
 })
 
 const TECH_VETO_MARKS = [
@@ -1753,42 +1824,22 @@ const dragOverInvite = ref(false)
 const dragOverQuote = ref(false)
 const dragOverDrawings = ref(false)
 
-function assignInviteFile(file: File) {
-  const name = file.name.trim().toLowerCase()
-  if (!name.endsWith('.doc') && !name.endsWith('.docx')) {
-    error.value = '投标邀请书只支持 .doc 和 .docx'
-    if (fileInput.value) fileInput.value.value = ''
-    return
-  }
-  error.value = ''
-  if (file !== inviteFile.value) {
-    hasParsed.value = false
-    followAdvice.value = false
-    parseNotes.value = []
-    parseOcr.value = null
-    attachmentMatch.value = null
-    result.value = null
-    knownFiles.value = { docx: false, tech: false }
-    qaReport.value = null
-    form.invitationId = ''
-    clearFormatPreview()
-    techDrawingSlot.value = blankTechDrawings()
-    drawingFill.value = ''
-  }
-  inviteFile.value = file
+function addZipInvitations(files: File[]) {
+  files.forEach(file => addUpload(file, false))
 }
+
+function assignInviteFile(file: File) { addUpload(file, false) }
 
 function onPickFile(ev: Event) {
   const input = ev.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (file) assignInviteFile(file)
+  Array.from(input.files || []).forEach(assignInviteFile)
+  input.value = ''
 }
 
 function onInviteDrop(ev: DragEvent) {
   ev.preventDefault()
   dragOverInvite.value = false
-  const file = ev.dataTransfer?.files?.[0]
-  if (file) assignInviteFile(file)
+  Array.from(ev.dataTransfer?.files || []).forEach(assignInviteFile)
 }
 
 function mergeSlotStatus(payload: SlotStatus) {
@@ -1848,7 +1899,7 @@ function refreshAttachmentMatch() {
     else if (item.created) createdItems.push(next)
     else missingFiles.push(next)
   }
-  attachmentMatch.value = { matched, missingFiles, createdItems }
+  attachmentMatch.value = { matched, missingFiles, createdItems, wordMaterials: report.wordMaterials }
 }
 
 
@@ -2399,33 +2450,17 @@ type TenderDefaultsLoose = BidBrief & {
   structureModes?: string[]
 }
 
-function assignQuoteFile(file: File) {
-  const name = file.name.trim().toLowerCase()
-  const ok = ['.xlsx', '.xlsm', '.docx', '.csv', '.pdf'].some((ext) => name.endsWith(ext))
-  if (!ok) {
-    error.value = '报价清单支持 Excel、Word、CSV 或 PDF'
-    if (quoteInput.value) quoteInput.value.value = ''
-    return
-  }
-  error.value = ''
-  if (file !== quoteFile.value) {
-    hasParsed.value = false
-  }
-  quoteFile.value = file
-  quoteRecordIds.value = []
-  quoteRecordItems.value = []
-}
+function assignQuoteFile(file: File) { addUpload(file, true) }
 
 function onPickQuote(ev: Event) {
   const input = ev.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (file) assignQuoteFile(file)
+  Array.from(input.files || []).forEach(assignQuoteFile)
+  input.value = ''
 }
 
 function onQuoteDrop(ev: DragEvent) {
   dragOverQuote.value = false
-  const file = ev.dataTransfer?.files?.[0]
-  if (file) assignQuoteFile(file)
+  Array.from(ev.dataTransfer?.files || []).forEach(assignQuoteFile)
 }
 
 const quoteSourceLabel = computed(() => {
@@ -2491,19 +2526,19 @@ function confirmQuotePicker() {
   quoteRecordItems.value = [...keep, ...picked]
   quoteRecordIds.value = [...quotePickerDraft.value]
   if (quoteRecordIds.value.length) {
-    quoteFile.value = null
+    quoteFiles.value = []
     if (quoteInput.value) quoteInput.value.value = ''
-    hasParsed.value = false
+    invalidateUploads()
   }
   quotePickerOpen.value = false
 }
 
 function clearQuoteSource() {
-  quoteFile.value = null
+  quoteFiles.value = []
   quoteRecordIds.value = []
   quoteRecordItems.value = []
   if (quoteInput.value) quoteInput.value.value = ''
-  hasParsed.value = false
+  invalidateUploads()
 }
 
 function formatQuotePickTime(ms: number) {
@@ -2996,12 +3031,14 @@ async function onParseInvitation() {
     parseElapsed.value += 1
   }, 1000)
   try {
-    const data = await parseTenderInvitation(inviteFile.value, {
+    const data = await parseTenderInvitation(inviteFiles.value, {
       kbIds: selectedKbIds.value,
       current: { ...form },
-      quoteFile: quoteFile.value,
+      quoteFiles: quoteFiles.value,
       quoteRecordIds: quoteRecordIds.value,
     })
+    uploadScoringReview.value = data.scoringReview || null
+    uploadScoringInvitationId.value = data.brief.invitationId || ''
     mergeBriefIntoForm(data.brief)
     form.authEnabled = false
     agentHint.value = data.agentHint || {}
@@ -3270,6 +3307,7 @@ async function acceptMaterialCheck() {
 
 async function doGenerate() {
   error.value = ''
+  if (tableImportPending.value) { error.value = '请先预览并确认本次填报数据，或清除导入后再生成'; return }
   if (workflowLocked.value) {
     error.value = '当前任务已进入审批或已定稿，仅可预览'
     return
@@ -3516,8 +3554,8 @@ function onConfirmResetOpen(open: boolean) {
 function applyWizardReset() {
   if (formBaseline) applyBriefToForm(formBaseline)
   else applyBriefToForm(emptyBrief())
-  inviteFile.value = null
-  quoteFile.value = null
+  inviteFiles.value = []
+  quoteFiles.value = []
   quoteRecordIds.value = []
   quoteRecordItems.value = []
   parseNotes.value = []
@@ -3931,6 +3969,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     <input
       ref="fileInput"
       type="file"
+      multiple
       class="hidden"
       accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       @change="onPickFile"
@@ -3938,6 +3977,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
     <input
       ref="quoteInput"
       type="file"
+      multiple
       class="hidden"
       accept=".xlsx,.xlsm,.docx,.csv,.pdf"
       @change="onPickQuote"
@@ -3996,10 +4036,19 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             {{ inviteFile ? inviteFile.name : '点击或拖拽上传投标邀请书' }}
           </p>
           <p class="text-[11px] text-muted-foreground mt-1">
-            {{ inviteFile ? '点击可更换文件' : `仅 .doc / .docx，单文件最大 ${fmtSize(KB_UPLOAD_MAX_BYTES)}` }}
+            {{ `仅 .doc / .docx，最多 ${UPLOAD_MAX_FILES} 份，单文件最大 ${fmtSize(KB_UPLOAD_MAX_BYTES)}` }}
           </p>
         </button>
 
+        <InviteZipPicker :error="error" :remaining="UPLOAD_MAX_FILES - inviteFiles.length" :disabled="parsing" :report-error="message => error = message" @selected="addZipInvitations" />
+        <ul class="mt-2 space-y-2">
+          <li v-for="(file, index) in inviteFiles" :key="file.name + file.size + file.lastModified" class="flex items-center gap-2 text-xs">
+            <span class="flex-1">{{ file.name }} · {{ fmtSize(file.size) }} <strong v-if="index === 0">（主文件）</strong></span>
+            <button v-if="index > 0" type="button" :disabled="parsing" @click="changeUpload(false, index, true)">设为主文件</button>
+            <button type="button" :disabled="parsing" @click="changeUpload(false, index, false)">移除</button>
+          </li>
+        </ul>
+        <p v-if="inviteFiles.length" class="mt-2 text-xs">共 {{ inviteFiles.length }} 份 / 主文件：{{ inviteFile?.name }}</p>
         <div class="mt-4">
           <p class="text-[13px] font-medium text-foreground">报价清单</p>
           <p class="text-[11px] text-muted-foreground mt-0.5">
@@ -4019,9 +4068,16 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               {{ quoteSourceLabel || '点击或拖拽上传报价清单' }}
             </p>
             <p class="text-[11px] text-muted-foreground mt-1">
-              {{ hasQuoteSource ? '点击可更换文件' : '可不传。支持 .xlsx / .docx / .csv / .pdf' }}
+              {{ `可追加，最多 ${UPLOAD_MAX_FILES} 份，单文件最大 ${fmtSize(KB_UPLOAD_MAX_BYTES)}` }}
             </p>
           </button>
+        <ul class="mt-2 space-y-2">
+          <li v-for="(file, index) in quoteFiles" :key="file.name + file.size + file.lastModified" class="flex items-center gap-2 text-xs">
+            <span class="flex-1">{{ file.name }} · {{ fmtSize(file.size) }} <strong v-if="index === 0">（主文件）</strong></span>
+            <button v-if="index > 0" type="button" :disabled="parsing" @click="changeUpload(true, index, true)">设为主文件</button>
+            <button type="button" :disabled="parsing" @click="changeUpload(true, index, false)">移除</button>
+          </li>
+        </ul>
           <div class="mt-3 flex flex-wrap items-center gap-2">
             <button type="button" class="tender-ghost-btn" @click="openQuotePicker">
               <FileSpreadsheet class="size-3.5" />
@@ -4080,7 +4136,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         >
           <Loader2 v-if="parsing" class="size-3.5 animate-spin" />
           <Sparkles v-else class="size-3.5" />
-          {{ parsing ? `正在读取招标文件… ${parseWaitLabel()}` : '识别并继续' }}
+          {{ parsing ? `共 ${inviteFiles.length} 份 / 主文件：${inviteFile?.name}，正在读取… ${parseWaitLabel()}` : '识别并继续' }}
           <ChevronRight v-if="!parsing" class="size-3.5" />
         </button>
       </footer>
@@ -4099,13 +4155,20 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       <div class="flex justify-end"><button type="button" class="kb-btn-primary" :disabled="materialCheckBusy" @click="materialStageActive = false">资料已核对，继续填写商务/技术标</button></div>
     </section>
     <section v-else-if="currentStepIndex === 1" class="tender-step-panel space-y-4">
+      <BidTableImportPanel
+        v-model="form.bidTableImportId"
+        :invitation-id="form.invitationId || ''"
+        :disabled="workflowLocked || generating"
+        @pending="tableImportPending = $event"
+        @adopt-price="form.bidPriceYuan = $event"
+      />
       <button type="button" class="kb-btn-secondary" @click="materialStageActive = true">返回资料与图纸步骤</button>
       <div
         v-if="parseOcr?.ocrCapped"
         class="tender-card border-sulfur/40 bg-sulfur/10"
       >
         <p class="text-[12px] text-sulfur leading-relaxed">
-          邀请书共 {{ parseOcr.pageCount || '—' }} 页，OCR 已达上限 {{ parseOcr.ocrMaxPages }} 页（实际识别
+          上传文件合计页数 {{ parseOcr.pageCount || '—' }} 页，OCR 已达上限 {{ parseOcr.ocrMaxPages }} 页（实际识别
           {{ parseOcr.ocrPages }} 页）。未识别页未进入抽取，请提高 OCR_MAX_PAGES 后点「识别并继续」重试。
         </p>
       </div>
@@ -4307,11 +4370,12 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             <div class="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                class="h-7 px-2.5 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
+                class="inline-flex h-7 items-center gap-0.5 px-2.5 rounded-md border border-border text-[11px] hover:bg-accent disabled:opacity-50"
                 :disabled="formatPreviewBusy || !form.invitationId"
                 @click="openFormatPreview"
               >
                 {{ formatPreviewBusy ? '打开中…' : '预览模板' }}
+                <span v-if="formatPending" class="tender-req" aria-hidden="true">*</span>
               </button>
               <button
                 type="button"
@@ -4519,7 +4583,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         title="上次生成提示"
         subtitle="只列出需要核对的项；过程说明、耗时和资料库重复项已隐藏"
         collapsible
-        :default-open="generateRiskWarnings.length > 0"
+        :default-open="generateRiskWarnings.length > 0 || generateExpiryWarnings.length > 0"
       >
         <template #summary>{{ generateHintsSummary }}</template>
         <template #action>
@@ -4531,6 +4595,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             隐藏
           </button>
         </template>
+        <ExpiryWarnings :warnings="generateExpiryWarnings" />
         <ul class="space-y-1.5 text-[11px] leading-relaxed">
           <li
             v-for="(w, i) in generateShownWarnings"
@@ -5359,6 +5424,8 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
         <pre v-else class="whitespace-pre-wrap text-[12px] font-sans">{{ form.techScorecard }}</pre>
       </Panel>
 
+
+
       <Panel title="技术章节草稿" subtitle="按邀请书目录分章写，缺事实会标【待补充】。有历史技术标知识库时会参考写法">
         <div class="mb-3 space-y-2 text-[12px]">
           <label class="flex items-center gap-2">
@@ -5580,6 +5647,9 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           </p>
         </div>
       </footer>
+      <p v-if="formatPending" class="tender-format-remind">
+        请先返回顶部预览模板并确认使用识别出来的模板
+      </p>
       <div
         v-if="generating"
         class="tender-gen-progress"
@@ -5702,8 +5772,18 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
           {{ bidSaveBusy ? '正在保存，请稍候' : error }}
         </p>
 
+        <RequirementComparison
+          v-if="!previewFullscreen && result?.id"
+          :record-id="result.id"
+          :file="previewDoc.file"
+          :volume="qaVolume"
+          :requirements="form.bidRequirements || []"
+          :scorecard="form.techScorecard"
+          :scoring-review="uploadScoringInvitationId === form.invitationId ? uploadScoringReview : null"
+        />
+
         <div
-          v-if="generateShownWarnings.length && !previewFullscreen"
+          v-if="(generateShownWarnings.length || generateExpiryWarnings.length) && !previewFullscreen"
           class="tender-preview-hints shrink-0 rounded-md border border-sulfur/30 bg-sulfur/10"
         >
           <button
@@ -5727,6 +5807,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               previewHintsOpen ? '收起' : '展开'
             }}</span>
           </button>
+          <ExpiryWarnings :warnings="generateExpiryWarnings" />
           <ul
             v-if="previewHintsOpen"
             class="tender-preview-hints-list space-y-1 border-t border-sulfur/20 px-3 py-2 text-[11px] text-sulfur"
@@ -5832,6 +5913,7 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
             左上角选商务标只出商务标，选技术标只出技术标。同一任务里两本可以分开生成、分别下载。
           </p>
         </div>
+        <ExpiryWarnings :warnings="generateExpiryWarnings" />
         <ul v-if="generateShownWarnings.length" class="mt-3 space-y-1 text-[11px] text-sulfur">
           <li v-for="(w, i) in generateShownWarnings" :key="i" class="flex gap-1.5">
             <TriangleAlert class="size-3.5 shrink-0 mt-0.5" />
@@ -5920,10 +6002,20 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
       </Panel>
 
       <div
-        v-if="result.attachmentMatch && (result.attachmentMatch.matched.length || result.attachmentMatch.missingFiles.length || result.attachmentMatch.createdItems.length)"
+        v-if="result.attachmentMatch && (result.attachmentMatch.matched.length || result.attachmentMatch.missingFiles.length || result.attachmentMatch.createdItems.length || result.attachmentMatch.wordMaterials?.length)"
         class="tender-card"
       >
         <p class="text-[12px] font-medium mb-1">本标附件对照</p>
+        <details v-if="result.attachmentMatch.wordMaterials?.length" class="mt-2 text-[11px]">
+          <summary class="cursor-pointer">Word 资料处理结果 {{ result.attachmentMatch.wordMaterials.length }} 项</summary>
+          <ul class="mt-1 space-y-1">
+            <li v-for="(item, index) in result.attachmentMatch.wordMaterials" :key="item.bindingId + index">
+              {{ item.targetTitle }} · {{ item.status === 'copied' ? '正文已复制，待确认' : item.status === 'filled' ? (item.contentScope === 'cover' ? '封面已填充，参数待确认' : '原表已填充，待确认') : item.status === 'reference' ? '填报参考' : '待处理' }}
+              <span v-if="item.reason"> · {{ item.reason }}</span>
+              <p v-if="item.pendingFields?.length" class="text-sulfur">待核对字段 {{ item.pendingFields.join('、') }}</p>
+            </li>
+          </ul>
+        </details>
         <p v-if="result.attachmentMatch.matched.length" class="text-[11px] text-emerald-700 dark:text-emerald-400">
           已写入扫描件 {{ result.attachmentMatch.matched.length }} 项
         </p>
@@ -6536,6 +6628,13 @@ select.outline-kind-select {
 .tender-req {
   margin-left: 0.15em;
   font-weight: 700;
+  color: var(--destructive, #e03e3e);
+}
+.tender-format-remind {
+  margin-top: 0.35rem;
+  text-align: right;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--destructive, #e03e3e);
 }
 </style>

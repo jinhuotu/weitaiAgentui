@@ -1,3 +1,11 @@
+export type MaterialExpiryWarning = {
+  type: 'material_expiry'; key: string; material_name: string;
+  document_id: string; document_name: string; expire_at: string | null;
+  expire_status: string; remaining_days: number | null;
+  level: 'danger' | 'warning' | 'info'; advice: string;
+}
+export type GenerationWarning = string | MaterialExpiryWarning
+
 import { apiDownload, apiFetchBlob, apiRequest } from './api'
 import { getAccessToken } from './auth'
 
@@ -190,7 +198,7 @@ export type LibraryFacts = {
   source?: string
 }
 
-export type SlotFileInfo = {
+export type SlotFileInfo = import('./knowledge-api').ExpiryInfo & {
   id?: string
   fileId?: string
   name: string
@@ -416,6 +424,7 @@ export type DocumentFormat = {
 }
 
 export type BidBrief = {
+  bidTableImportId?: string
   materialSelections?: import('./tender-materials-api').MaterialSelections
   projectName: string
   tenderer: string
@@ -567,7 +576,21 @@ export type AttachmentMatchItem = {
   created?: boolean
 }
 
+export type WordMaterialOutcome = {
+  bindingId: string
+  sourceDocumentId: string
+  targetId: string
+  targetTitle: string
+  mode: 'chapter' | 'table' | 'reference'
+  contentScope?: 'section' | 'cover'
+  status: 'copied' | 'filled' | 'reference' | 'needs_review'
+  reason?: string
+  pendingFields?: string[]
+  reviewRequired?: boolean
+}
+
 export type AttachmentMatch = {
+  wordMaterials?: WordMaterialOutcome[]
   matched: AttachmentMatchItem[]
   missingFiles: AttachmentMatchItem[]
   createdItems: AttachmentMatchItem[]
@@ -601,7 +624,38 @@ export type QaCoverageBucket = {
 
 export type BidVolume = 'business' | 'technical'
 
+export type ScoringReview = {
+  extractionComplete?: boolean
+  reviewComplete?: boolean
+  phase?: 'extracting' | 'extracted' | 'reviewing' | 'reviewed' | 'partial' | 'failed'
+  applicabilityPending?: number
+  coverage?: { readableTextOnly: boolean; totalUnits?: number; reviewedUnits?: number; pendingUnits?: number; scoringUnits?: number; nonScoringUnits?: number }
+  issues?: Array<{ kind: string; message: string; unitIds: string[] }>
+  units?: Array<{ id: string; kind: string; section: string; sourceLocation: string; status: string; reason: string; rowIds: string[] }>
+  version: string
+  complete: boolean
+  warnings: string[]
+  rows: Array<{
+    id: string
+    title: string
+    requirement: string
+    maxScore: number | null
+    ruleType?: string
+    sourceSection?: string
+    sourceContext?: string
+    scopeLabels?: string[]
+    applicability?: 'common' | 'applicable' | 'unresolved'
+    volume: string
+    sourceLocation: string
+    status: 'conforming' | 'nonconforming' | 'partial' | 'indeterminate'
+    reason: string
+    bidEvidence: string
+    bidLocation: string
+  }>
+}
+
 export type QaReport = {
+  scoringReview?: ScoringReview
   recordId: string
   docxFile?: string
   volume?: BidVolume | string
@@ -695,7 +749,7 @@ export type GenerateResult = {
   downloadName: string
   techDownloadName?: string | null
   pdfDownloadName: string | null
-  warnings: string[]
+  warnings: GenerationWarning[]
   username?: string
   createdAt?: number
   docxAvailable?: boolean
@@ -745,7 +799,7 @@ export type TenderRecordItem = {
   downloadName: string
   techDownloadName?: string | null
   pdfDownloadName: string | null
-  warnings: string[]
+  warnings: GenerationWarning[]
   username: string
   createdAt: number
   docxAvailable: boolean
@@ -789,6 +843,9 @@ export type TenderEditorConfig = {
 }
 
 export type ParseInvitationResult = {
+  scoringReview?: ScoringReview
+  fileNames: string[]
+  quoteFileNames: string[]
   brief: BidBrief
   filledKeys: string[]
   notes: string[]
@@ -1042,19 +1099,17 @@ export async function deleteTenderLibraryFile(docId: string): Promise<SlotStatus
 }
 
 export async function parseTenderInvitation(
-  file: File,
+  files: File[],
   options: {
     kbIds?: string[]
     current?: BidBrief
-    quoteFile?: File | null
+    quoteFiles?: File[]
     quoteRecordIds?: string[]
   } = {},
 ): Promise<ParseInvitationResult> {
   const form = new FormData()
-  form.append('file', file)
-  if (options.quoteFile) {
-    form.append('quoteFile', options.quoteFile)
-  }
+  files.forEach((file) => form.append('files', file))
+  options.quoteFiles?.forEach((file) => form.append('quoteFiles', file))
   if (options.quoteRecordIds?.length) {
     form.append('quoteRecordIds', JSON.stringify(options.quoteRecordIds))
   }

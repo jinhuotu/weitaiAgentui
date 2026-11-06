@@ -58,6 +58,7 @@ function canSeeNavItem(
   if (it.adminOnly && !admin) return false
   if (admin) return true
   if (!menus || menus.length === 0) return it.href === '/'
+  if (['/tender-package', '/tender-package-wizard'].includes(it.href) && menus.includes('/tenders')) return true
   if (menus.includes(it.href)) return true
   if (isQuotePath(it.href) && QUOTE_FAMILY.some((h) => menus.includes(h))) return true
   return false
@@ -131,6 +132,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/approval', label: '审批流程', icon: BadgeCheck },
       { href: '/knowledge', label: '知识库', icon: LibraryBig },
       { href: '/tenders', label: 'AI标书生成', icon: FileText },
+      { href: '/tender-package', label: '压缩包标书（高级模式）', icon: FolderOpen },
       { href: '/tender-qa', label: 'AI标书评分', icon: FileSearch },
       { href: QUOTE_NAV_HREF, label: QUOTE_NAV_LABEL, icon: FileSpreadsheet },
       { href: '/tender-library', label: '投标资料库', icon: FolderOpen },
@@ -193,6 +195,7 @@ export const NAV_ITEM_DESC: Record<string, string> = {
   '/approval': '待审、已审与我发起的申请',
   '/knowledge': '文档入库、检索与预览',
   '/tenders': '邀请书识别与文档生成',
+  '/tender-package': '压缩包全流程高级操作',
   '/tender-qa': '对照邀请书给生成稿或终稿打分',
   [QUOTE_NAV_HREF]: '造价、报价与控制预算一站生成',
   '/tender-library': '企业常备资料与扫描件',

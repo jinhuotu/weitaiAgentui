@@ -17,7 +17,7 @@ export type KnowledgeBaseItem = {
   canManage?: boolean;
 };
 
-export type KbDocItem = {
+export type KbDocItem = ExpiryInfo & {
   id: string;
   baseId?: string | null;
   name: string;
@@ -505,5 +505,19 @@ export async function applyQdrantSettings(): Promise<{
     method: 'POST',
     token: requireToken(),
     body: { confirm: true },
+  });
+}
+
+
+export type ExpiryInfo = {
+  expire_at?: string | null;
+  is_perpetual?: boolean;
+  expire_status?: 'unknown' | 'perpetual' | 'expired' | 'expiring' | 'normal';
+  expire_level?: 'none' | 'danger' | 'warning';
+  expire_days?: number | null;
+};
+export async function updateDocumentExpiry(baseId: string, docId: string, expire_at: string | null, is_perpetual: boolean): Promise<{item: KbDocItem}> {
+  return apiRequest(`/api/v1/knowledge/documents/${encodeURIComponent(docId)}/expiry`, {
+    method: 'PATCH', token: requireToken(), body: { baseId, expire_at, is_perpetual },
   });
 }

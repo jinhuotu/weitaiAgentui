@@ -8,7 +8,6 @@ import { fmtAgo } from '@/lib/time'
 import { NAV_ITEM_DESC } from '@/config/nav'
 import { useNavDragReorder } from '@/composables/useNavDragReorder'
 import { useOrderedPrimaryNav } from '@/composables/useOrderedPrimaryNav'
-import { APP_NAME, APP_VERSION, COMPANY_NAME, COPYRIGHT_YEAR } from '@/config/brand'
 
 const router = useRouter()
 const { items: primaryItems, moreItems: moreNavItems, commitOrder } = useOrderedPrimaryNav()
@@ -274,11 +273,6 @@ onUnmounted(() => {
         </div>
       </div>
     </section>
-
-    <footer class="portal-footer">
-      技术支持：{{ COMPANY_NAME }}
-      ©{{ COPYRIGHT_YEAR }} {{ APP_NAME }} {{ APP_VERSION }}
-    </footer>
   </div>
 </template>
 
@@ -288,17 +282,6 @@ onUnmounted(() => {
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 100%;
-}
-
-.portal-footer {
-  margin-top: auto;
-  padding: 1rem 0.5rem 0.15rem;
-  text-align: center;
-  font-size: 0.75rem;
-  line-height: 1.5;
-  letter-spacing: 0.02em;
-  color: var(--muted-foreground, #6b7280);
-  white-space: nowrap;
 }
 
 .portal-modules {
@@ -695,11 +678,6 @@ onUnmounted(() => {
 @media (max-width: 520px) {
   .portal-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .portal-footer {
-    font-size: 0.6875rem;
-    white-space: normal;
   }
 }
 </style>

@@ -10,6 +10,7 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import { useMobileMenuStore } from '@/stores/mobile-menu'
 import { useTabsStore } from '@/stores/tabs'
+import { APP_NAME } from '@/config/brand'
 
 const LoginView = () => import('@/views/LoginView.vue')
 const AppShell = () => import('@/layouts/AppShell.vue')
@@ -24,6 +25,8 @@ const MIGRATED_VIEWS: Record<string, () => Promise<{ default: Component }>> = {
   '/mcp-manage': () => import('@/views/McpManageView.vue'),
   '/knowledge': () => import('@/views/KnowledgeListView.vue'),
   '/tenders': () => import('@/views/TendersView.vue'),
+  '/tender-package-wizard': () => import('@/views/TenderPackageWizard.vue'),
+  '/tender-package': () => import('@/views/TenderPackageView.vue'),
   '/tender-qa': () => import('@/views/TenderQaView.vue'),
   '/quotes': () => import('@/views/QuotesView.vue'),
   '/quotes-cost': () => import('@/views/QuotesView.vue'),
@@ -152,8 +155,8 @@ router.onError((err) => {
 
 router.afterEach((to) => {
   sessionStorage.removeItem(CHUNK_RELOAD_KEY)
-  const title = (to.meta.title as string | undefined) || '优祺智能'
-  document.title = `${title} · 优祺智能`
+  const title = (to.meta.title as string | undefined) || APP_NAME
+  document.title = `${title} · ${APP_NAME}`
 
   useMobileMenuStore().close()
 
