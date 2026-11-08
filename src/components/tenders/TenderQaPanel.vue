@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { Loader2, ShieldCheck, TriangleAlert } from 'lucide-vue-next'
 import { Tag } from '@/components/ui-kit'
 import type { QaGap, QaReport, RequirementCoverage } from '@/lib/tenders-api'
+import { scoringRuleLabel } from '@/lib/scoring-labels'
 
 const props = withDefaults(
   defineProps<{
@@ -14,6 +15,9 @@ const props = withDefaults(
     title?: string
     runLabel?: string
     showRun?: boolean
+    recordId?: string
+    volume?: string
+    reviewingItem?: string
   }>(),
   {
     loading: false,
@@ -23,11 +27,15 @@ const props = withDefaults(
     title: 'AI 自检',
     runLabel: '',
     showRun: true,
+    recordId: '',
+    volume: 'business',
+    reviewingItem: '',
   },
 )
 
 const emit = defineEmits<{
   run: []
+  review: [itemId: string, status: 'confirmed' | 'rectified']
 }>()
 
 const COVERAGE_LABEL: Record<string, string> = {
@@ -73,29 +81,82 @@ const groupedMissing = computed(() => {
   const groups: { severity: string; label: string; items: QaGap[] }[] = [
     { severity: 'disqualify', label: '🔴 否决投标风险（致命）', items: [] },
     { severity: 'deduct', label: '🟠 中等风险', items: [] },
-    { severity: 'suggest', label: '🟡 格式瑕疵', items: [] },
   ]
   for (const item of props.report?.missing || []) {
-    const group = groups.find((g) => g.severity === item.severity) || groups[2]
-    group.items.push(item)
+    const group = groups.find((g) => g.severity === item.severity)
+    if (group) group.items.push(item)
   }
   return groups.filter((g) => g.items.length)
 })
 
+const attentionMissing = computed(() =>
+  (props.report?.missing || []).filter((item) => item.severity === 'suggest'),
+)
+
+const structuredAttention = computed(() => props.report?.attentionItems || [])
+
 const vetoCoverage = computed<RequirementCoverage | null>(() => props.report?.requirementCoverage || null)
 
 const vetoGaps = computed(() =>
-  (vetoCoverage.value?.rows || []).filter((row) => row.matchStatus === 'gap' || row.matchStatus === 'unbound'),
+  (vetoCoverage.value?.rows || []).filter((row) => row.matchStatus === 'gap'),
 )
 
-const vetoFormats = computed(() =>
-  (vetoCoverage.value?.rows || []).filter((row) => row.matchStatus === 'format'),
+const attentionRows = computed(() =>
+  (vetoCoverage.value?.rows || []).filter((row) => row.matchStatus === 'unbound' || row.matchStatus === 'format'),
 )
+
+const scoreRows = computed(() =>
+  props.report?.scoringReview?.rows || [],
+)
+
+const applicableScoreRows = computed(() => scoreRows.value.filter((row) => row.applicability !== 'unresolved'))
+
+const scoreSummary = computed(() => {
+  const rows = applicableScoreRows.value
+  return {
+    total: rows.length,
+    conforming: rows.filter((row) => row.status === 'conforming').length,
+    pending: rows.filter((row) => row.status === 'partial' || row.status === 'indeterminate').length,
+    risk: rows.filter((row) => row.status === 'nonconforming').length,
+    estimated: rows.filter((row) => row.status === 'conforming').reduce((sum, row) => sum + (Number(row.maxScore) || 0), 0),
+    maximum: rows.reduce((sum, row) => sum + (Number(row.maxScore) || 0), 0),
+  }
+})
+
+const userSummary = computed(() => ({
+  veto: vetoGaps.value.length,
+  score: scoreSummary.value.total,
+  scoreRisk: scoreSummary.value.risk,
+  attention: attentionRows.value.length + attentionMissing.value.length,
+}))
 
 function vetoStatusLabel(status?: string) {
   if (status === 'gap') return '尚未覆盖'
-  if (status === 'unbound') return '格式章无此空'
-  return '只提示'
+  return '待核实'
+}
+
+function scoreStatusLabel(status?: string) {
+  if (status === 'conforming') return '已响应'
+  if (status === 'partial') return '部分响应'
+  if (status === 'nonconforming') return '未满足'
+  return '待核实'
+}
+
+function scoreStatusTone(status?: string): 'patina' | 'sulfur' | 'iron' {
+  if (status === 'conforming') return 'patina'
+  if (status === 'nonconforming') return 'sulfur'
+  return 'iron'
+}
+
+function verificationLabel(status?: string) {
+  return {
+    found: '已找到',
+    not_found: '未找到',
+    passed: '已通过',
+    failed: '不通过',
+    not_verifiable_from_text: '不可自动判定',
+    manual_review: '需人工确认',
+  }[status || ''] || '需人工确认'
 }
 
 const emptyHint = computed(() => {
@@ -182,16 +243,110 @@ const runText = computed(() => {
       </p>
     </div>
 
-    <ul v-if="vetoGaps.length || vetoFormats.length" class="mt-2 space-y-1.5 text-[11px] leading-snug">
+    <div v-if="report" class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 text-[11px]">
+      <div class="rounded border border-red-500/25 bg-red-500/5 px-2.5 py-2">
+        <div class="text-muted-foreground">否决风险</div>
+        <div class="mt-0.5 text-[15px] font-semibold text-red-600">{{ userSummary.veto }}</div>
+      </div>
+      <div class="rounded border border-border px-2.5 py-2">
+        <div class="text-muted-foreground">评分项</div>
+        <div class="mt-0.5 text-[15px] font-semibold">{{ userSummary.score }}</div>
+      </div>
+      <div class="rounded border border-orange-500/25 bg-orange-500/5 px-2.5 py-2">
+        <div class="text-muted-foreground">评分待处理</div>
+        <div class="mt-0.5 text-[15px] font-semibold text-orange-600">{{ userSummary.scoreRisk + scoreSummary.pending }}</div>
+      </div>
+      <div class="rounded border border-border px-2.5 py-2">
+        <div class="text-muted-foreground">预计得分</div>
+        <div class="mt-0.5 text-[15px] font-semibold">
+          {{ scoreSummary.estimated }}<span class="text-[11px] font-normal text-muted-foreground"> / {{ scoreSummary.maximum }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="vetoGaps.length" class="mt-2 space-y-1.5 text-[11px] leading-snug">
+      <div class="mb-1 font-medium text-foreground">需要优先处理的否决风险（{{ vetoGaps.length }}）</div>
+      <ul class="space-y-1.5">
       <li v-for="row in vetoGaps" :key="'veto-' + row.id">
         <span class="font-medium text-foreground">{{ vetoStatusLabel(row.matchStatus) }}</span>
         <span class="text-muted-foreground"> {{ row.text }}</span>
         <span v-if="row.matchNote" class="block text-muted-foreground">{{ row.matchNote }}</span>
       </li>
-      <li v-for="row in vetoFormats" :key="'fmt-' + row.id" class="text-muted-foreground">
-        只提示：{{ row.text }}
-      </li>
-    </ul>
+      </ul>
+    </div>
+
+    <div v-if="scoreRows.length" class="mt-3 text-[11px] leading-snug">
+      <div class="mb-1 flex items-center justify-between gap-2">
+        <span class="font-medium text-foreground">招标文件评分项（{{ scoreRows.length }}）</span>
+        <span v-if="report?.scoringReview?.coverage?.scoringUnits" class="text-muted-foreground">
+          已识别 {{ report.scoringReview.coverage.scoringUnits }} 项
+        </span>
+      </div>
+      <ul class="space-y-1.5">
+        <li v-for="row in scoreRows" :key="'score-' + row.id" class="rounded border border-border/70 px-2 py-1.5">
+          <div class="flex items-start justify-between gap-2">
+            <span class="font-medium text-foreground">{{ row.title || row.requirement }}</span>
+            <Tag :tone="scoreStatusTone(row.status)">
+              {{ scoreStatusLabel(row.status) }}<template v-if="row.maxScore != null"> · {{ row.maxScore }}分</template>
+            </Tag>
+          </div>
+          <div v-if="row.ruleType" class="mt-0.5 text-muted-foreground">规则类型：{{ scoringRuleLabel(row.ruleType) }}</div>
+          <div v-if="row.scopeLabels?.length" class="mt-0.5 text-muted-foreground">原文适用范围：{{ row.scopeLabels.join('、') }}</div>
+          <div v-if="row.applicability === 'unresolved'" class="mt-0.5 text-amber-700">适用范围待确认，未与本次标段混合判定。</div>
+          <div class="mt-0.5 text-muted-foreground">{{ row.requirement }}</div>
+          <div v-if="row.reason" class="mt-0.5 text-muted-foreground">{{ row.reason }}</div>
+          <div class="mt-0.5 text-muted-foreground">当前标书原文：{{ row.bidEvidence || '尚无可核实的实质证据' }}</div>
+          <div v-if="row.sourceLocation || row.bidLocation" class="mt-0.5 text-muted-foreground">
+            招标文件位置：{{ row.sourceLocation || '未标注' }}<template v-if="row.bidLocation"> · 响应位置：{{ row.bidLocation }}</template>
+          </div>
+        </li>
+      </ul>
+    </div>
+
+    <details v-if="structuredAttention.length || attentionRows.length" class="mt-3 text-[11px] leading-snug">
+      <summary class="cursor-pointer font-medium text-muted-foreground">
+        容易忽略的规则（{{ structuredAttention.length + attentionRows.length }}）
+      </summary>
+      <ul class="mt-1.5 space-y-1.5">
+        <li v-for="item in structuredAttention" :key="item.id">
+          <span class="font-medium text-foreground">{{ item.title }}</span>
+          <Tag class="ml-1 align-middle" :tone="item.severity === 'high' ? 'sulfur' : 'iron'">{{ verificationLabel(item.verificationStatus) }}</Tag>
+          <span class="block text-muted-foreground">{{ item.requirement }}</span>
+          <span class="block text-muted-foreground">
+            {{ item.sourceFile || '招标文件原文' }}
+            <template v-if="item.sourceChapter"> · {{ item.sourceChapter }}</template>
+            <template v-if="item.sourcePage"> · 第 {{ item.sourcePage }} 页</template>
+            <template v-else> · 原文第 {{ item.sourceLine }} 行</template>
+            · 请核对投标文件及提交介质
+          </span>
+          <span v-if="item.verificationNote" class="block text-muted-foreground">
+            自动核验：{{ item.verificationNote }}
+          </span>
+          <div v-if="recordId" class="mt-1 flex gap-1">
+            <button type="button" class="rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-accent disabled:opacity-50" :disabled="reviewingItem === item.id" @click="emit('review', item.id, 'confirmed')">确认</button>
+            <button type="button" class="rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-accent disabled:opacity-50" :disabled="reviewingItem === item.id" @click="emit('review', item.id, 'rectified')">整改完成</button>
+            <span v-if="item.review?.status" class="self-center text-[10px] text-muted-foreground">{{ item.review.status }}</span>
+          </div>
+        </li>
+        <li v-for="row in attentionRows" :key="'attention-' + row.id">
+          <span class="font-medium text-foreground">待人工确认</span>
+          <span class="text-muted-foreground"> {{ row.text }}</span>
+          <span v-if="row.matchNote" class="block text-muted-foreground">{{ row.matchNote }}</span>
+        </li>
+      </ul>
+    </details>
+
+    <details v-if="attentionMissing.length" class="mt-3 text-[11px] leading-snug">
+      <summary class="cursor-pointer font-medium text-muted-foreground">
+        其他格式与提交提醒（{{ attentionMissing.length }}）
+      </summary>
+      <ul class="mt-1.5 space-y-1.5">
+        <li v-for="(item, i) in attentionMissing" :key="`attention-missing-${i}`" class="text-muted-foreground">
+          <span class="font-medium text-foreground">{{ item.title }}</span>
+          <span v-if="item.reason">：{{ item.reason }}</span>
+        </li>
+      </ul>
+    </details>
 
     <div
       v-if="groupedMissing.length"

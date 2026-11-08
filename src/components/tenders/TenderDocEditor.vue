@@ -82,6 +82,20 @@ function fitBrowserPages() {
   wrapper.style.marginBottom = `${Math.round(-(1 - scale) * wrapper.scrollHeight)}px`
 }
 
+function stabilizeBrowserTableBorders(host: HTMLElement) {
+  for (const cell of host.querySelectorAll<HTMLTableCellElement>('td, th')) {
+    const style = getComputedStyle(cell)
+    const hasBorder = [style.borderTopStyle, style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle]
+      .some((borderStyle, index) => borderStyle !== 'none' && borderStyle !== 'hidden' && [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth][index] !== '0px')
+    if (!hasBorder) continue
+    const widths = [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth]
+      .map((width) => Number.parseFloat(width) || 0)
+      .filter((width) => width > 0)
+    const originalWidth = Math.min(...widths)
+    cell.style.setProperty('--docx-border-w', `${originalWidth}px`)
+  }
+}
+
 function applyPdfZoom(resetViewer = false) {
   if (activeEngine.value !== 'pdf') return
   const host = editorHost.value
@@ -238,6 +252,7 @@ async function bootBrowser(host: HTMLElement, gen: number) {
     renderEndnotes: true,
   })
   await nextTick()
+  stabilizeBrowserTableBorders(host)
   fitBrowserPages()
   watchHostResize(() => {
     fitBrowserPages()
@@ -679,6 +694,12 @@ onBeforeUnmount(() => {
 
 .tender-doc-editor__host--browser :deep(table) {
   max-width: 100%;
+  border-collapse: collapse;
+}
+
+.tender-doc-editor__host--browser :deep(td),
+.tender-doc-editor__host--browser :deep(th) {
+  border-width: max(1px, var(--docx-border-w, 0.5px));
 }
 
 .tender-doc-editor__host--browser :deep(img) {

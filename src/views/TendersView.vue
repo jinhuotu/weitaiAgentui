@@ -58,6 +58,7 @@ import {
   inspectTenderQa,
   publishTenderRecord,
   parseTenderInvitation,
+  getTenderScoringStatus,
   prepareInvitationFormatDocx,
   previewTenderOutline,
   regenerateTenderRecord,
@@ -170,6 +171,10 @@ function emptyBrief(): BidBrief {
     warrantyPct: 0,
     bidDate: todayYmd(),
     tenderNo: '',
+    lotName: '',
+    lotNo: '',
+    packageName: '',
+    packageNo: '',
     bidderName: '人民电缆集团有限公司',
     bidderNature: '私企',
     bidderAddress: '河南省郑州市巩义市永定东路5号',
@@ -3038,6 +3043,9 @@ async function onParseInvitation() {
       quoteRecordIds: quoteRecordIds.value,
     })
     uploadScoringReview.value = data.scoringReview || null
+    if (data.scoringTaskId) {
+      void pollScoringTask(data.scoringTaskId)
+    }
     uploadScoringInvitationId.value = data.brief.invitationId || ''
     mergeBriefIntoForm(data.brief)
     form.authEnabled = false
@@ -3097,6 +3105,17 @@ async function onParseInvitation() {
   } finally {
     window.clearInterval(parseClock)
     parsing.value = false
+  }
+}
+
+async function pollScoringTask(taskId: string) {
+  for (let i = 0; i < 60; i += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 2000))
+    try {
+      const task = await getTenderScoringStatus(taskId)
+      if (task.status === 'completed') { uploadScoringReview.value = task.result || null; return }
+      if (task.status === 'failed') { parseNotes.value = [...parseNotes.value, task.error || '评分识别失败，已转人工复核']; return }
+    } catch { return }
   }
 }
 
@@ -4675,6 +4694,22 @@ async function onDownload(kind: 'docx' | 'tech' | 'pdf') {
               class="kb-input font-sans"
               placeholder="填写本次招标文件明确的采购或服务范围"
             />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">分标名称</span>
+            <input v-model="form.lotName" class="kb-input font-sans" placeholder="分标名称（有则填写）" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">分标编号</span>
+            <input v-model="form.lotNo" class="kb-input font-sans" placeholder="分标编号（有则填写）" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">包名称</span>
+            <input v-model="form.packageName" class="kb-input font-sans" placeholder="包名称（有则填写）" />
+          </label>
+          <label class="text-[12px] space-y-1">
+            <span class="text-muted-foreground">包号</span>
+            <input v-model="form.packageNo" class="kb-input font-sans" placeholder="包号（有则填写）" />
           </label>
         </div>
       </Panel>

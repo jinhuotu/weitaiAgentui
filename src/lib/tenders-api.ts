@@ -440,6 +440,10 @@ export type BidBrief = {
   warrantyPct: number
   bidDate: string
   tenderNo: string
+  lotName: string
+  lotNo: string
+  packageName: string
+  packageNo: string
   bidderName: string
   bidderNature: string
   bidderAddress: string
@@ -671,6 +675,28 @@ export type QaReport = {
   llmUsed: boolean
   coverage: Record<string, QaCoverageBucket>
   requirementCoverage?: RequirementCoverage
+  attentionItems?: Array<{
+    id: string
+    kind: string
+    title: string
+    requirement: string
+    sourceLine: number
+    sourceText: string
+    sourceChapter?: string
+    sourcePage?: number | null
+    sourceFile?: string
+    verificationStatus?: string
+    verificationNote?: string
+    review?: {
+      status?: 'pending' | 'confirmed' | 'rectified' | string
+      owner?: string
+      note?: string
+      confirmedAt?: string
+      confirmedBy?: string
+    }
+    severity: 'high' | 'medium' | string
+    status: 'manual_review' | string
+  }>
   missing: QaGap[]
   letterChecklist?: string[]
   checkedAt?: number
@@ -828,6 +854,15 @@ export type TenderRecordItem = {
   qaGrade?: string | null
   qaSource?: string | null
   qaCheckedAt?: number | null
+  qaSummary?: {
+    vetoRiskCount: number
+    scoreItemCount: number
+    scoreRiskCount: number
+    scorePendingCount: number
+    attentionCount: number
+    estimatedScore: number
+    maximumScore: number
+  } | null
 }
 
 export function isTenderWorkflowLocked(status?: string | null, locked?: boolean): boolean {
@@ -844,6 +879,7 @@ export type TenderEditorConfig = {
 
 export type ParseInvitationResult = {
   scoringReview?: ScoringReview
+  scoringTaskId?: string
   fileNames: string[]
   quoteFileNames: string[]
   brief: BidBrief
@@ -1126,6 +1162,10 @@ export async function parseTenderInvitation(
   })
 }
 
+export async function getTenderScoringStatus(taskId: string): Promise<{ status: string; result?: ScoringReview; error?: string }> {
+  return apiRequest(`/api/v1/tenders/parse-invitation/scoring/${encodeURIComponent(taskId)}`, { token: token() })
+}
+
 export async function draftTenderTech(
   brief: BidBrief,
   options: { kbIds?: string[]; itemId?: string; promptId?: string; materialIds?: string[] } = {},
@@ -1262,6 +1302,17 @@ export async function inspectTenderQaUpload(
       body: form,
     },
   )
+}
+
+export async function reviewTenderQaItem(
+  recordId: string,
+  volume: BidVolume | string,
+  itemId: string,
+  body: { status: 'pending' | 'confirmed' | 'rectified'; owner?: string; note?: string },
+): Promise<{ changed: boolean; itemId: string; review: Record<string, unknown> }> {
+  return apiRequest(`/api/v1/tenders/records/${encodeURIComponent(recordId)}/qa/${encodeURIComponent(volume)}/items/${encodeURIComponent(itemId)}/review`, {
+    method: 'POST', token: token(), body,
+  })
 }
 
 export async function fetchTenderQa(

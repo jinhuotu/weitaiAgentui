@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Loader2, Search, Upload } from 'lucide-vue-next'
+import { AlertTriangle, Loader2, Search, Upload } from 'lucide-vue-next'
 import { PageHeader, Panel, Tag } from '@/components/ui-kit'
 import TenderQaPanel from '@/components/tenders/TenderQaPanel.vue'
 import { ApiError } from '@/lib/api'
@@ -17,8 +17,11 @@ import {
   fetchTenderRecords,
   inspectTenderQa,
   inspectTenderQaUpload,
+  reviewTenderQaItem,
+  fetchTenderSlots,
   type BidVolume,
   type QaReport,
+  type SlotStatus,
   type TenderRecordItem,
 } from '@/lib/tenders-api'
 import { fmtAgo } from '@/lib/time'
@@ -37,6 +40,9 @@ const selectedId = ref('')
 const qaReport = ref<QaReport | null>(null)
 const qaLoading = ref(false)
 const qaError = ref('')
+const materialSlots = ref<SlotStatus[]>([])
+const materialLoading = ref(false)
+const reviewingItem = ref('')
 const uploading = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const pickFile = ref<File | null>(null)
@@ -99,11 +105,25 @@ async function loadSaved(id: string) {
   }
 }
 
+async function loadMaterialSlots(invitationId: string) {
+  materialLoading.value = true
+  try {
+    materialSlots.value = invitationId
+      ? await fetchTenderSlots(undefined, invitationId)
+      : []
+  } catch {
+    materialSlots.value = []
+  } finally {
+    materialLoading.value = false
+  }
+}
+
 async function selectRecord(id: string, syncQuery = true) {
   selectedId.value = id
   pickFile.value = null
   qaError.value = ''
   const row = items.value.find((it) => it.id === id)
+  void loadMaterialSlots(row?.brief?.invitationId || '')
   if (row?.techDocxAvailable && !row.docxAvailable) volume.value = 'technical'
   else volume.value = 'business'
   if (syncQuery && String(route.query.record || '') !== id) {
@@ -161,6 +181,19 @@ async function runUpload() {
   }
 }
 
+async function reviewItem(itemId: string, status: 'confirmed' | 'rectified') {
+  if (!selectedId.value) return
+  reviewingItem.value = itemId
+  try {
+    await reviewTenderQaItem(selectedId.value, volume.value, itemId, { status })
+    await loadSaved(selectedId.value)
+  } catch (e) {
+    qaError.value = e instanceof ApiError || e instanceof Error ? e.message : '保存核验状态失败'
+  } finally {
+    reviewingItem.value = ''
+  }
+}
+
 function onPickFile(ev: Event) {
   const el = ev.target as HTMLInputElement
   const file = el.files?.[0] || null
@@ -201,10 +234,23 @@ watch(
 watch([selectedId, volume], ([id]) => {
   if (!id) {
     qaReport.value = null
+    materialSlots.value = []
     return
   }
   void loadSaved(id)
 })
+
+const expiringMaterials = computed(() => materialSlots.value.flatMap((slot) =>
+  (slot.files || [])
+    .filter((file) => file.expire_status === 'expired' || file.expire_status === 'expiring')
+    .map((file) => ({
+      slotTitle: slot.title,
+      name: file.name || file.fileName || '未命名资料',
+      status: file.expire_status,
+      expireAt: file.expire_at || '',
+      days: file.expire_days,
+    })),
+))
 </script>
 
 <template>
@@ -249,6 +295,13 @@ watch([selectedId, volume], ([id]) => {
             <div class="mt-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
               <span class="truncate">{{ it.tenderer || '—' }}</span>
               <Tag :tone="statusTone(it.status)">{{ statusLabel(it.status) }}</Tag>
+            </div>
+            <div v-if="it.qaSummary" class="mt-1 flex flex-wrap gap-1">
+              <Tag v-if="it.qaSummary.vetoRiskCount" tone="sulfur">否决 {{ it.qaSummary.vetoRiskCount }}</Tag>
+              <Tag v-if="it.qaSummary.scoreRiskCount || it.qaSummary.scorePendingCount" tone="iron">
+                评分待处理 {{ it.qaSummary.scoreRiskCount + it.qaSummary.scorePendingCount }}
+              </Tag>
+              <Tag v-if="it.qaSummary.attentionCount" tone="molybdenum">易漏 {{ it.qaSummary.attentionCount }}</Tag>
             </div>
           </button>
         </li>
@@ -343,6 +396,35 @@ watch([selectedId, volume], ([id]) => {
           <p v-if="qaError" class="mt-2 text-[11px] text-iron">{{ qaError }}</p>
         </Panel>
 
+        <Panel title="投标资料有效期提醒" subtitle="当前任务资料槽位中的已过期或临近到期资料">
+          <div v-if="materialLoading" class="flex items-center gap-2 py-2 text-[12px] text-muted-foreground">
+            <Loader2 class="size-3.5 animate-spin" />正在检查资料有效期…
+          </div>
+          <div v-else-if="!expiringMaterials.length" class="flex items-center gap-2 py-2 text-[12px] text-muted-foreground">
+            <span class="inline-flex size-5 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">✓</span>
+            暂未发现已过期或临近到期的已选资料
+          </div>
+          <ul v-else class="space-y-2">
+            <li
+              v-for="item in expiringMaterials"
+              :key="`${item.slotTitle}-${item.name}`"
+              class="flex items-start gap-2 rounded-md border px-3 py-2 text-[12px]"
+              :class="item.status === 'expired' ? 'border-red-500/40 bg-red-500/5' : 'border-orange-500/40 bg-orange-500/5'"
+            >
+              <AlertTriangle class="mt-0.5 size-3.5 shrink-0" :class="item.status === 'expired' ? 'text-red-600' : 'text-orange-500'" />
+              <div class="min-w-0 flex-1">
+                <div class="font-medium">{{ item.slotTitle }} · {{ item.name }}</div>
+                <div class="mt-0.5 text-muted-foreground">
+                  {{ item.status === 'expired' ? '已过期' : '临近到期' }} · 到期日 {{ item.expireAt || '未维护' }}
+                  <template v-if="item.days !== null && item.days !== undefined">
+                    · {{ item.days < 0 ? `已过期 ${-item.days} 天` : `剩余 ${item.days} 天` }}
+                  </template>
+                </div>
+              </div>
+            </li>
+          </ul>
+        </Panel>
+
         <TenderQaPanel
           page
           :title="volume === 'technical' ? 'AI评分 · 技术标' : 'AI评分 · 商务标'"
@@ -350,6 +432,10 @@ watch([selectedId, volume], ([id]) => {
           :report="qaReport"
           :loading="qaLoading"
           :error="qaError"
+          :record-id="selectedId"
+          :volume="volume"
+          :reviewing-item="reviewingItem"
+          @review="reviewItem"
         />
       </template>
     </div>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { fetchTenderQa, inspectTenderQa, type BidRequirement, type QaReport, type ScoringReview } from '@/lib/tenders-api'
+import { scoringRuleLabel } from '@/lib/scoring-labels'
 
 const props = defineProps<{
   recordId: string
@@ -18,7 +19,6 @@ let epoch = 0
 const scoring = computed(() => report.value?.stale ? props.scoringReview : report.value?.scoringReview || props.scoringReview)
 const scoringStale = computed(() => Boolean(report.value?.stale || (scoring.value && scoring.value.version !== 'scoring-review/2')))
 const pendingUnits = computed(() => (scoring.value?.units || []).filter(u => u.status === 'pending' || u.status === 'reference'))
-const ruleLabels: Record<string, string> = { fixed: '固定得分', tiered: '阶梯得分', range: '区间评价', deduction: '扣分', subjective: '主观评价', relative_price: '相对价格公式', weight: '权重', unknown: '类型待确认' }
 const scoreRows = computed(() => (scoring.value?.rows || []).filter(r => props.volume === 'full' || r.volume === 'both' || r.volume === props.volume).map(r => busy.value || scoringStale.value ? { ...r, status: 'indeterminate' as const, reason: '当前显示之前识别的条款，尚非本轮核对结果', bidEvidence: '', bidLocation: '' } : r))
 const scoreLabel = { conforming: '符合（需人工复核）', nonconforming: '不符合', partial: '部分符合', indeterminate: '待核实' }
 const scoreSummary = computed(() => {
@@ -100,7 +100,7 @@ watch(() => [props.recordId, props.file, props.volume], async () => {
       <p v-for="(warning, index) in scoring?.warnings || []" :key="`warning-${index}`" class="text-amber-700">{{ warning }}</p>
       <article v-for="row in scoreRows" :key="`score-${row.id}`" class="space-y-1 rounded border bg-background p-2">
         <p class="font-medium" :class="row.status === 'nonconforming' ? 'text-red-700' : row.status === 'conforming' ? 'text-green-700' : 'text-amber-700'">{{ row.title }} · {{ scoreLabel[row.status] }}<span v-if="row.maxScore != null"> · 最高 {{ row.maxScore }} 分</span></p>
-        <p v-if="row.ruleType" class="text-muted-foreground">规则类型：{{ ruleLabels[row.ruleType] || row.ruleType }}</p>
+        <p v-if="row.ruleType" class="text-muted-foreground">规则类型：{{ scoringRuleLabel(row.ruleType) }}</p>
         <p v-if="row.scopeLabels?.length" class="text-muted-foreground">原文适用范围：{{ row.scopeLabels.join('、') }}</p>
         <p v-if="row.applicability === 'unresolved'" class="text-amber-700">适用范围待确认，未与本次标段混合判定。</p>
         <p class="whitespace-pre-wrap">评分要求：{{ row.requirement }}</p>
