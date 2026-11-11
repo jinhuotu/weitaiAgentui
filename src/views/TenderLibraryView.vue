@@ -433,7 +433,7 @@ async function onReindex(force = false) {
     <label class="block text-sm">本次上传资料所属投标人（请核对）
       <input v-model="materialCompany" class="kb-input mt-2 w-full" placeholder="填写扫描件实际所属公司；不填写时需靠OCR或人工事实核验，不能自动用于组卷" />
     </label>
-    <Panel title="公司常备扫描件" :subtitle="hint || 'PDF / 图片，可多选；替换会覆盖该项全部文件'">
+    <Panel title="公司常备资料" :subtitle="hint || 'Word / Excel / PDF / 图片，可多选；替换会覆盖该项全部文件'">
       <p class="mb-4 text-[12px] text-muted-foreground">
         已维护
         <span class="text-foreground font-medium">{{ filledCount }}</span>
@@ -541,7 +541,7 @@ async function onReindex(force = false) {
         type="file"
         class="hidden"
         multiple
-        accept=".doc,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf,image/*"
+        accept=".doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf,image/*"
         @change="onFileChange"
       />
     </Panel>

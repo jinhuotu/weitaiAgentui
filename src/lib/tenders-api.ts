@@ -1011,6 +1011,28 @@ export async function fetchTenderLibraryFile(
   return apiFetchBlob(tenderLibraryFilePath(docId, { thumb: opts?.thumb }), { token: token() })
 }
 
+export async function fetchTenderLibraryTextPreview(
+  docId: string,
+): Promise<{ content: string; truncated: boolean }> {
+  try {
+    return await apiRequest(`/api/v1/tenders/materials/library-preview/${encodeURIComponent(docId)}`, {
+      token: token(),
+    })
+  } catch (primaryError) {
+    // Older API processes do not have the dedicated route yet and may treat
+    // "library-preview" as a material category. The knowledge preview route
+    // has the same extracted text contract, so use it as a compatibility path.
+    try {
+      return await apiRequest(
+        `/api/v1/knowledge/documents/${encodeURIComponent(docId)}/preview?baseId=tenderlib01`,
+        { token: token() },
+      )
+    } catch {
+      throw primaryError
+    }
+  }
+}
+
 export async function fetchTenderLibrary(): Promise<{
   slots: SlotStatus[]
   filledCount: number

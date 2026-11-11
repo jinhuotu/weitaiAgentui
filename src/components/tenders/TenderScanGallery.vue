@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import DocumentExpiry from '@/components/DocumentExpiry.vue'
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, FileText, FolderOpen, ImageIcon, Trash2, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, FileText, FolderOpen, ImageIcon, Loader2, Trash2, X } from 'lucide-vue-next'
 import { getApiBaseUrl } from '@/lib/api'
 import {
+  fetchTenderLibraryTextPreview,
   inferLibraryFileKind,
   resolveLibraryFileId,
   tenderLibraryFilePath,
@@ -76,6 +77,40 @@ const current = computed(() => {
   return previewable.value[i] ?? null
 })
 
+const textPreviewLoading = ref(false)
+const textPreviewError = ref('')
+const textPreview = ref<{ id: string; content: string; truncated: boolean }>({
+  id: '',
+  content: '',
+  truncated: false,
+})
+let textPreviewRequest = 0
+
+async function loadTextPreview(id: string) {
+  const request = ++textPreviewRequest
+  textPreviewLoading.value = false
+  textPreviewError.value = ''
+  textPreview.value = { id: '', content: '', truncated: false }
+  if (!id || !props.baseId) return
+  const item = previewable.value.find((entry) => entry.id === id)
+  if (!item || item.kind !== 'file') return
+  textPreviewLoading.value = true
+  try {
+    const data = await fetchTenderLibraryTextPreview(id)
+    if (request !== textPreviewRequest) return
+    textPreview.value = {
+      id,
+      content: String(data.content || '').trim(),
+      truncated: Boolean(data.truncated),
+    }
+  } catch (e) {
+    if (request !== textPreviewRequest) return
+    textPreviewError.value = e instanceof Error ? e.message : '正文预览加载失败'
+  } finally {
+    if (request === textPreviewRequest) textPreviewLoading.value = false
+  }
+}
+
 function fileUrl(id: string): string {
   return `${getApiBaseUrl()}${tenderLibraryFilePath(id, { withToken: true })}`
 }
@@ -105,6 +140,8 @@ function openItem(id: string) {
 
 function close() {
   openIndex.value = null
+  textPreviewRequest += 1
+  textPreviewLoading.value = false
 }
 
 function prev() {
@@ -140,6 +177,13 @@ watch(openIndex, (v, _, onCleanup) => {
   window.addEventListener('keydown', onKey)
   onCleanup(() => window.removeEventListener('keydown', onKey))
 })
+
+watch(
+  () => current.value?.id,
+  (id) => {
+    void loadTextPreview(id || '')
+  },
+)
 
 watch(
   () => props.files,
@@ -240,13 +284,13 @@ onUnmounted(() => {
     >
       <div
         class="flex w-full flex-col rounded-xl border border-border bg-card shadow-2xl"
-        :class="current.kind === 'pdf' ? 'max-w-6xl h-[90vh]' : 'max-w-5xl max-h-[92vh]'"
+        :class="current.kind === 'pdf' || current.kind === 'file' ? 'max-w-6xl h-[90vh]' : 'max-w-5xl max-h-[92vh]'"
       >
         <div class="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
           <div class="min-w-0 truncate text-[13px]">
             {{ current.file.performance?.projectName || current.file.name }}
             <span class="ml-2 text-[11px] text-muted-foreground">
-              {{ current.kind === 'pdf' ? 'PDF 文档' : current.kind === 'image' ? '图片' : '文件' }}
+              {{ current.kind === 'pdf' ? 'PDF 文档' : current.kind === 'image' ? '图片' : 'Office 文档' }}
               <template v-if="previewable.length > 1"> · {{ openIndex + 1 }} / {{ previewable.length }}</template>
             </span>
           </div>
@@ -294,8 +338,26 @@ onUnmounted(() => {
             :title="current.file.name"
             class="h-full min-h-[70vh] w-full border-0 bg-white"
           />
+          <div v-else-if="current.kind === 'file'" class="flex h-full w-full flex-col bg-white">
+            <div class="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-2 text-[11px] text-muted-foreground">
+              <span>已提取正文预览（原文件版式请下载查看）</span>
+              <span v-if="textPreview.truncated">内容较长，仅显示摘要</span>
+            </div>
+            <div v-if="textPreviewLoading" class="flex flex-1 items-center justify-center gap-2 text-[12px] text-muted-foreground">
+              <Loader2 class="size-4 animate-spin" />正在读取文档内容…
+            </div>
+            <div v-else-if="textPreviewError" class="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-[12px] text-muted-foreground">
+              <p>{{ textPreviewError }}</p>
+              <a v-if="current.id" :href="fileUrl(current.id)" class="underline" download>下载原件</a>
+            </div>
+            <pre v-else-if="textPreview.id === current.id && textPreview.content" class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 text-left text-[12px] leading-6 text-slate-800">{{ textPreview.content }}</pre>
+            <div v-else class="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-[12px] text-muted-foreground">
+              <p>暂未提取到可显示的正文。</p>
+              <a v-if="current.id" :href="fileUrl(current.id)" class="underline" download>下载原件</a>
+            </div>
+          </div>
           <p v-else class="px-6 py-10 text-center text-[12px] text-muted-foreground">
-            此文件可下载原件后查看和编辑。
+            暂不支持在线预览。
             <a v-if="current.id" :href="fileUrl(current.id)" class="ml-2 underline" download>下载原件</a>
           </p>
 
